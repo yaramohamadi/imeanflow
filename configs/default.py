@@ -22,6 +22,7 @@ def get_config():
     dataset.image_size = 32
     dataset.image_channels = 4
     dataset.num_classes = 1000
+    dataset.num_classes_from_data = False
     dataset.vae = "mse"
 
     # ------------------------------------------------------------
@@ -89,6 +90,7 @@ def get_config():
 
     # others
     config.load_from = ""
+    config.partial_load = False
     config.eval_only = False
 
     return config

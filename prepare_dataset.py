@@ -18,8 +18,11 @@ import os
 import jax
 from absl import app, flags
 
-# Initialize JAX distributed processing
-jax.distributed.initialize()
+
+def maybe_initialize_jax_distributed():
+    coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
+    if coordinator_address:
+        jax.distributed.initialize(coordinator_address=coordinator_address)
 
 from utils.data_util import compute_latent_dataset
 from utils.fid_util import compute_fid_stats
@@ -50,6 +53,8 @@ flags.DEFINE_boolean("overwrite", False, "Whether to overwrite existing files")
 def main(argv):
     """Main function."""
     del argv  # Unused
+
+    maybe_initialize_jax_distributed()
 
     # Setup logging
     logging.basicConfig(level=logging.INFO)

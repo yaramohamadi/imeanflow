@@ -1,8 +1,14 @@
 """Main file for running the ImageNet experiments."""
 
+import os
+
 import jax
 
-jax.distributed.initialize()
+
+def maybe_initialize_jax_distributed():
+    coordinator_address = os.environ.get("JAX_COORDINATOR_ADDRESS")
+    if coordinator_address:
+        jax.distributed.initialize(coordinator_address=coordinator_address)
 
 from absl import app, flags
 from ml_collections import config_flags
@@ -32,6 +38,8 @@ config_flags.DEFINE_config_file(
 def main(argv):
     if len(argv) > 1:
         raise app.UsageError("Too many command-line arguments.")
+
+    maybe_initialize_jax_distributed()
 
     log_for_0("JAX process: %d / %d", jax.process_index(), jax.process_count())
     log_for_0("JAX local devices: %r", jax.local_devices())

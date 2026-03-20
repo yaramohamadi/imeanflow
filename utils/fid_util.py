@@ -141,13 +141,16 @@ def compute_stats(
     np_feats = jnp.concatenate(l_feats)
     np_feats = np_feats[:num_samples]
 
-    np_feats = np_feats.reshape((-1, LDC, np_feats.shape[-1]))
-    np_feats = np_feats.transpose((1, 0, 2))  # (LDC, N//LDC, feat_dim)
-    all_feats = multihost_utils.process_allgather(np_feats)
-    all_feats = all_feats.reshape((-1, ) + all_feats.shape[2:])
-    all_feats = all_feats.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, feat_dim)
-    all_feats = all_feats.reshape(-1, all_feats.shape[-1])
-    all_feats = jax.device_get(all_feats)
+    if jax.process_count() == 1:
+        all_feats = jax.device_get(np_feats)
+    else:
+        np_feats = np_feats.reshape((-1, LDC, np_feats.shape[-1]))
+        np_feats = np_feats.transpose((1, 0, 2))  # (LDC, N//LDC, feat_dim)
+        all_feats = multihost_utils.process_allgather(np_feats)
+        all_feats = all_feats.reshape((-1,) + all_feats.shape[2:])
+        all_feats = all_feats.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, feat_dim)
+        all_feats = all_feats.reshape(-1, all_feats.shape[-1])
+        all_feats = jax.device_get(all_feats)
 
     log_for_0(
         f"FID final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
@@ -163,13 +166,16 @@ def compute_stats(
     np_logits = jnp.concatenate(l_logits)
     np_logits = np_logits[:num_samples]
 
-    np_logits = np_logits.reshape((-1, LDC, np_logits.shape[-1]))
-    np_logits = np_logits.transpose((1, 0, 2))  # (LDC, N//LDC, num_classes)
-    all_logits = multihost_utils.process_allgather(np_logits)
-    all_logits = all_logits.reshape((-1, ) + all_logits.shape[2:])
-    all_logits = all_logits.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, num_classes)
-    all_logits = all_logits.reshape(-1, all_logits.shape[-1])
-    all_logits = jax.device_get(all_logits)
+    if jax.process_count() == 1:
+        all_logits = jax.device_get(np_logits)
+    else:
+        np_logits = np_logits.reshape((-1, LDC, np_logits.shape[-1]))
+        np_logits = np_logits.transpose((1, 0, 2))  # (LDC, N//LDC, num_classes)
+        all_logits = multihost_utils.process_allgather(np_logits)
+        all_logits = all_logits.reshape((-1,) + all_logits.shape[2:])
+        all_logits = all_logits.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, num_classes)
+        all_logits = all_logits.reshape(-1, all_logits.shape[-1])
+        all_logits = jax.device_get(all_logits)
     all_logits = all_logits[:fid_samples]
 
     result["logits"] = all_logits
@@ -369,9 +375,8 @@ def compute_batch_features(batch_images, inception_net, batch_size):
     else:
         x_padded = x
 
-    # Extract Inception features
+    # pooled_features already has shape [B, 2048]
     pred, _, _ = inception_fn(inception_params, jax.lax.stop_gradient(x_padded))
-    pred = pred.squeeze(axis=1).squeeze(axis=1)
 
     # Return only the features for actual samples (remove padding)
     pred = pred[:actual_batch_size]

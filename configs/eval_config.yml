@@ -5,8 +5,7 @@ fid:
     device_batch_size: 80
     num_samples: 50000
     
-    cache_ref: FID_CACHE_REF
-
+    cache_ref: /home/ens/AT74470/imeanflow/files/fid_stats/imagenet_256_fid_stats.npz
 sampling:
     # CFG scale and interval recommended for provided iMF-B/2 checkpoint
     # You can add more omega and intervals to do a grid search
@@ -22,11 +21,9 @@ sampling:
 
 logging:
     use_wandb: False # set to True to use wandb
-    wandb_project: 'YOUR PROJECT' # change to your wandb project
-    wandb_entity: 'YOUR ENTITY' # paste your wandb entity here
+    wandb_project: 'imfa_init' # change to your wandb project
+    wandb_entity: 'yara-mohammadi-bahram-1-ecole-superieure-de-technologie' # paste your wandb entity here
     wandb_tags: # use your own tags
-        - 'YOUR TAGS'
-    wandb_notes: 'YOUR NOTES' # your wandb notes
 
-load_from: '' # path to load checkpoint
+load_from: '/home/ens/AT74470/imeanflow/files/weights/iMF-B-2' # path to load checkpoint
 eval_only: True # set to True for evaluation only

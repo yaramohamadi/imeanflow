@@ -5,6 +5,8 @@ Training and evaluation for improved MeanFlow.
 import jax
 import jax.numpy as jnp
 import ml_collections
+import os
+import torch
 from flax import jax_utils
 from jax import lax, random
 from functools import partial
@@ -13,7 +15,7 @@ from optax._src.alias import *
 from imf import iMeanFlow, generate
 
 import utils.input_pipeline as input_pipeline
-from utils.ckpt_util import save_checkpoint, restore_checkpoint
+from utils.ckpt_util import save_checkpoint, restore_checkpoint, restore_partial_checkpoint
 from utils.ema_util import ema_schedules, update_ema
 from utils.logging_util import MetricsTracker, Timer, log_for_0, Writer
 from utils.vae_util import LatentManager
@@ -94,6 +96,30 @@ def sample_step(variable, sample_idx, model, rng_init, device_batch_size,
     return images
 
 
+def infer_num_classes_from_latents(dataset_root):
+    train_root = os.path.join(dataset_root, "train")
+    if not os.path.isdir(train_root):
+        raise ValueError(f"Latent train directory not found: {train_root}")
+
+    max_label = -1
+    num_files = 0
+    for filename in os.listdir(train_root):
+        if not filename.endswith(".pt"):
+            continue
+        sample = torch.load(
+            os.path.join(train_root, filename),
+            map_location="cpu",
+            weights_only=False,
+        )
+        max_label = max(max_label, int(sample["label"]))
+        num_files += 1
+
+    if num_files == 0:
+        raise ValueError(f"No latent .pt files found under: {train_root}")
+
+    return max_label + 1
+
+
 #######################################################
 #                       Main                          #
 #######################################################
@@ -102,6 +128,13 @@ def sample_step(variable, sample_idx, model, rng_init, device_batch_size,
 def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState:
     ########### Initialize ###########
     writer = Writer(config, workdir)
+
+    if config.dataset.get("num_classes_from_data", False):
+        inferred_num_classes = infer_num_classes_from_latents(config.dataset.root)
+        config.dataset.num_classes = inferred_num_classes
+        config.model.num_classes = inferred_num_classes
+        config.sampling.num_classes = inferred_num_classes
+        log_for_0("Inferred dataset.num_classes from latent data: {}".format(inferred_num_classes))
 
     rng = random.key(config.training.seed)
     image_size = config.dataset.image_size
@@ -130,7 +163,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     state = create_train_state(rng, config, model, image_size, lr_fn)
 
     if config.load_from != "":
-        state = restore_checkpoint(state, config.load_from)
+        if config.get("partial_load", False):
+            state = restore_partial_checkpoint(state, config.load_from)
+        else:
+            state = restore_checkpoint(state, config.load_from)
 
     step = int(state.step)
     epoch_offset = step // steps_per_epoch
