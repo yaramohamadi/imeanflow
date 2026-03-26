@@ -1,0 +1,39 @@
+dataset:
+    num_classes: 101
+    num_classes_from_data: True
+
+model:
+    model_str: imfDiT_XL_2
+    num_classes: 101
+    cfg_beta: 1.0
+
+training:
+    use_ema: False
+
+fid:
+    device_batch_size: 32
+    num_samples: 50000
+    cache_ref: '/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
+
+fd_dino:
+    arch: vitb14
+    model_name: ''
+    cache_ref: '/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz'
+
+sampling:
+    num_steps: 1
+    interval:
+        - [0.4, 0.65]
+    omegas: [7.5]
+
+logging:
+    use_wandb: True
+    wandb_project: 'imfa_init'
+    wandb_entity: 'yara-mohammadi-bahram-1-ecole-superieure-de-technologie'
+    wandb_tags:
+        - caltech101
+        - eval
+    wandb_notes: 'Caltech-101 iMF evaluation'
+
+load_from: '/home/ens/AT74470/imeanflow/files/weights/iMF-XL-2-full'
+eval_only: True

@@ -6,6 +6,13 @@ fid:
     num_samples: 50000
     
     cache_ref: /home/ens/AT74470/imeanflow/files/fid_stats/imagenet_256_fid_stats.npz
+
+fd_dino:
+    arch: vitb14
+    model_name: ''
+    # Set this to a file in files/fdd_stats to enable FD-DINO logging during eval.
+    cache_ref: ''
+
 sampling:
     # CFG scale and interval recommended for provided iMF-B/2 checkpoint
     # You can add more omega and intervals to do a grid search

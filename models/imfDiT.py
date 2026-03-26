@@ -145,6 +145,7 @@ class imfDiT(nn.Module):
     num_heads: int = 12
     mlp_ratio: float = 8 / 3
     num_classes: int = 1000
+    use_null_class: bool = True
 
     aux_head_depth: int = 8
 
@@ -189,7 +190,11 @@ class imfDiT(nn.Module):
         self.omega_embedder = TimestepEmbedder(**embed_kwargs)
         self.cfg_t_start_embedder = TimestepEmbedder(**embed_kwargs)
         self.cfg_t_end_embedder = TimestepEmbedder(**embed_kwargs)
-        self.y_embedder = LabelEmbedder(self.num_classes, **embed_kwargs)
+        self.y_embedder = LabelEmbedder(
+            self.num_classes,
+            use_null_class=self.use_null_class,
+            **embed_kwargs,
+        )
 
         token_initializer = nn.initializers.normal(
             stddev=self.token_init_constant / math.sqrt(self.hidden_size)

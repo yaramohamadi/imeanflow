@@ -66,6 +66,10 @@ class iMeanFlow(nn.Module):
     data_proportion: float = 0.5
     cfg_beta: float = 1.0
     class_dropout_prob: float = 0.1
+    use_dogfit: bool = False
+    target_use_null_class: bool = True
+    source_prediction_space: str = "v"
+    source_num_classes: int = 1000
 
     # Training dynamics
     norm_p: float = 1.0
@@ -80,8 +84,18 @@ class iMeanFlow(nn.Module):
         """
         net_fn = getattr(imfDiT, self.model_str)
         self.net: imfDiT.imfDiT = net_fn(
-            name="net", num_classes=self.num_classes, eval=self.eval
+            name="net",
+            num_classes=self.num_classes,
+            use_null_class=self.target_use_null_class,
+            eval=self.eval,
         )
+        if self.use_dogfit:
+            self.source_net: imfDiT.imfDiT = net_fn(
+                name="source_net",
+                num_classes=self.source_num_classes,
+                use_null_class=True,
+                eval=True,
+            )
 
     #######################################################
     #                       Solver                        #
@@ -260,6 +274,42 @@ class iMeanFlow(nn.Module):
 
         return v_c, v_u
 
+    def source_v_cond_fn(self, source_params, x, t, omega, y):
+        """
+        Compute a source-model velocity prediction from a frozen source model.
+
+        The interface is intentionally velocity-based so other source families can
+        later be adapted behind the same abstraction.
+        """
+        if source_params is None:
+            raise ValueError("source_params must be provided when use_dogfit=True.")
+        if self.source_prediction_space != "v":
+            raise NotImplementedError(
+                f"Unsupported source_prediction_space: {self.source_prediction_space}"
+            )
+
+        h = jnp.zeros_like(t)
+        t_min = jnp.zeros_like(t)
+        t_max = jnp.ones_like(t)
+        bz = x.shape[0]
+        _, v = self.source_net.apply(
+            {"params": source_params["net"]},
+            x,
+            t.reshape(bz),
+            h.reshape(bz),
+            omega.reshape(bz),
+            t_min.reshape(bz),
+            t_max.reshape(bz),
+            y,
+        )
+        return v
+
+    def source_v_uncond_fn(self, source_params, x, t):
+        bz = x.shape[0]
+        y_null = jnp.full((bz,), self.source_num_classes, dtype=jnp.int32)
+        omega = jnp.ones_like(t)
+        return self.source_v_cond_fn(source_params, x, t, omega, y_null)
+
     def cond_drop(self, v_t, v_g, labels):
         """
         Drop class labels with a certain probability for CFG.
@@ -274,6 +324,9 @@ class iMeanFlow(nn.Module):
             v_g: Modified guided instantaneous velocity at time t. For samples
                  with dropped labels, v_g = v_t.
         """
+        if (not self.target_use_null_class) or self.class_dropout_prob <= 0:
+            return labels, v_g
+
         bz = v_t.shape[0]
 
         rand_mask = (
@@ -292,7 +345,7 @@ class iMeanFlow(nn.Module):
 
         return labels, v_g
 
-    def guidance_fn(self, v_t, z_t, t, r, y, fm_mask, w, t_min, t_max):
+    def guidance_fn(self, v_t, z_t, t, r, y, fm_mask, w, t_min, t_max, source_params=None):
         """
         Compute the guided velocity v_g using classifier-free guidance.
 
@@ -310,14 +363,19 @@ class iMeanFlow(nn.Module):
             v_c: Conditioned instantaneous velocity at time t, for jvp computation.
         """
 
-        # compute CFG target
-        v_c, v_u = self.v_fn(z_t, t, w, y=y)
-        v_g_fm = v_t + (1 - 1 / w) * (v_c - v_u)
+        base_w = w
+        ones = jnp.ones_like(base_w)
+        v_c = self.v_cond_fn(z_t, t, ones, y=y)
+        if self.use_dogfit:
+            v_anchor_u = self.source_v_uncond_fn(source_params, z_t, t)
+        else:
+            _, v_anchor_u = self.v_fn(z_t, t, base_w, y=y)
 
-        w = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
+        v_g_fm = v_t + (1 - 1 / base_w) * (v_c - v_anchor_u)
 
-        v_c = self.v_cond_fn(z_t, t, w, y=y)
-        v_g = v_t + (1 - 1 / w) * (v_c - v_u)
+        w = jnp.where((t >= t_min) & (t <= t_max), base_w, 1.0)
+
+        v_g = v_t + (1 - 1 / w) * (v_c - v_anchor_u)
 
         # For flow matching samples, there is no CFG interval
         v_g = jnp.where(fm_mask, v_g_fm, v_g) 
@@ -328,7 +386,7 @@ class iMeanFlow(nn.Module):
     #               Forward Pass and Loss                 #
     #######################################################
 
-    def forward(self, images, labels):
+    def forward(self, images, labels, source_params=None):
         """
         Forward process of improved MeanFlow and compute loss.
 
@@ -356,7 +414,7 @@ class iMeanFlow(nn.Module):
 
         # Compute guided velocity v_g and conditioned velocity v_c
         v_g, v_c = self.guidance_fn(
-            v_t, z_t, t, r, labels, fm_mask, omega, t_min, t_max
+            v_t, z_t, t, r, labels, fm_mask, omega, t_min, t_max, source_params=source_params
         )
 
         # Cond dropout (dropout class labels)

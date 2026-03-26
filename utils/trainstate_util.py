@@ -44,6 +44,9 @@ def initialized(key, image_size, model):
 
 class TrainState(train_state.TrainState):
     ema_params: Any
+    source_params: Any
+    grad_accum: Any
+    grad_accum_step: Any
 
 
 def create_train_state(
@@ -60,6 +63,9 @@ def create_train_state(
     _, params = initialized(rng_init, image_size, model)
     ema_params = deepcopy(params)
     ema_params = update_ema(ema_params, params, 0)
+    source_params = deepcopy(params)
+    grad_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
+    grad_accum_step = jnp.array(0, dtype=jnp.int32)
     print_params(params["net"])
 
     tx = optax.adamw(
@@ -71,6 +77,9 @@ def create_train_state(
         apply_fn=partial(model.apply, method=model.forward),
         params=params,
         ema_params=ema_params,
+        source_params=source_params,
+        grad_accum=grad_accum,
+        grad_accum_step=grad_accum_step,
         tx=tx,
     )
     return state

@@ -3,6 +3,7 @@ from jax import random
 import jax.numpy as jnp
 import numpy as np
 from functools import partial
+from utils import dino_util
 from utils import fid_util
 from utils.logging_util import log_for_0
 
@@ -33,13 +34,14 @@ def run_p_sample_step(
 
 
 def generate_fid_samples(
-    state, config, p_sample_step, run_p_sample_step, ema=True, **kwargs
+    state, config, p_sample_step, run_p_sample_step, ema=True, num_samples=None, **kwargs
 ):
     """
-    Generate samples for FID evaluation.
+    Generate samples for FID evaluation or preview logging.
     """
+    target_num_samples = config.fid.num_samples if num_samples is None else num_samples
     num_steps = np.ceil(
-        config.fid.num_samples / config.fid.device_batch_size / jax.device_count()
+        target_num_samples / config.fid.device_batch_size / jax.device_count()
     ).astype(int)
 
     samples_all = []
@@ -59,56 +61,146 @@ def generate_fid_samples(
 
     samples_all = np.concatenate(samples_all, axis=0)
 
-    return samples_all
+    return samples_all[:target_num_samples]
+
+
+def _get_eval_descriptor(kwargs, mode_str):
+    omega = kwargs.get("omega", None)[0]
+    t_min = kwargs.get("t_min", None)[0]
+    t_max = kwargs.get("t_max", None)[0]
+    descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
+    return descriptor, omega, t_min, t_max
+
+
+def get_image_metric_evaluator(config, writer, latent_manager):
+    """
+    Create a single evaluator that logs FID, Inception Score, and optionally FD-DINO.
+    """
+    inception_batch_size = config.fid.device_batch_size * jax.local_device_count()
+    inception_net = fid_util.build_jax_inception(batch_size=inception_batch_size)
+    fid_stats_ref = fid_util.get_reference(config.fid.cache_ref)
+
+    fd_dino_config = config.get("fd_dino", None)
+    fd_dino_enabled = bool(fd_dino_config and fd_dino_config.get("cache_ref", ""))
+    dino_net = None
+    fd_dino_stats_ref = None
+    if fd_dino_enabled:
+        dino_net = dino_util.build_jax_dinov2(
+            arch=fd_dino_config.get("arch", "vitb14"),
+            model_name=fd_dino_config.get("model_name", None),
+            batch_size=config.fid.device_batch_size * jax.device_count(),
+        )
+        fd_dino_stats_ref = fid_util.get_reference(fd_dino_config.cache_ref)
+
+    run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
+    use_ema = config.training.get("use_ema", True)
+
+    def _evaluate_one_mode(state, p_sample_step, ema, **kwargs):
+        samples_all = generate_fid_samples(
+            state, config, p_sample_step, run_p_sample_step_inner, ema, **kwargs
+        )
+
+        fid_stats = fid_util.compute_stats(
+            samples_all,
+            inception_net,
+            batch_size=config.fid.device_batch_size,
+            fid_samples=config.fid.num_samples,
+        )
+        metric = {}
+        result = {}
+
+        mode_str = "ema" if ema else "online"
+        descriptor, omega, t_min, t_max = _get_eval_descriptor(kwargs, mode_str)
+        log_for_0(
+            f"Computing image metrics at omega={omega:.2f}, t_min={t_min:.2f}, "
+            f"t_max={t_max:.2f}, mode={mode_str}..."
+        )
+
+        fid = fid_util.compute_fid(
+            fid_stats_ref["mu"],
+            fid_stats["mu"],
+            fid_stats_ref["sigma"],
+            fid_stats["sigma"],
+        )
+        is_score, _ = fid_util.compute_inception_score(fid_stats["logits"])
+
+        metric[f"FID_{descriptor}"] = fid
+        metric[f"IS_{descriptor}"] = is_score
+        result["fid"] = fid
+        result["is"] = is_score
+
+        if fd_dino_enabled:
+            dino_stats = fid_util.compute_dinov2_stats(
+                samples_all,
+                dino_net,
+                batch_size=config.fid.device_batch_size,
+                fid_samples=config.fid.num_samples,
+            )
+            fd_dino = fid_util.compute_fid(
+                fd_dino_stats_ref["mu"],
+                dino_stats["mu"],
+                fd_dino_stats_ref["sigma"],
+                dino_stats["sigma"],
+            )
+            metric[f"FD_DINO_{descriptor}"] = fd_dino
+            result["fd_dino"] = fd_dino
+
+        return metric, result
+
+    def evaluator(state, p_sample_step, step, ema_only=False, **kwargs):
+        metric_dict = {}
+        primary_result = None
+        if use_ema:
+            metric, primary_result = _evaluate_one_mode(
+                state, p_sample_step, True, **kwargs
+            )
+            metric_dict.update(metric)
+            if not ema_only:
+                metric, _ = _evaluate_one_mode(
+                    state, p_sample_step, False, **kwargs
+                )
+                metric_dict.update(metric)
+        else:
+            metric, primary_result = _evaluate_one_mode(
+                state, p_sample_step, False, **kwargs
+            )
+            metric_dict.update(metric)
+
+        writer.write_scalars(step + 1, metric_dict)
+        return primary_result
+
+    return evaluator
 
 
 def get_fid_evaluator(config, writer, latent_manager):
     """
-    Create FID evaluator function.
+    Backward-compatible wrapper that returns FID and IS.
     """
-    inception_net = fid_util.build_jax_inception()
-    stats_ref = fid_util.get_reference(config.fid.cache_ref)
-    run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
-
-    def _evaluate_one_mode(state, p_sample_step, ema, **kwargs):
-        # 1) Sampling
-        samples_all = generate_fid_samples(
-            state, config, p_sample_step, run_p_sample_step_inner, ema, **kwargs
-        )
-        # 2) Stats
-        stats = fid_util.compute_stats(samples_all, inception_net)
-        # 3) Metrics
-        metric = {}
-
-        mode_str = "ema" if ema else "online"
-
-        omega = kwargs.get("omega", None)[0]
-        t_min = kwargs.get("t_min", None)[0]
-        t_max = kwargs.get("t_max", None)[0]
-        log_for_0(
-            f"Computing FID and Inception Score at omega={omega:.2f}, t_min={t_min:.2f}, t_max={t_max:.2f}, mode={mode_str}..."
-        )
-        descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
-
-        fid = fid_util.compute_fid(
-            stats_ref["mu"], stats["mu"], stats_ref["sigma"], stats["sigma"]
-        )
-        is_score, _ = fid_util.compute_inception_score(stats["logits"])
-
-        metric[f"FID_{descriptor}"] = fid
-        metric[f"IS_{descriptor}"] = is_score
-
-        return metric, fid, is_score
+    metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
 
     def evaluator(state, p_sample_step, step, ema_only=False, **kwargs):
-        metric_dict = {}
-        metric, fid, is_score = _evaluate_one_mode(state, p_sample_step, True, **kwargs)
-        metric_dict.update(metric)
-        if not ema_only:
-            metric, _, _ = _evaluate_one_mode(state, p_sample_step, False, **kwargs)
-            metric_dict.update(metric)
+        result = metric_evaluator(
+            state, p_sample_step, step, ema_only=ema_only, **kwargs
+        )
+        return result["fid"], result["is"]
 
-        writer.write_scalars(step + 1, metric_dict)
-        return fid, is_score
+    return evaluator
+
+
+def get_fd_dino_evaluator(config, writer, latent_manager):
+    """
+    Backward-compatible wrapper that returns only FD-DINO.
+    """
+    fd_dino_config = config.get("fd_dino", None)
+    if fd_dino_config is None or not fd_dino_config.get("cache_ref", ""):
+        raise ValueError("config.fd_dino.cache_ref must be set to use FD-DINO evaluation.")
+
+    metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
+
+    def evaluator(state, p_sample_step, step, ema_only=False, **kwargs):
+        result = metric_evaluator(
+            state, p_sample_step, step, ema_only=ema_only, **kwargs
+        )
+        return result["fd_dino"]
 
     return evaluator

@@ -31,13 +31,18 @@ def get_config():
 
     training.learning_rate = 0.0001
     training.batch_size = 256
+    training.use_ema = True
 
     training.num_epochs = 1000
 
     training.log_per_step = 100
-    training.sample_per_epoch = 10
+    training.sample_per_step = 1000
     training.checkpoint_per_epoch = 10
-    training.fid_per_epoch = 10
+    training.fid_per_step = 1000
+    training.grad_accum_steps = 1
+    training.save_best_fid_only = False
+    training.best_fid_checkpoint_dir = "best_fid"
+    training.capture_source_from_load = False
     training.half_precision = False
 
     training.seed = 42
@@ -61,6 +66,10 @@ def get_config():
     model.data_proportion = 0.5
     model.cfg_beta = 1.0
     model.class_dropout_prob = 0.1
+    model.use_dogfit = False
+    model.target_use_null_class = True
+    model.source_prediction_space = "v"
+    model.source_num_classes = dataset.num_classes
 
     # Training Dynamics
     model.norm_p = 1.0
@@ -78,6 +87,12 @@ def get_config():
     fid.num_samples = 50000
     fid.device_batch_size = 128
     fid.cache_ref = "FID_CACHE_REF"
+    fid.num_images_to_log = 100
+
+    config.fd_dino = fd_dino = ml_collections.ConfigDict()
+    fd_dino.arch = "vitb14"
+    fd_dino.model_name = ""
+    fd_dino.cache_ref = ""
 
     # ------------------------------------------------------------
     # Logging

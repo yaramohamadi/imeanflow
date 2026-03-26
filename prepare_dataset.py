@@ -25,7 +25,7 @@ def maybe_initialize_jax_distributed():
         jax.distributed.initialize(coordinator_address=coordinator_address)
 
 from utils.data_util import compute_latent_dataset
-from utils.fid_util import compute_fid_stats
+from utils.fid_util import compute_fd_dino_stats, compute_fid_stats
 from utils.logging_util import log_for_0
 
 FLAGS = flags.FLAGS
@@ -47,6 +47,13 @@ flags.DEFINE_boolean(
     "compute_latent", True, "Whether to compute and save latent dataset"
 )
 flags.DEFINE_boolean("compute_fid", True, "Whether to compute FID statistics")
+flags.DEFINE_boolean("compute_fd_dino", False, "Whether to compute FD-DINO statistics")
+flags.DEFINE_string("fd_dino_arch", "vitb14", "DINOv2 architecture for FD-DINO stats")
+flags.DEFINE_string(
+    "fd_dino_model_name",
+    None,
+    "Optional Hugging Face model id to override the default DINOv2 checkpoint",
+)
 flags.DEFINE_boolean("overwrite", False, "Whether to overwrite existing files")
 
 
@@ -68,9 +75,9 @@ def main(argv):
     log_for_0(f"Output directory: {FLAGS.output_dir}")
 
     # Validate that at least one computation is requested
-    if not FLAGS.compute_latent and not FLAGS.compute_fid:
+    if not FLAGS.compute_latent and not FLAGS.compute_fid and not FLAGS.compute_fd_dino:
         raise ValueError(
-            "At least one of --compute_latent or --compute_fid must be True"
+            "At least one of --compute_latent, --compute_fid, or --compute_fd_dino must be True"
         )
 
     # Validate batch size compatibility with JAX distributed setup
@@ -121,6 +128,25 @@ def main(argv):
         log_for_0(f"FID statistics computed and saved to: {fid_stats_path}")
     else:
         log_for_0("Skipping FID statistics computation")
+
+    if FLAGS.compute_fd_dino:
+        log_for_0("=" * 50)
+        log_for_0("COMPUTING FD-DINO STATISTICS")
+        log_for_0("=" * 50)
+
+        fd_dino_stats_path = compute_fd_dino_stats(
+            imagenet_root=FLAGS.imagenet_root,
+            output_dir=FLAGS.output_dir,
+            image_size=FLAGS.image_size,
+            batch_size=FLAGS.batch_size,
+            overwrite=FLAGS.overwrite,
+            arch=FLAGS.fd_dino_arch,
+            model_name=FLAGS.fd_dino_model_name,
+        )
+
+        log_for_0(f"FD-DINO statistics computed and saved to: {fd_dino_stats_path}")
+    else:
+        log_for_0("Skipping FD-DINO statistics computation")
 
     log_for_0("=" * 50)
     log_for_0("COMPUTATION COMPLETED SUCCESSFULLY")

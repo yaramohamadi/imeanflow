@@ -1,18 +1,22 @@
 #!/bin/bash
 
-# Note: You should also update the dataset.root and fid.cache_ref in configs/train_config.yml
+# Usage:
+#   CONFIG_MODE=train bash scripts/train.sh JOB_NAME
+#   CONFIG_MODE=caltech_finetune bash scripts/train.sh JOB_NAME
 export DATA_ROOT="YOUR_OUTPUT_DIR_FROM_DATA_PREPARATION"
-export LOG_DIR="YOUR_LOG_DIR"
+export LOG_DIR="${LOG_DIR:-files/logs}"
+export CONFIG_MODE="${CONFIG_MODE:-train}"
+export DATASET_NAME="${DATASET_NAME:-${CONFIG_MODE%_finetune}}"
+export RUN_LABEL="${1:-run}"
 
 export now=`date '+%Y%m%d_%H%M%S'`
 export salt=`head /dev/urandom | tr -dc a-z0-9 | head -c6`
-export JOBNAME=${now}_${salt}_$1
-export LOG_DIR=$LOG_DIR/$USER/$JOBNAME
+export JOBNAME=${DATASET_NAME}_${RUN_LABEL}_${now}_${salt}
+export LOG_DIR=$LOG_DIR/finetuning/$JOBNAME
 
-sudo mkdir -p ${LOG_DIR}
-sudo chmod 777 -R ${LOG_DIR}
+mkdir -p "${LOG_DIR}"
 
 python3 main.py \
-    --workdir=${LOG_DIR} \
-    --config=configs/load_config.py:train \
-    2>&1 | tee -a $LOG_DIR/output.log
+    --workdir="${LOG_DIR}" \
+    --config=configs/load_config.py:${CONFIG_MODE} \
+    2>&1 | stdbuf -oL grep -a -v -E '(\+ptx[0-9]+|recognized feature for this target|ignoring feature)' | tee -a "${LOG_DIR}/output.log"

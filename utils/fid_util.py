@@ -9,6 +9,7 @@ from jax.experimental import multihost_utils
 from tqdm import tqdm
 from absl import logging
 
+from . import dino_util
 from .jax_fid import inception, resize
 from .logging_util import log_for_0
 
@@ -102,6 +103,26 @@ def revert_pmap_shape(x):
     return x.reshape((-1, *x.shape[2:]))
 
 
+def _gather_feature_matrix(features):
+    if jax.process_count() == 1:
+        return jax.device_get(features)
+
+    features = features.reshape((-1, LDC, features.shape[-1]))
+    features = features.transpose((1, 0, 2))  # (LDC, N//LDC, feat_dim)
+    all_features = multihost_utils.process_allgather(features)
+    all_features = all_features.reshape((-1,) + all_features.shape[2:])
+    all_features = all_features.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, feat_dim)
+    all_features = all_features.reshape(-1, all_features.shape[-1])
+    return jax.device_get(all_features)
+
+
+def _compute_gaussian_stats(features):
+    features_64 = features.astype(np.float64)
+    mu = np.mean(features_64, axis=0)
+    sigma = np.cov(features_64, rowvar=False)
+    return {"mu": mu, "sigma": sigma}
+
+
 def compute_stats(
     samples,
     inception_net,
@@ -140,28 +161,13 @@ def compute_stats(
     # Process pooled features
     np_feats = jnp.concatenate(l_feats)
     np_feats = np_feats[:num_samples]
-
-    if jax.process_count() == 1:
-        all_feats = jax.device_get(np_feats)
-    else:
-        np_feats = np_feats.reshape((-1, LDC, np_feats.shape[-1]))
-        np_feats = np_feats.transpose((1, 0, 2))  # (LDC, N//LDC, feat_dim)
-        all_feats = multihost_utils.process_allgather(np_feats)
-        all_feats = all_feats.reshape((-1,) + all_feats.shape[2:])
-        all_feats = all_feats.transpose((1, 0, 2))  # (N//LDC, num_hosts*LDC, feat_dim)
-        all_feats = all_feats.reshape(-1, all_feats.shape[-1])
-        all_feats = jax.device_get(all_feats)
+    all_feats = _gather_feature_matrix(np_feats)
 
     log_for_0(
         f"FID final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
     )
     all_feats = all_feats[:fid_samples]
-    # Convert to float64 for higher precision FID computation
-    all_feats_64 = all_feats.astype(np.float64)
-    mu = np.mean(all_feats_64, axis=0)
-    sigma = np.cov(all_feats_64, rowvar=False)
-
-    result = {"mu": mu, "sigma": sigma}
+    result = _compute_gaussian_stats(all_feats)
 
     np_logits = jnp.concatenate(l_logits)
     np_logits = np_logits[:num_samples]
@@ -181,6 +187,37 @@ def compute_stats(
     result["logits"] = all_logits
 
     return result
+
+
+def compute_dinov2_stats(
+    samples,
+    dino_net,
+    batch_size=200,
+    fid_samples=50000,
+):
+    num_samples = len(samples)
+    full_batch_size = batch_size * LDC
+    pad = int(np.ceil(num_samples / full_batch_size)) * full_batch_size - num_samples
+    samples = np.concatenate(
+        [samples, np.zeros((pad, *samples.shape[1:]), dtype=np.uint8)]
+    )
+    assert len(samples) % full_batch_size == 0
+
+    l_feats = []
+    for i in range(0, len(samples), full_batch_size):
+        batch_images = samples[i : i + full_batch_size]
+        log_for_0(f"Evaluating DINOv2 {i} / {len(samples)}: {list(batch_images.shape)}")
+        l_feats.append(dino_util.compute_dinov2_features(batch_images, dino_net))
+
+    np_feats = jnp.concatenate(l_feats)
+    np_feats = np_feats[:num_samples]
+    all_feats = _gather_feature_matrix(np_feats)
+
+    log_for_0(
+        f"FD-DINO final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
+    )
+    all_feats = all_feats[:fid_samples]
+    return _compute_gaussian_stats(all_feats)
 
 
 def compute_inception_score(logits, splits=10):
@@ -349,6 +386,96 @@ def compute_fid_stats(
     log_for_0(f"FID statistics saved to {fid_stats_path}")
 
     return fid_stats_path
+
+
+def compute_fd_dino_stats(
+    imagenet_root,
+    output_dir,
+    image_size,
+    batch_size=200,
+    overwrite=False,
+    arch="vitb14",
+    model_name=None,
+):
+    from utils.data_util import create_imagenet_dataloader
+
+    log_for_0("Starting FD-DINO statistics computation...")
+    fd_dino_stats_path = os.path.join(
+        output_dir, f"imagenet_{image_size}_fd_dino_{arch}_stats.npz"
+    )
+
+    if not overwrite and os.path.exists(fd_dino_stats_path):
+        log_for_0(f"FD-DINO stats already exist at {fd_dino_stats_path}, skipping...")
+        return fd_dino_stats_path
+
+    dino_net = dino_util.build_jax_dinov2(
+        arch=arch,
+        model_name=model_name,
+        batch_size=batch_size * LDC,
+    )
+
+    dataloader, dataset_size, true_total_samples = create_imagenet_dataloader(
+        imagenet_root, "train", batch_size, image_size, num_workers=0, for_fid=True
+    )
+
+    log_for_0(
+        f"Computing FD-DINO features for {dataset_size} samples per worker..."
+    )
+    log_for_0(f"Expected batches per worker: {len(dataloader)}")
+
+    all_features_list = []
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Processing DINO batches")):
+        images, labels = batch
+        del labels
+
+        if isinstance(images, list):
+            images_np = np.stack(images, axis=0)
+        else:
+            images_np = np.array(images)
+
+        batch_features = dino_util.compute_dinov2_features(images_np, dino_net)
+        batch_features_cpu = jax.device_get(batch_features)
+        all_features_list.append(batch_features_cpu)
+
+        if batch_idx % 100 == 0:
+            log_for_0(
+                f"Worker {jax.process_index()}: Processed {batch_idx}/{len(dataloader)} DINO batches"
+            )
+
+    local_features = np.concatenate(all_features_list, axis=0)
+    log_for_0(
+        f"Worker {jax.process_index()}: Local DINO features shape: {local_features.shape}"
+    )
+    del all_features_list
+
+    chunk_size = 10000
+    all_gathered_features = []
+    for chunk_start in range(0, local_features.shape[0], chunk_size):
+        chunk_end = min(chunk_start + chunk_size, local_features.shape[0])
+        local_chunk = local_features[chunk_start:chunk_end]
+        log_for_0(
+            f"Worker {jax.process_index()}: Gathering DINO chunk {chunk_start//chunk_size + 1}, "
+            f"samples {chunk_start}:{chunk_end} ({local_chunk.shape[0]} samples)"
+        )
+        local_chunk_jax = jnp.array(local_chunk)
+        gathered_chunk = multihost_utils.process_allgather(local_chunk_jax)
+        gathered_chunk = gathered_chunk.reshape(-1, gathered_chunk.shape[-1])
+        gathered_chunk_cpu = jax.device_get(gathered_chunk)
+        all_gathered_features.append(gathered_chunk_cpu)
+
+    all_features_gathered = np.concatenate(all_gathered_features, axis=0)
+    log_for_0(
+        f"Total DINO features shape before truncation: {all_features_gathered.shape}"
+    )
+    if all_features_gathered.shape[0] != true_total_samples:
+        log_for_0("Truncating DINO features to expected number of samples...")
+        all_features_gathered = all_features_gathered[:true_total_samples]
+
+    stats = _compute_gaussian_stats(all_features_gathered)
+    os.makedirs(os.path.dirname(fd_dino_stats_path), exist_ok=True)
+    np.savez(fd_dino_stats_path, ref_mu=stats["mu"], ref_sigma=stats["sigma"])
+    log_for_0(f"FD-DINO statistics saved to {fd_dino_stats_path}")
+    return fd_dino_stats_path
 
 
 def compute_batch_features(batch_images, inception_net, batch_size):

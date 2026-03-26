@@ -137,6 +137,20 @@ class Writer:
         else:
             log_for_0("Wandb logging is disabled. Images will be saved to disk.")
 
+    @staticmethod
+    def _to_pil_image(v):
+        if isinstance(v, Image.Image):
+            return v
+        assert isinstance(v, np.ndarray), "Invalid image type {}".format(type(v))
+        assert v.dtype == np.uint8, "Invalid image dtype {}".format(v.dtype)
+        assert v.ndim == 3 and 3 in [
+            v.shape[0],
+            v.shape[2],
+        ], "Invalid image shape {}".format(v.shape)
+        if v.shape[0] == 3:
+            v = v.transpose((1, 2, 0))
+        return Image.fromarray(v)
+
     def write_scalars(self, step, scalar_dict):
         if jax.process_index() != 0:
             return
@@ -152,30 +166,38 @@ class Writer:
         if jax.process_index() != 0:
             return
 
-        def reduce_arr_func(v):
-            if isinstance(v, Image.Image):
-                return v
-            assert isinstance(v, np.ndarray), "Invalid image type {}".format(type(v))
-            assert v.dtype == np.uint8, "Invalid image dtype {}".format(v.dtype)
-            assert v.ndim == 3 and 3 in [
-                v.shape[0],
-                v.shape[2],
-            ], "Invalid image shape {}".format(v.shape)
-            if v.shape[0] == 3:
-                v = v.transpose((1, 2, 0))
-            return Image.fromarray(v)
-
-        if self.use_wandb:    
+        if self.use_wandb:
             wandb.log(
-                {k: wandb.Image(reduce_arr_func(v)) for k, v in image_dict.items()},
+                {k: wandb.Image(self._to_pil_image(v)) for k, v in image_dict.items()},
                 step=step,
             )
         else:
             if not os.path.exists(f"{self.workdir}/images/"):
                 os.makedirs(f"{self.workdir}/images/")
             for k, v in image_dict.items():
-                img = reduce_arr_func(v)
+                img = self._to_pil_image(v)
                 img.save(f"{self.workdir}/images/{step}_{k}.png")
+
+    def write_image_grid(self, step, images, grid_size, key="image_grid"):
+        if jax.process_index() != 0:
+            return
+
+        assert len(images) == grid_size ** 2, "Number of images must match grid size."
+        images = [self._to_pil_image(img) for img in images]
+
+        # Create a grid of images
+        grid_image = Image.new('RGB', (grid_size * images[0].width, grid_size * images[0].height))
+        for i, img in enumerate(images):
+            x = (i % grid_size) * images[0].width
+            y = (i // grid_size) * images[0].height
+            grid_image.paste(img, (x, y))
+
+        if self.use_wandb:
+            wandb.log({key: wandb.Image(grid_image)}, step=step)
+        else:
+            if not os.path.exists(f"{self.workdir}/image_grids/"):
+                os.makedirs(f"{self.workdir}/image_grids/")
+            grid_image.save(f"{self.workdir}/image_grids/{key}_{step}.png")
 
     def __del__(self):
         if jax.process_index() != 0:

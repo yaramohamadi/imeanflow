@@ -1,4 +1,7 @@
+import os
+
 import jax
+import jax.numpy as jnp
 from flax.training import checkpoints
 from flax import serialization
 
@@ -9,6 +12,7 @@ def restore_checkpoint(state, workdir):
     """
     Restores the model state from a checkpoint located in the specified working directory.
     """
+    workdir = os.path.abspath(workdir)
     state = checkpoints.restore_checkpoint(workdir, state)
     log_for_0("Restored from checkpoint at {}".format(workdir))
     return state
@@ -20,14 +24,11 @@ def _shape_matches(target_value, source_value):
     return target_value.shape == source_value.shape
 
 
-def restore_partial_checkpoint(state, workdir, prefer_ema=True):
+def load_checkpoint_params(workdir, prefer_ema=True):
     """
-    Restore shape-compatible model parameters from a checkpoint.
-
-    This is useful for fine-tuning on a new dataset where some parameter shapes
-    differ, such as the class embedding table after changing num_classes.
-    Optimizer state and training step are intentionally left fresh.
+    Load params or ema_params from a checkpoint without shape adaptation.
     """
+    workdir = os.path.abspath(workdir)
     restored = checkpoints.restore_checkpoint(workdir, target=None)
     log_for_0("Loaded raw checkpoint from {}".format(workdir))
 
@@ -36,6 +37,19 @@ def restore_partial_checkpoint(state, workdir, prefer_ema=True):
         source_tree = restored.get("params")
     if source_tree is None:
         raise ValueError(f"No params/ema_params found in checkpoint: {workdir}")
+    return source_tree
+
+
+def restore_partial_checkpoint(state, workdir, prefer_ema=True):
+    """
+    Restore shape-compatible model parameters from a checkpoint.
+
+    This is useful for fine-tuning on a new dataset where some parameter shapes
+    differ, such as the class embedding table after changing num_classes.
+    Optimizer state and training step are intentionally left fresh.
+    """
+    workdir = os.path.abspath(workdir)
+    source_tree = load_checkpoint_params(workdir, prefer_ema=prefer_ema)
 
     target_state = serialization.to_state_dict(state.params)
     source_state = serialization.to_state_dict(source_tree)
@@ -69,7 +83,11 @@ def restore_partial_checkpoint(state, workdir, prefer_ema=True):
 
     merged_state = merge_state(target_state, source_state)
     merged_params = serialization.from_state_dict(state.params, merged_state)
-    new_state = state.replace(params=merged_params, ema_params=merged_params)
+    ema_params = jax.tree_util.tree_map(
+        lambda x: jnp.array(x, copy=True),
+        merged_params,
+    )
+    new_state = state.replace(params=merged_params, ema_params=ema_params)
 
     log_for_0(
         "Partially restored checkpoint: loaded %d tensors, skipped %d tensors.",
@@ -86,9 +104,28 @@ def save_checkpoint(state, workdir):
     """
     Saves the model state to a checkpoint in the specified working directory.
     """
+    workdir = os.path.abspath(workdir)
     # Save only one copy from device 0.
     state = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state))
     step = int(state.step)
     log_for_0("Saving checkpoint step %d.", step)
     checkpoints.save_checkpoint_multiprocess(workdir, state, step, keep=3)
     log_for_0("Checkpoint step %d saved.", step)
+
+
+def save_best_checkpoint(state, workdir, step=None, keep=1):
+    """
+    Saves the model state to a best-checkpoint directory.
+    """
+    workdir = os.path.abspath(workdir)
+    state = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state))
+    ckpt_step = int(state.step) if step is None else int(step)
+    log_for_0("Saving best checkpoint step %d to %s.", ckpt_step, workdir)
+    checkpoints.save_checkpoint_multiprocess(
+        workdir,
+        state,
+        ckpt_step,
+        keep=keep,
+        overwrite=True,
+    )
+    log_for_0("Best checkpoint step %d saved.", ckpt_step)

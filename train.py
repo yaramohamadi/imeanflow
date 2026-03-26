@@ -15,13 +15,22 @@ from optax._src.alias import *
 from imf import iMeanFlow, generate
 
 import utils.input_pipeline as input_pipeline
-from utils.ckpt_util import save_checkpoint, restore_checkpoint, restore_partial_checkpoint
+from utils.ckpt_util import (
+    load_checkpoint_params,
+    save_best_checkpoint,
+    save_checkpoint,
+    restore_checkpoint,
+    restore_partial_checkpoint,
+)
 from utils.ema_util import ema_schedules, update_ema
 from utils.logging_util import MetricsTracker, Timer, log_for_0, Writer
 from utils.vae_util import LatentManager
-from utils.vis_util import make_grid_visualization
 from utils.lr_utils import lr_schedules
-from utils.sample_util import get_fid_evaluator, run_p_sample_step
+from utils.sample_util import (
+    generate_fid_samples,
+    get_image_metric_evaluator,
+    run_p_sample_step,
+)
 from utils.trainstate_util import create_train_state, TrainState
 
 #######################################################
@@ -35,7 +44,9 @@ def compute_metrics(dict_losses):
     return metrics
 
 
-def train_step_with_vae(state, batch, rng_init, ema_fn, lr_fn, latent_manager):
+def train_step_with_vae(
+    state, batch, rng_init, ema_fn, lr_fn, latent_manager, use_ema, grad_accum_steps
+):
     """
     Perform a single training step.
     """
@@ -54,6 +65,7 @@ def train_step_with_vae(state, batch, rng_init, ema_fn, lr_fn, latent_manager):
             {"params": params},
             images=images,
             labels=labels,
+            source_params=state.source_params,
             rngs=dict(
                 gen=rng_base,
             ),
@@ -63,17 +75,49 @@ def train_step_with_vae(state, batch, rng_init, ema_fn, lr_fn, latent_manager):
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     aux, grads = grad_fn(state.params)
     grads = lax.pmean(grads, axis_name="batch")
-    new_state = state.apply_gradients(grads=grads)
-
     lr_value = lr_fn(state.step)
-    ema_value = ema_fn(state.step)
-
     dict_losses = aux[1]
     metrics = compute_metrics(dict_losses)
     metrics["lr"] = lr_value
-    new_ema = update_ema(new_state.ema_params, new_state.params, ema_value)
-    new_state = new_state.replace(ema_params=new_ema)
+    new_grad_accum = jax.tree_util.tree_map(
+        lambda acc, g: acc + g, state.grad_accum, grads
+    )
+    new_accum_step = state.grad_accum_step + 1
+    should_apply = new_accum_step >= grad_accum_steps
 
+    def apply_update(args):
+        current_state, accum_grads = args
+        mean_grads = jax.tree_util.tree_map(
+            lambda g: g / grad_accum_steps, accum_grads
+        )
+        updated_state = current_state.apply_gradients(grads=mean_grads)
+        if use_ema:
+            ema_value = ema_fn(current_state.step)
+            new_ema = update_ema(
+                updated_state.ema_params, updated_state.params, ema_value
+            )
+            updated_state = updated_state.replace(ema_params=new_ema)
+        zero_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+        updated_state = updated_state.replace(
+            grad_accum=zero_accum,
+            grad_accum_step=jnp.array(0, dtype=jnp.int32),
+        )
+        return updated_state
+
+    def keep_accumulating(args):
+        current_state, accum_grads = args
+        return current_state.replace(
+            grad_accum=accum_grads,
+            grad_accum_step=new_accum_step,
+        )
+
+    new_state = jax.lax.cond(
+        should_apply,
+        apply_update,
+        keep_accumulating,
+        (state, new_grad_accum),
+    )
+    metrics["did_update"] = should_apply.astype(jnp.float32)
     return new_state, metrics
 
 
@@ -139,8 +183,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     rng = random.key(config.training.seed)
     image_size = config.dataset.image_size
     device_bsz = config.fid.device_batch_size
+    use_ema = config.training.get("use_ema", True)
+    max_train_steps = config.training.get("max_train_steps", None)
+    grad_accum_steps = config.training.get("grad_accum_steps", 1)
 
     log_for_0("config.training.batch_size: {}".format(config.training.batch_size))
+    log_for_0("config.training.use_ema: {}".format(use_ema))
+    log_for_0("config.training.max_train_steps: {}".format(max_train_steps))
+    log_for_0("config.training.grad_accum_steps: {}".format(grad_accum_steps))
     local_batch_size = config.training.batch_size // jax.process_count()
     log_for_0("local_batch_size: {}".format(local_batch_size))
     log_for_0("jax.local_device_count: {}".format(jax.local_device_count()))
@@ -167,6 +217,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             state = restore_partial_checkpoint(state, config.load_from)
         else:
             state = restore_checkpoint(state, config.load_from)
+        if config.training.get("capture_source_from_load", False):
+            source_ckpt_path = config.load_from
+            source_params = load_checkpoint_params(source_ckpt_path, prefer_ema=True)
+            state = state.replace(source_params=source_params)
+            log_for_0(
+                "Loaded frozen source_params for DogFit from %s.",
+                source_ckpt_path,
+            )
 
     step = int(state.step)
     epoch_offset = step // steps_per_epoch
@@ -186,6 +244,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             ema_fn=ema_fn,
             lr_fn=lr_fn,
             latent_manager=latent_manager,
+            use_ema=use_ema,
+            grad_accum_steps=grad_accum_steps,
         ),
         axis_name="batch",
         donate_argnums=(0,),
@@ -210,38 +270,35 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     }
     sample_kwargs = jax_utils.replicate(sample_kwargs)
 
-    fid_evaluator = get_fid_evaluator(config, writer, latent_manager)
+    image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
+    best_fid = float("inf")
+    best_fid_ckpt_dir = os.path.join(
+        workdir,
+        config.training.get("best_fid_checkpoint_dir", "best_fid"),
+    )
+    save_best_fid_only = config.training.get("save_best_fid_only", False)
 
     ########### Training Loop ###########
     metrics_tracker = MetricsTracker()
     log_for_0("Initial compilation, this might take some minutes...")
-    vis_sample_idx = jax.process_index() * jax.local_device_count() + jnp.arange(
-        jax.local_device_count()
-    )
 
+    should_stop = False
     for epoch in range(epoch_offset, config.training.num_epochs):
         if jax.process_count() > 1:
             train_loader.sampler.set_epoch(epoch)
         log_for_0("epoch {}...".format(epoch))
-
-        ########### Sampling ###########
-        if (epoch + 1) % config.training.sample_per_epoch == 0:
-            log_for_0(f"Samples at epoch {epoch}...")
-            vis_sample = run_p_sample_step(p_sample_step, state, vis_sample_idx, 
-                                           latent_manager, True, **sample_kwargs)
-            vis_sample = make_grid_visualization(vis_sample, grid=4)
-            vis_sample = jax.device_get(vis_sample)[0]
-            writer.write_images(step + 1, {"vis_sample": vis_sample})
 
         ########### Train ###########
         timer = Timer()
         log_for_0("epoch {}...".format(epoch))
         timer.reset()
         for n_batch, batch in enumerate(train_loader):
-            step = epoch * steps_per_epoch + n_batch
+            micro_step = epoch * steps_per_epoch + n_batch
 
             batch = input_pipeline.prepare_batch_data(batch)
             state, metrics = p_train_step(state, batch)
+            current_step = int(jax.device_get(state.step)[0])
+            did_update = bool(jax.device_get(metrics["did_update"])[0])
 
             if epoch == epoch_offset and n_batch == 0:
                 log_for_0("Initial compilation completed. Reset timer.")
@@ -250,22 +307,68 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
             ########### Metrics ###########
             metrics_tracker.update(metrics)  # stream one step in
-            if (step + 1) % config.training.log_per_step == 0:
+            if did_update and current_step > 0 and current_step % config.training.log_per_step == 0:
                 summary = metrics_tracker.finalize()
                 summary["steps_per_second"] = (
                     config.training.log_per_step / timer.elapse_with_reset()
                 )
-                writer.write_scalars(step + 1, summary)
+                summary.pop("did_update", None)
+                writer.write_scalars(current_step, summary)
+
+            ########### Sampling ###########
+            if did_update and current_step > 0 and current_step % config.training.sample_per_step == 0:
+                num_images = config.fid.num_images_to_log
+                grid_size = int(num_images ** 0.5)
+                if grid_size ** 2 != num_images:
+                    raise ValueError(
+                        f"config.fid.num_images_to_log must be a perfect square, got {num_images}"
+                    )
+                log_for_0("Logging %d preview samples at step %d.", num_images, current_step)
+                samples = generate_fid_samples(
+                    state,
+                    config,
+                    p_sample_step,
+                    partial(run_p_sample_step, latent_manager=latent_manager),
+                    use_ema,
+                    num_samples=num_images,
+                    **sample_kwargs,
+                )
+                writer.write_image_grid(current_step, samples, grid_size)
+
+            ########### FID ###########
+            if did_update and current_step > 0 and current_step % config.training.fid_per_step == 0:
+                result = image_metric_evaluator(
+                    state, p_sample_step, current_step - 1, **sample_kwargs
+                )
+                fid = result["fid"]
+                if fid < best_fid:
+                    best_fid = fid
+                    log_for_0(
+                        "New best FID %.4f at step %d. Saving best checkpoint to %s.",
+                        best_fid,
+                        current_step,
+                        best_fid_ckpt_dir,
+                    )
+                    save_best_checkpoint(state, best_fid_ckpt_dir)
+
+            if max_train_steps is not None and current_step >= max_train_steps:
+                should_stop = True
+                break
 
         ########### Save Checkpoint ###########
-        if (epoch + 1) % config.training.checkpoint_per_epoch == 0 \
-            or (epoch + 1) == config.training.num_epochs:
+        if (
+            not save_best_fid_only
+            and (
+                should_stop
+                or (epoch + 1) % config.training.checkpoint_per_epoch == 0
+                or (epoch + 1) == config.training.num_epochs
+            )
+        ):
             save_checkpoint(state, workdir)
 
-        ########### FID ###########
-        if (epoch + 1) % config.training.fid_per_epoch == 0 \
-            or (epoch + 1) == config.training.num_epochs:
-            fid_evaluator(state, p_sample_step, step, **sample_kwargs)
+        if should_stop:
+            log_for_0("Reached max_train_steps=%d at step %d.", max_train_steps, current_step)
+            break
 
     # Wait until computations are done before exiting
     jax.random.normal(jax.random.key(0), ()).block_until_ready()
@@ -288,6 +391,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState
     rng = random.key(0)
     image_size = config.dataset.image_size
     device_bsz = config.fid.device_batch_size
+    use_ema = config.training.get("use_ema", True)
     lr_fn = lr_schedules(config, 1000)  # dummy steps_per_epoch
 
     ########### Create Model ###########
@@ -318,28 +422,61 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState
         axis_name="batch",
     )
 
-    fid_evaluator = get_fid_evaluator(config, writer, latent_manager)
+    image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
 
     ############ Evaluate over CFG configs ###########
     best_fid = float("inf")
     best_is = float("-inf")
+    best_fd_dino = float("inf")
     best_config = None
+    best_fd_dino_config = None
+    best_fd_dino_at_best_fid = None
     for interval in config.sampling.interval:
         t_min, t_max = interval
         for omega in config.sampling.omegas:
             kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
             kwargs = jax_utils.replicate(kwargs)
-            fid, is_score = fid_evaluator(state, p_sample_step, step, True, **kwargs)
+            result = image_metric_evaluator(
+                state, p_sample_step, step, not use_ema, **kwargs
+            )
+            fid = result["fid"]
+            is_score = result["is"]
+            fd_dino = result.get("fd_dino", None)
 
             if fid < best_fid:
                 best_fid, best_is, best_config = fid, is_score, (omega, t_min, t_max)
+                best_fd_dino_at_best_fid = fd_dino
+            if fd_dino is not None and fd_dino < best_fd_dino:
+                best_fd_dino = fd_dino
+                best_fd_dino_config = (omega, t_min, t_max)
 
-    summary = {'best_fid': best_fid, 'best_is': best_is, 'omega': best_config[0], 't_min': best_config[1], 't_max': best_config[2]}
-    log_for_0(
+    summary = {
+        'best_fid': best_fid,
+        'best_is': best_is,
+        'omega': best_config[0],
+        't_min': best_config[1],
+        't_max': best_config[2],
+    }
+    log_message = (
         f"Best FID achieved: {best_fid:.2f}, \n"
         f"IS achieved: {best_is:.2f}, \n"
         f"omega: {best_config[0]:.2f}, t_min: {best_config[1]:.2f}, t_max: {best_config[2]:.2f}"
     )
+    if best_fd_dino_at_best_fid is not None:
+        summary['best_fd_dino_at_best_fid'] = best_fd_dino_at_best_fid
+        log_message += f", \nFD-DINO at best FID config: {best_fd_dino_at_best_fid:.2f}"
+    if best_fd_dino_config is not None:
+        summary['best_fd_dino'] = best_fd_dino
+        summary['best_fd_dino_omega'] = best_fd_dino_config[0]
+        summary['best_fd_dino_t_min'] = best_fd_dino_config[1]
+        summary['best_fd_dino_t_max'] = best_fd_dino_config[2]
+        log_message += (
+            f", \nBest FD-DINO achieved: {best_fd_dino:.2f}, "
+            f"omega: {best_fd_dino_config[0]:.2f}, "
+            f"t_min: {best_fd_dino_config[1]:.2f}, "
+            f"t_max: {best_fd_dino_config[2]:.2f}"
+        )
+    log_for_0(log_message)
     writer.write_scalars(step, summary)
 
     # Wait until computations are done before exiting

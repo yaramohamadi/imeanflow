@@ -56,12 +56,13 @@ class LabelEmbedder(nn.Module):
 
     num_classes: int
     hidden_size: int
+    use_null_class: bool = True
     weight_init: str = "scaled_variance"
     init_constant: float = 1.0
 
     def setup(self):
         self.embedding_table = TorchEmbedding(
-            self.num_classes + 1,
+            self.num_classes + int(self.use_null_class),
             self.hidden_size,
             weight_init=self.weight_init,
             init_constant=self.init_constant,

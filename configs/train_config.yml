@@ -17,16 +17,21 @@ training:
     adam_b2: 0.95
     ema_type: 'const'
 
-    sample_per_epoch: 20
-    fid_per_epoch: 20
+    sample_per_step: 1000
+    fid_per_step: 1000
 
     seed: 42
 
 fid:
     device_batch_size: 80
     num_samples: 50000
-    
     cache_ref: FID_CACHE_REF
+    num_images_to_log: 100
+
+fd_dino:
+    arch: vitb14
+    model_name: ''
+    cache_ref: FD_DINO_CACHE_REF
 
 sampling:
     # sample parameters evaluated during training
