@@ -14,7 +14,7 @@ model:
     source_num_classes: 1000
 
 training:
-    log_per_step: 50
+    log_per_step: 250
     checkpoint_per_epoch: 1000000
 
     num_epochs: 200
@@ -31,6 +31,7 @@ training:
     fid_per_step: 1000 # Frequency of FID calculation in steps
     debug_log_during_train: True
     debug_num_images: 4
+    debug_velocity_decode_scale: 0.1
     grad_accum_steps: 2
     save_best_fid_only: True
     best_fid_checkpoint_dir: 'best_fid'

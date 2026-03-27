@@ -183,20 +183,32 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
 
 
 def _latents_to_uint8_images(latent_manager, latents_bhwc):
+    num_images = latents_bhwc.shape[0]
+    decode_total = latent_manager.batch_size * jax.local_device_count()
+    if num_images > decode_total:
+        raise ValueError(
+            f"Debug decode received {num_images} images, but the compiled VAE decoder "
+            f"supports at most {decode_total} images per call."
+        )
+
+    if num_images < decode_total:
+        pad_shape = (decode_total - num_images,) + latents_bhwc.shape[1:]
+        latents_bhwc = jnp.concatenate(
+            [latents_bhwc, jnp.zeros(pad_shape, dtype=latents_bhwc.dtype)],
+            axis=0,
+        )
+
     latents_bchw = latents_bhwc.transpose(0, 3, 1, 2)
     samples = latent_manager.decode(latents_bchw)
+    samples = samples[:num_images]
     samples = samples.transpose(0, 2, 3, 1)
     samples = 127.5 * samples + 128.0
     return jnp.clip(samples, 0, 255).astype(jnp.uint8)
 
 
-def _magnitude_maps_to_uint8(tensors_bhwc):
-    mag = jnp.linalg.norm(tensors_bhwc, axis=-1, keepdims=True)
-    mag_min = jnp.min(mag, axis=(1, 2, 3), keepdims=True)
-    mag_max = jnp.max(mag, axis=(1, 2, 3), keepdims=True)
-    mag = (mag - mag_min) / (mag_max - mag_min + 1e-8)
-    mag = (255.0 * mag).astype(jnp.uint8)
-    return jnp.repeat(mag, 3, axis=-1)
+def _velocity_step_to_uint8_images(latent_manager, z_t_bhwc, velocity_bhwc, step_scale):
+    stepped_latents = z_t_bhwc - step_scale * velocity_bhwc
+    return _latents_to_uint8_images(latent_manager, stepped_latents)
 
 
 #######################################################
@@ -395,10 +407,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
             ########### Metrics ###########
             metrics_tracker.update(metrics)  # stream one step in
-            if did_update and current_step > 0 and current_step % config.training.log_per_step == 0:
+            should_log = did_update and current_step > 0 and (
+                current_step == 1 or current_step % config.training.log_per_step == 0
+            )
+            if should_log:
                 summary = metrics_tracker.finalize()
+                logged_steps = 1 if current_step == 1 else config.training.log_per_step
                 summary["steps_per_second"] = (
-                    config.training.log_per_step / timer.elapse_with_reset()
+                    logged_steps / timer.elapse_with_reset()
                 )
                 summary.pop("did_update", None)
                 writer.write_scalars(current_step, summary)
@@ -413,6 +429,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     writer.write_scalars(current_step, debug_metrics)
 
                     debug_num_images = int(config.training.get("debug_num_images", 4))
+                    debug_velocity_decode_scale = float(
+                        config.training.get("debug_velocity_decode_scale", 0.1)
+                    )
                     debug_grid_size = int(debug_num_images ** 0.5)
                     if debug_grid_size ** 2 != debug_num_images:
                         raise ValueError(
@@ -440,33 +459,68 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     )
                     writer.write_image_grid(
                         current_step,
-                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_u))),
+                        jax.device_get(
+                            _velocity_step_to_uint8_images(
+                                latent_manager,
+                                jnp.asarray(z_t),
+                                jnp.asarray(v_u),
+                                debug_velocity_decode_scale,
+                            )
+                        ),
                         debug_grid_size,
-                        key="debug_v_u_mag",
+                        key="debug_v_u_step",
                     )
                     writer.write_image_grid(
                         current_step,
-                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_c))),
+                        jax.device_get(
+                            _velocity_step_to_uint8_images(
+                                latent_manager,
+                                jnp.asarray(z_t),
+                                jnp.asarray(v_c),
+                                debug_velocity_decode_scale,
+                            )
+                        ),
                         debug_grid_size,
-                        key="debug_v_c_mag",
+                        key="debug_v_c_step",
                     )
                     writer.write_image_grid(
                         current_step,
-                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_pred))),
+                        jax.device_get(
+                            _velocity_step_to_uint8_images(
+                                latent_manager,
+                                jnp.asarray(z_t),
+                                jnp.asarray(v_pred),
+                                debug_velocity_decode_scale,
+                            )
+                        ),
                         debug_grid_size,
-                        key="debug_v_pred_mag",
+                        key="debug_v_pred_step",
                     )
                     writer.write_image_grid(
                         current_step,
-                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(V))),
+                        jax.device_get(
+                            _velocity_step_to_uint8_images(
+                                latent_manager,
+                                jnp.asarray(z_t),
+                                jnp.asarray(V),
+                                debug_velocity_decode_scale,
+                            )
+                        ),
                         debug_grid_size,
-                        key="debug_V_mag",
+                        key="debug_V_step",
                     )
                     writer.write_image_grid(
                         current_step,
-                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_g))),
+                        jax.device_get(
+                            _velocity_step_to_uint8_images(
+                                latent_manager,
+                                jnp.asarray(z_t),
+                                jnp.asarray(v_g),
+                                debug_velocity_decode_scale,
+                            )
+                        ),
                         debug_grid_size,
-                        key="debug_v_g_mag",
+                        key="debug_v_g_step",
                     )
 
             ########### Sampling ###########
