@@ -121,6 +121,84 @@ def train_step_with_vae(
     return new_state, metrics
 
 
+def _cosine_similarity(a, b, eps=1e-8):
+    a = a.reshape((a.shape[0], -1))
+    b = b.reshape((b.shape[0], -1))
+    num = jnp.sum(a * b, axis=1)
+    den = jnp.linalg.norm(a, axis=1) * jnp.linalg.norm(b, axis=1) + eps
+    return jnp.mean(num / den)
+
+
+def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
+    """
+    Run a single debug forward pass and expose intermediate tensors.
+    """
+    rng_step = random.fold_in(rng_init, state.step)
+    rng_base = random.fold_in(rng_step, lax.axis_index(axis_name="batch"))
+
+    images = batch["image"]
+    labels = batch["label"]
+
+    rng_base, rng_vae = random.split(rng_base)
+    images = latent_manager.cached_encode(images, rng_vae)
+
+    outputs = model.apply(
+        {"params": state.params},
+        images=images,
+        labels=labels,
+        source_params=state.source_params,
+        rngs=dict(gen=rng_base),
+        method=model.debug_forward,
+    )
+
+    v_u = outputs["v_u"]
+    v_c = outputs["v_c"]
+    v_g = outputs["v_g"]
+    v_pred = outputs["v_pred"]
+    V = outputs["V"]
+
+    metrics = {
+        "debug/omega_mean": jnp.mean(outputs["omega"]),
+        "debug/t_mean": jnp.mean(outputs["t"]),
+        "debug/r_mean": jnp.mean(outputs["r"]),
+        "debug/fm_fraction": jnp.mean(outputs["fm_mask"]),
+        "debug/v_u_mean": jnp.mean(v_u),
+        "debug/v_u_abs_mean": jnp.mean(jnp.abs(v_u)),
+        "debug/v_c_mean": jnp.mean(v_c),
+        "debug/v_c_abs_mean": jnp.mean(jnp.abs(v_c)),
+        "debug/v_pred_mean": jnp.mean(v_pred),
+        "debug/v_pred_abs_mean": jnp.mean(jnp.abs(v_pred)),
+        "debug/V_mean": jnp.mean(V),
+        "debug/V_abs_mean": jnp.mean(jnp.abs(V)),
+        "debug/v_g_mean": jnp.mean(v_g),
+        "debug/v_g_abs_mean": jnp.mean(jnp.abs(v_g)),
+        "debug/v_u_to_v_c_cosine": _cosine_similarity(v_u, v_c),
+        "debug/v_pred_to_v_g_cosine": _cosine_similarity(v_pred, v_g),
+        "debug/V_to_v_g_cosine": _cosine_similarity(V, v_g),
+        "debug/v_pred_to_v_g_mse": jnp.mean((v_pred - v_g) ** 2),
+        "debug/V_to_v_g_mse": jnp.mean((V - v_g) ** 2),
+    }
+    metrics = lax.pmean(metrics, axis_name="batch")
+    return outputs, metrics
+
+
+def _latents_to_uint8_images(latent_manager, latents_bhwc):
+    latents_bchw = latents_bhwc.transpose(0, 3, 1, 2)
+    samples = latent_manager.decode(latents_bchw)
+    samples = samples.transpose(0, 2, 3, 1)
+    samples = 127.5 * samples + 128.0
+    return jnp.clip(samples, 0, 255).astype(jnp.uint8)
+
+
+def _magnitude_maps_to_uint8(tensors_bhwc):
+    mag = jnp.linalg.norm(tensors_bhwc, axis=-1, keepdims=True)
+    mag_min = jnp.min(mag, axis=(1, 2, 3), keepdims=True)
+    mag_max = jnp.max(mag, axis=(1, 2, 3), keepdims=True)
+    mag = (mag - mag_min) / (mag_max - mag_min + 1e-8)
+    mag = (255.0 * mag).astype(jnp.uint8)
+    return jnp.repeat(mag, 3, axis=-1)
+
+
 #######################################################
 #               Sampling and Metrics                  #
 #######################################################
@@ -251,6 +329,16 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         donate_argnums=(0,),
     )
 
+    p_debug_step = jax.pmap(
+        partial(
+            debug_step_with_vae,
+            rng_init=rng,
+            latent_manager=latent_manager,
+            model=model,
+        ),
+        axis_name="batch",
+    )
+
     p_sample_step = jax.pmap(
         partial(
             sample_step,
@@ -314,6 +402,72 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 )
                 summary.pop("did_update", None)
                 writer.write_scalars(current_step, summary)
+
+                if config.training.get("debug_log_during_train", False):
+                    log_for_0("Running debug logging on current batch at step %d.", current_step)
+                    debug_outputs, debug_metrics = p_debug_step(state, batch)
+                    debug_metrics = {
+                        k: float(jnp.asarray(v).mean())
+                        for k, v in jax.device_get(debug_metrics).items()
+                    }
+                    writer.write_scalars(current_step, debug_metrics)
+
+                    debug_num_images = int(config.training.get("debug_num_images", 4))
+                    debug_grid_size = int(debug_num_images ** 0.5)
+                    if debug_grid_size ** 2 != debug_num_images:
+                        raise ValueError(
+                            f"config.training.debug_num_images must be a perfect square, got {debug_num_images}"
+                        )
+                    x = jax.device_get(debug_outputs["x"]).reshape(-1, *debug_outputs["x"].shape[2:])[:debug_num_images]
+                    z_t = jax.device_get(debug_outputs["z_t"]).reshape(-1, *debug_outputs["z_t"].shape[2:])[:debug_num_images]
+                    v_u = jax.device_get(debug_outputs["v_u"]).reshape(-1, *debug_outputs["v_u"].shape[2:])[:debug_num_images]
+                    v_c = jax.device_get(debug_outputs["v_c"]).reshape(-1, *debug_outputs["v_c"].shape[2:])[:debug_num_images]
+                    v_pred = jax.device_get(debug_outputs["v_pred"]).reshape(-1, *debug_outputs["v_pred"].shape[2:])[:debug_num_images]
+                    V = jax.device_get(debug_outputs["V"]).reshape(-1, *debug_outputs["V"].shape[2:])[:debug_num_images]
+                    v_g = jax.device_get(debug_outputs["v_g"]).reshape(-1, *debug_outputs["v_g"].shape[2:])[:debug_num_images]
+
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_latents_to_uint8_images(latent_manager, jnp.asarray(x))),
+                        debug_grid_size,
+                        key="debug_clean_latents",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_latents_to_uint8_images(latent_manager, jnp.asarray(z_t))),
+                        debug_grid_size,
+                        key="debug_noisy_latents",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_u))),
+                        debug_grid_size,
+                        key="debug_v_u_mag",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_c))),
+                        debug_grid_size,
+                        key="debug_v_c_mag",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_pred))),
+                        debug_grid_size,
+                        key="debug_v_pred_mag",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(V))),
+                        debug_grid_size,
+                        key="debug_V_mag",
+                    )
+                    writer.write_image_grid(
+                        current_step,
+                        jax.device_get(_magnitude_maps_to_uint8(jnp.asarray(v_g))),
+                        debug_grid_size,
+                        key="debug_v_g_mag",
+                    )
 
             ########### Sampling ###########
             if did_update and current_step > 0 and current_step % config.training.sample_per_step == 0:

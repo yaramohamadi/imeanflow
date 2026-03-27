@@ -94,7 +94,7 @@ class iMeanFlow(nn.Module):
                 name="source_net",
                 num_classes=self.source_num_classes,
                 use_null_class=True,
-                eval=True,
+                eval=False,
             )
 
     #######################################################
@@ -363,22 +363,17 @@ class iMeanFlow(nn.Module):
             v_c: Conditioned instantaneous velocity at time t, for jvp computation.
         """
 
-        base_w = w
-        ones = jnp.ones_like(base_w)
-        v_c = self.v_cond_fn(z_t, t, ones, y=y)
+        del r, fm_mask  # This method variant uses one interval-adjusted v_c everywhere.
+
+        w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
+
         if self.use_dogfit:
-            v_anchor_u = self.source_v_uncond_fn(source_params, z_t, t)
+            v_c = self.v_cond_fn(z_t, t, w_eff, y=y)
+            v_u = self.source_v_uncond_fn(source_params, z_t, t)
         else:
-            _, v_anchor_u = self.v_fn(z_t, t, base_w, y=y)
+            v_c, v_u = self.v_fn(z_t, t, w_eff, y=y)
 
-        v_g_fm = v_t + (1 - 1 / base_w) * (v_c - v_anchor_u)
-
-        w = jnp.where((t >= t_min) & (t <= t_max), base_w, 1.0)
-
-        v_g = v_t + (1 - 1 / w) * (v_c - v_anchor_u)
-
-        # For flow matching samples, there is no CFG interval
-        v_g = jnp.where(fm_mask, v_g_fm, v_g) 
+        v_g = v_t + (1 - 1 / w_eff) * (v_c - v_u)
 
         return v_g, v_c
 
@@ -457,6 +452,59 @@ class iMeanFlow(nn.Module):
         }
 
         return loss, dict_losses
+
+    def debug_forward(self, images, labels, source_params=None):
+        """
+        Forward process with intermediate tensors exposed for debugging.
+        """
+        x = images.astype(self.dtype)
+        bz = images.shape[0]
+
+        t, r, fm_mask = self.sample_tr(bz)
+
+        e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
+        z_t = (1 - t) * x + t * e
+        v_t = e - x
+
+        t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
+        omega = self.sample_cfg_scale(bz)
+
+        base_w = omega
+        if self.use_dogfit:
+            v_u = self.source_v_uncond_fn(source_params, z_t, t)
+        else:
+            _, v_u = self.v_fn(z_t, t, base_w, y=labels)
+
+        v_g, v_c = self.guidance_fn(
+            v_t, z_t, t, r, labels, fm_mask, omega, t_min, t_max, source_params=source_params
+        )
+
+        labels_after_drop, v_g = self.cond_drop(v_t, v_g, labels)
+
+        def u_fn(z_t, t, r):
+            return self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels_after_drop)
+
+        dtdt = jnp.ones_like(t)
+        dtdr = jnp.zeros_like(t)
+        u, du_dt, v = jax.jvp(u_fn, (z_t, t, r), (v_c, dtdt, dtdr), has_aux=True)
+        V = u + (t - r) * jax.lax.stop_gradient(du_dt)
+
+        return {
+            "x": x,
+            "z_t": z_t,
+            "v_t": v_t,
+            "v_u": v_u,
+            "v_c": v_c,
+            "v_g": v_g,
+            "v_pred": v,
+            "V": V,
+            "omega": omega,
+            "t": t,
+            "r": r,
+            "t_min": t_min,
+            "t_max": t_max,
+            "fm_mask": fm_mask.astype(self.dtype),
+        }
 
     def __call__(self, x, t, y):
         return self.net(x, t, t, t, t, t, y)  # initialization only

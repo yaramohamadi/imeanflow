@@ -39,6 +39,8 @@ def get_config():
     training.sample_per_step = 1000
     training.checkpoint_per_epoch = 10
     training.fid_per_step = 1000
+    training.debug_log_during_train = False
+    training.debug_num_images = 4
     training.grad_accum_steps = 1
     training.save_best_fid_only = False
     training.best_fid_checkpoint_dir = "best_fid"
