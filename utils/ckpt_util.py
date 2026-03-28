@@ -1,4 +1,5 @@
 import os
+import shutil
 
 import jax
 import jax.numpy as jnp
@@ -116,6 +117,9 @@ def save_checkpoint(state, workdir):
 def save_best_checkpoint(state, workdir, step=None, keep=1):
     """
     Saves the model state to a best-checkpoint directory.
+
+    When keep=1, this also removes any previously saved best checkpoint
+    directories so only the latest best checkpoint remains.
     """
     workdir = os.path.abspath(workdir)
     state = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], state))
@@ -129,3 +133,21 @@ def save_best_checkpoint(state, workdir, step=None, keep=1):
         overwrite=True,
     )
     log_for_0("Best checkpoint step %d saved.", ckpt_step)
+
+    if keep == 1:
+        for entry in os.listdir(workdir):
+            if not entry.startswith("checkpoint_"):
+                continue
+            if entry == f"checkpoint_{ckpt_step}":
+                continue
+            path = os.path.join(workdir, entry)
+            if os.path.isdir(path):
+                try:
+                    shutil.rmtree(path)
+                    log_for_0("Removed old best checkpoint directory %s.", path)
+                except Exception as exc:
+                    log_for_0(
+                        "Failed to remove old best checkpoint directory %s: %s",
+                        path,
+                        exc,
+                    )
