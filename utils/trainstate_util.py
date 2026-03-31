@@ -61,9 +61,18 @@ def create_train_state(
     rng, rng_init = random.split(rng)
 
     _, params = initialized(rng_init, image_size, model)
+    use_ema = config.training.get("use_ema", True)
     ema_params = deepcopy(params)
-    ema_params = update_ema(ema_params, params, 0)
-    source_params = deepcopy(params)
+    if use_ema:
+        ema_params = update_ema(ema_params, params, 0)
+    needs_source_params = (
+        config.model.get("use_dogfit", False)
+        or config.training.get("capture_source_from_load", False)
+    )
+    if needs_source_params:
+        source_params = deepcopy(params)
+    else:
+        source_params = None
     grad_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
     print_params(params["net"])

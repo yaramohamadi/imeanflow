@@ -1,6 +1,7 @@
 import math
 from functools import partial
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -390,6 +391,341 @@ def apply_rotary_pos_emb(x, freqs_cis):
     return x_out.reshape(x.shape)
 
 
+def modulate(x, shift, scale):
+    """Apply adaptive layer-norm modulation."""
+    return x * (1.0 + scale[:, None, :]) + shift[:, None, :]
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """Generate 1D sine-cosine positional embeddings from grid positions."""
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float32)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega
+    pos = pos.reshape(-1)
+    out = np.einsum("m,d->md", pos, omega)
+    emb_sin = np.sin(out)
+    emb_cos = np.cos(out)
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)
+    return emb
+
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    """Generate 2D sine-cosine positional embeddings from a grid."""
+    assert embed_dim % 2 == 0
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
+    return np.concatenate([emb_h, emb_w], axis=1)
+
+
+def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
+    """
+    Generate 2D sine-cosine positional embeddings.
+    """
+    grid_h = np.arange(grid_size, dtype=np.float32)
+    grid_w = np.arange(grid_size, dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)
+    grid = np.stack(grid, axis=0)
+    grid = grid.reshape([2, grid_size, grid_size])
+    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
+    if cls_token and extra_tokens > 0:
+        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim], dtype=np.float32), pos_embed], axis=0)
+    return pos_embed
+
+
+class SiTTimeEmbedder(nn.Module):
+    """Sinusoidal timestep embedder matching the torch SiT implementation."""
+
+    hidden_size: int
+    frequency_embedding_size: int = 256
+    weight_init: str = "scaled_variance"
+    init_constant: float = 1.0
+
+    def setup(self):
+        self.fc1 = TorchLinear(
+            self.frequency_embedding_size,
+            self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+        self.fc2 = TorchLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+
+    @staticmethod
+    def positional_embedding(t, dim, max_period=10000):
+        half = dim // 2
+        freqs = jnp.exp(
+            -math.log(max_period) * jnp.arange(start=0, stop=half, dtype=jnp.float32) / half
+        )
+        args = t[:, None].astype(jnp.float32) * freqs[None]
+        embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
+        if dim % 2:
+            embedding = jnp.concatenate([embedding, jnp.zeros_like(embedding[:, :1])], axis=-1)
+        return embedding
+
+    def __call__(self, t):
+        t = jnp.asarray(t, dtype=jnp.float32)
+        t_freq = self.positional_embedding(t, self.frequency_embedding_size)
+        x = self.fc1(t_freq)
+        x = nn.silu(x)
+        return self.fc2(x)
+
+
+class SiTMlp(nn.Module):
+    hidden_size: int
+    mlp_ratio: float = 4.0
+    weight_init: str = "scaled_variance"
+    init_constant: float = 1.0
+
+    def setup(self):
+        hidden_dim = int(self.hidden_size * self.mlp_ratio)
+        self.fc1 = TorchLinear(
+            self.hidden_size,
+            hidden_dim,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+        self.fc2 = TorchLinear(
+            hidden_dim,
+            self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+
+    def __call__(self, x):
+        x = self.fc1(x)
+        x = nn.silu(x)
+        return self.fc2(x)
+
+
+class SiTBlock(nn.Module):
+    hidden_size: int
+    num_heads: int
+    mlp_ratio: float = 4.0
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        self.norm1 = nn.LayerNorm(epsilon=1e-6, use_scale=False, use_bias=False)
+        self.attn = RoPEAttention(
+            self.hidden_size,
+            num_heads=self.num_heads,
+            weight_init=self.weight_init,
+            weight_init_constant=self.weight_init_constant,
+        )
+        self.norm2 = nn.LayerNorm(epsilon=1e-6, use_scale=False, use_bias=False)
+        self.mlp = SiTMlp(
+            self.hidden_size,
+            mlp_ratio=self.mlp_ratio,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.adaLN_modulation = TorchLinear(
+            self.hidden_size,
+            6 * self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+
+    def __call__(self, x, rope_freqs, c):
+        modulation = nn.silu(self.adaLN_modulation(c))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
+            modulation, 6, axis=-1
+        )
+        x = x + gate_msa[:, None, :] * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa), rope_freqs
+        )
+        x = x + gate_mlp[:, None, :] * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+        return x
+
+
+class SiTFinalLayer(nn.Module):
+    hidden_size: int
+    patch_size: int
+    out_channels: int
+
+    def setup(self):
+        self.norm_final = nn.LayerNorm(epsilon=1e-6, use_scale=False, use_bias=False)
+        self.linear = TorchLinear(
+            self.hidden_size,
+            self.patch_size * self.patch_size * self.out_channels,
+            bias=True,
+            weight_init="zeros",
+            init_constant=1.0,
+        )
+        self.adaLN_modulation = TorchLinear(
+            self.hidden_size,
+            2 * self.hidden_size,
+            bias=True,
+            weight_init="zeros",
+            init_constant=1.0,
+        )
+
+    def __call__(self, x, c):
+        shift, scale = jnp.split(nn.silu(self.adaLN_modulation(c)), 2, axis=-1)
+        x = modulate(self.norm_final(x), shift, scale)
+        return self.linear(x)
+
+
+class imfSiT_MF(nn.Module):
+    """SiT-style improved MeanFlow with shared trunk and dual u/v heads."""
+
+    input_size: int = 32
+    patch_size: int = 2
+    in_channels: int = 4
+    hidden_size: int = 1152
+    depth: int = 28
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    aux_head_depth: int = 8
+    num_classes: int = 1000
+    use_null_class: bool = True
+    eval: bool = False
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        self.out_channels = self.in_channels
+
+        self.x_embedder = PatchEmbedder(
+            self.input_size,
+            self.patch_size,
+            self.in_channels,
+            self.hidden_size,
+            bias=True,
+        )
+        self.t_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.h_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.omega_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.t_min_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.t_max_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.y_embedder = LabelEmbedder(
+            self.num_classes,
+            self.hidden_size,
+            use_null_class=self.use_null_class,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+
+        num_patches = (self.input_size // self.patch_size) ** 2
+        self.pos_embed = self.param(
+            "pos_embed",
+            lambda key, shape: jnp.array(
+                get_2d_sincos_pos_embed(self.hidden_size, int(self.input_size / self.patch_size)).reshape(
+                    (1, num_patches, self.hidden_size)
+                )
+            ),
+            (1, num_patches, self.hidden_size),
+        )
+
+        self.rope_freqs = precompute_rope_freqs(
+            self.hidden_size // self.num_heads,
+            num_patches,
+        )
+
+        shared_depth = self.depth - self.aux_head_depth
+        block_kwargs = dict(
+            hidden_size=self.hidden_size,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            weight_init=self.weight_init,
+            weight_init_constant=self.weight_init_constant,
+        )
+
+        self.shared_blocks = [SiTBlock(**block_kwargs) for _ in range(shared_depth)]
+        self.u_heads = [SiTBlock(**block_kwargs) for _ in range(self.aux_head_depth)]
+        self.v_heads = [SiTBlock(**block_kwargs) for _ in range(self.aux_head_depth)]
+
+        self.u_final_layer = SiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+        self.v_final_layer = SiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+
+    def unpatchify(self, x):
+        c = self.out_channels
+        p = self.patch_size
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape((x.shape[0], h, w, p, p, c))
+        x = jnp.einsum("nhwpqc->nhpwqc", x)
+        return x.reshape((x.shape[0], h * p, w * p, c))
+
+    def __call__(self, x, t, h, omega, t_min, t_max, y):
+        x = self.x_embedder(x) + self.pos_embed
+
+        t_embed = self.t_embedder(t)
+        h_embed = self.h_embedder(h)
+        omega_embed = self.omega_embedder(omega)
+        t_min_embed = self.t_min_embedder(t_min)
+        t_max_embed = self.t_max_embedder(t_max)
+
+        if y is None:
+            y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
+
+        y_embed = self.y_embedder(y)
+        c = (
+            t_embed
+            + h_embed
+            + omega_embed
+            + t_min_embed
+            + t_max_embed
+            + y_embed
+        )
+
+        for block in self.shared_blocks:
+            x = block(x, self.rope_freqs, c)
+
+        u_seq = x
+        v_seq = x
+        for block in self.u_heads:
+            u_seq = block(u_seq, self.rope_freqs, c)
+        for block in self.v_heads:
+            v_seq = block(v_seq, self.rope_freqs, c)
+
+        u = self.u_final_layer(u_seq, c)
+        v = self.v_final_layer(v_seq, c)
+
+        return self.unpatchify(u), self.unpatchify(v)
+
+
 #################################################################################
 #                                iMF DiT Configs                                #
 #################################################################################
@@ -426,6 +762,33 @@ imfDiT_XL_2 = partial(
     imfDiT,
     depth=48,
     hidden_size=1024,
+    patch_size=2,
+    num_heads=16,
+    aux_head_depth=8,
+)
+
+imfSiT_B_2 = partial(
+    imfSiT_MF,
+    depth=12,
+    hidden_size=768,
+    patch_size=2,
+    num_heads=12,
+    aux_head_depth=8,
+)
+
+imfSiT_L_2 = partial(
+    imfSiT_MF,
+    depth=24,
+    hidden_size=1024,
+    patch_size=2,
+    num_heads=16,
+    aux_head_depth=8,
+)
+
+imfSiT_XL_2 = partial(
+    imfSiT_MF,
+    depth=28,
+    hidden_size=1152,
     patch_size=2,
     num_heads=16,
     aux_head_depth=8,

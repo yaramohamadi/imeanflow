@@ -13,8 +13,12 @@ EOF
 fi
 
 BEST_FID_ROOT="$1"
-CONFIG_MODE="${CONFIG_MODE:-caltech_eval}"
+CONFIG_MODE="${CONFIG_MODE:-caltech_finetune}"
 USE_WANDB="${USE_WANDB:-True}"
+
+if [[ -n "${MODEL_STR:-}" ]]; then
+  export MODEL_STR
+fi
 
 MODEL_USE_DOGFIT=False \
   TARGET_USE_NULL_CLASS=True \

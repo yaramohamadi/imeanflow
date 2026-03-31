@@ -11,6 +11,7 @@ Example:
 
 If the first argument points to the run directory, the script assumes the checkpoint is under <run_dir>/best_fid.
 If the first argument points to the best_fid directory itself, it uses that directly.
+Set EVAL_PLATFORM=cpu to force CPU evaluation when GPU checkpoint restore runs out of memory.
 EOF
   exit 1
 fi
@@ -25,9 +26,20 @@ fi
 CONFIG_MODE="${CONFIG_MODE:-caltech_eval}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
+MODEL_STR="${MODEL_STR:-}"
 MODEL_USE_DOGFIT="${MODEL_USE_DOGFIT:-}"
 TARGET_USE_NULL_CLASS="${TARGET_USE_NULL_CLASS:-}"
 CLASS_DROPOUT_PROB="${CLASS_DROPOUT_PROB:-}"
+EVAL_PLATFORM="${EVAL_PLATFORM:-gpu}"
+
+case "$EVAL_PLATFORM" in
+  gpu|cpu)
+    ;;
+  *)
+    echo "ERROR: EVAL_PLATFORM must be 'gpu' or 'cpu', got: $EVAL_PLATFORM" >&2
+    exit 6
+    ;;
+esac
 
 if [[ -d "$BEST_FID_ROOT" && $(basename "$BEST_FID_ROOT") != "best_fid" ]]; then
   BEST_FID_DIR="$BEST_FID_ROOT/best_fid"
@@ -66,8 +78,12 @@ for NUM_STEPS in "${STEPS[@]}"; do
   echo "=== Evaluating checkpoint with num_steps=$NUM_STEPS ==="
   echo "workdir: $EVAL_WORKDIR"
   echo "config mode: $CONFIG_MODE"
+  echo "platform: $EVAL_PLATFORM"
 
   EXTRA_CONFIG_ARGS=()
+  if [[ -n "$MODEL_STR" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.model.model_str=${MODEL_STR}")
+  fi
   if [[ -n "$MODEL_USE_DOGFIT" ]]; then
     EXTRA_CONFIG_ARGS+=("--config.model.use_dogfit=${MODEL_USE_DOGFIT}")
   fi
@@ -78,18 +94,39 @@ for NUM_STEPS in "${STEPS[@]}"; do
     EXTRA_CONFIG_ARGS+=("--config.model.class_dropout_prob=${CLASS_DROPOUT_PROB}")
   fi
 
-  TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
-    PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
-    $PYTHON \
-      main.py \
-      --workdir="$EVAL_WORKDIR" \
-      --config=configs/load_config.py:${CONFIG_MODE} \
-      --config.eval_only=True \
-      --config.load_from="$CHECKPOINT_DIR" \
-      --config.sampling.num_steps=${NUM_STEPS} \
-      --config.logging.use_wandb=${USE_WANDB} \
-      "${EXTRA_CONFIG_ARGS[@]}" \
-      2>&1 | tee -a "$EVAL_WORKDIR/output.log"
+  if [[ "$EVAL_PLATFORM" == "cpu" ]]; then
+    JAX_PLATFORM_NAME=cpu \
+      JAX_NUM_DEVICES=1 \
+      TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
+      PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
+      $PYTHON \
+        main.py \
+        --workdir="$EVAL_WORKDIR" \
+        --config=configs/load_config.py:${CONFIG_MODE} \
+        --config.eval_only=True \
+        --config.training.use_ema=False \
+        --config.load_from="$CHECKPOINT_DIR" \
+        --config.sampling.num_steps=${NUM_STEPS} \
+        --config.logging.use_wandb=${USE_WANDB} \
+        "${EXTRA_CONFIG_ARGS[@]}" \
+        2>&1 | tee -a "$EVAL_WORKDIR/output.log"
+  else
+    TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
+      XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
+      XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false} \
+      PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
+      $PYTHON \
+        main.py \
+        --workdir="$EVAL_WORKDIR" \
+        --config=configs/load_config.py:${CONFIG_MODE} \
+        --config.eval_only=True \
+        --config.training.use_ema=False \
+        --config.load_from="$CHECKPOINT_DIR" \
+        --config.sampling.num_steps=${NUM_STEPS} \
+        --config.logging.use_wandb=${USE_WANDB} \
+        "${EXTRA_CONFIG_ARGS[@]}" \
+        2>&1 | tee -a "$EVAL_WORKDIR/output.log"
+  fi
 
   echo "=== finished num_steps=$NUM_STEPS ==="
   echo
