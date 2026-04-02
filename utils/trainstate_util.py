@@ -8,6 +8,7 @@ import ml_collections
 import optax
 
 from flax.training import train_state
+from flax import struct
 from utils.logging_util import log_for_0
 from utils.state_util import print_params
 from utils.ema_util import update_ema
@@ -47,6 +48,13 @@ class TrainState(train_state.TrainState):
     source_params: Any
     grad_accum: Any
     grad_accum_step: Any
+
+
+@struct.dataclass
+class EvalState:
+    step: Any
+    params: Any
+    ema_params: Any
 
 
 def create_train_state(

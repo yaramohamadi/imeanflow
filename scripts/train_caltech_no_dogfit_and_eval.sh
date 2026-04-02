@@ -26,6 +26,7 @@ CONFIG_MODE="${CONFIG_MODE:-caltech_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
+EVAL_PLATFORM="${EVAL_PLATFORM:-gpu}"
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
@@ -39,6 +40,7 @@ Training workdir: $WORKDIR
 CONFIG_MODE: $CONFIG_MODE
 USE_WANDB: $USE_WANDB
 Sampling steps: ${STEPS[*]}
+Eval platform: $EVAL_PLATFORM
 EOF
 
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
@@ -59,6 +61,7 @@ TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
 # Evaluate the best checkpoint saved under best_fid
 CONFIG_MODE=caltech_finetune \
   USE_WANDB=${USE_WANDB} \
+  EVAL_PLATFORM=${EVAL_PLATFORM} \
   MODEL_USE_DOGFIT=False \
   TARGET_USE_NULL_CLASS=True \
   CLASS_DROPOUT_PROB=0.0 \

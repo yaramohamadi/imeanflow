@@ -20,6 +20,7 @@ from utils.ckpt_util import (
     save_best_checkpoint,
     save_checkpoint,
     restore_checkpoint,
+    restore_eval_checkpoint,
     restore_partial_checkpoint,
 )
 from utils.ema_util import ema_schedules, update_ema
@@ -252,6 +253,35 @@ def infer_num_classes_from_latents(dataset_root):
         raise ValueError(f"No latent .pt files found under: {train_root}")
 
     return max_label + 1
+
+
+def _get_eval_sampling_configs(config):
+    """
+    Normalize evaluation CFG settings from either eval-style list configs or
+    train-style scalar sampling fields.
+    """
+    sampling = config.sampling
+
+    intervals = sampling.get("interval", None)
+    omegas = sampling.get("omegas", None)
+    if intervals is not None and omegas is not None:
+        configs = []
+        for interval in intervals:
+            t_min, t_max = interval
+            for omega in omegas:
+                configs.append((omega, t_min, t_max))
+        return configs
+
+    omega = sampling.get("omega", None)
+    t_min = sampling.get("t_min", None)
+    t_max = sampling.get("t_max", None)
+    if omega is not None and t_min is not None and t_max is not None:
+        return [(omega, t_min, t_max)]
+
+    raise ValueError(
+        "Evaluation requires either sampling.interval + sampling.omegas "
+        "or sampling.omega + sampling.t_min + sampling.t_max in the config."
+    )
 
 
 #######################################################
@@ -586,7 +616,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 #                    Evaluation                        #
 ########################################################
 
-def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState:
+def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
     assert config.eval_only, "config.eval_only must be True for just_evaluate"
     assert (
@@ -596,19 +626,22 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState
     ########### Initialize ###########
     writer = Writer(config, workdir)
 
-    rng = random.key(0)
+    if config.dataset.get("num_classes_from_data", False):
+        inferred_num_classes = infer_num_classes_from_latents(config.dataset.root)
+        config.dataset.num_classes = inferred_num_classes
+        config.model.num_classes = inferred_num_classes
+        log_for_0("Inferred dataset.num_classes from latent data: {}".format(inferred_num_classes))
+
     image_size = config.dataset.image_size
     device_bsz = config.fid.device_batch_size
     use_ema = config.training.get("use_ema", True)
-    lr_fn = lr_schedules(config, 1000)  # dummy steps_per_epoch
 
     ########### Create Model ###########
     model_config = config.model.to_dict()
     model = iMeanFlow(**model_config, eval=True)
 
-    ########### Create Train State ###########
-    state = create_train_state(rng, config, model, image_size, lr_fn)
-    state = restore_checkpoint(state, config.load_from)
+    ########### Restore lightweight Eval State ###########
+    state = restore_eval_checkpoint(config.load_from, use_ema=use_ema)
     step = int(state.step)
     state = jax_utils.replicate(state)
 
@@ -639,24 +672,22 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState
     best_config = None
     best_fd_dino_config = None
     best_fd_dino_at_best_fid = None
-    for interval in config.sampling.interval:
-        t_min, t_max = interval
-        for omega in config.sampling.omegas:
-            kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
-            kwargs = jax_utils.replicate(kwargs)
-            result = image_metric_evaluator(
-                state, p_sample_step, step, not use_ema, **kwargs
-            )
-            fid = result["fid"]
-            is_score = result["is"]
-            fd_dino = result.get("fd_dino", None)
+    for omega, t_min, t_max in _get_eval_sampling_configs(config):
+        kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
+        kwargs = jax_utils.replicate(kwargs)
+        result = image_metric_evaluator(
+            state, p_sample_step, step, not use_ema, **kwargs
+        )
+        fid = result["fid"]
+        is_score = result["is"]
+        fd_dino = result.get("fd_dino", None)
 
-            if fid < best_fid:
-                best_fid, best_is, best_config = fid, is_score, (omega, t_min, t_max)
-                best_fd_dino_at_best_fid = fd_dino
-            if fd_dino is not None and fd_dino < best_fd_dino:
-                best_fd_dino = fd_dino
-                best_fd_dino_config = (omega, t_min, t_max)
+        if fid < best_fid:
+            best_fid, best_is, best_config = fid, is_score, (omega, t_min, t_max)
+            best_fd_dino_at_best_fid = fd_dino
+        if fd_dino is not None and fd_dino < best_fd_dino:
+            best_fd_dino = fd_dino
+            best_fd_dino_config = (omega, t_min, t_max)
 
     summary = {
         'best_fid': best_fid,

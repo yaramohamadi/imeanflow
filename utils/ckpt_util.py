@@ -8,6 +8,7 @@ from flax.training import checkpoints
 from flax import serialization
 
 from utils.logging_util import log_for_0
+from utils.trainstate_util import EvalState
 
 # The PyTorch model files in models/torch_SiT.py, models/torch_SiT_MF.py,
 # and models/torch_DiT.py are not directly imported by the Flax training or
@@ -23,6 +24,50 @@ def restore_checkpoint(state, workdir):
     workdir = os.path.abspath(workdir)
     state = checkpoints.restore_checkpoint(workdir, state)
     log_for_0("Restored from checkpoint at {}".format(workdir))
+    return state
+
+
+def restore_eval_checkpoint(workdir, use_ema=False):
+    """
+    Restore a lightweight evaluation state without optimizer or grad buffers.
+
+    This avoids allocating a full TrainState during eval-only runs, which can
+    otherwise exhaust GPU memory before sampling begins.
+    """
+    workdir = os.path.abspath(workdir)
+
+    if os.path.isfile(workdir) and workdir.endswith((".pt", ".pth", ".pth.tar")):
+        params = load_checkpoint_params(workdir, prefer_ema=use_ema)
+        ema_params = params if use_ema else None
+        state = EvalState(
+            step=jnp.array(0, dtype=jnp.int32),
+            params=params,
+            ema_params=ema_params,
+        )
+        log_for_0("Restored lightweight eval state from PyTorch checkpoint at %s", workdir)
+        return state
+
+    restored = checkpoints.restore_checkpoint(workdir, target=None)
+    step = restored.get("step", 0)
+    params = restored.get("params")
+    ema_params = restored.get("ema_params")
+
+    if params is None and ema_params is None:
+        raise ValueError(f"No params/ema_params found in checkpoint: {workdir}")
+
+    if params is None:
+        params = ema_params
+    if use_ema and ema_params is None:
+        ema_params = params
+    if not use_ema:
+        ema_params = None
+
+    state = EvalState(
+        step=jnp.asarray(step, dtype=jnp.int32),
+        params=params,
+        ema_params=ema_params,
+    )
+    log_for_0("Restored lightweight eval state from checkpoint at %s", workdir)
     return state
 
 
