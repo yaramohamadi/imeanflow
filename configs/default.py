@@ -73,6 +73,9 @@ def get_config():
     model.target_use_null_class = True
     model.source_prediction_space = "v"
     model.source_num_classes = dataset.num_classes
+    model.use_auxiliary_v_head = True
+    model.guidance_scale_strategy = "sampled"
+    model.fixed_guidance_scale = 7.5
 
     # Training Dynamics
     model.norm_p = 1.0

@@ -70,6 +70,9 @@ class iMeanFlow(nn.Module):
     target_use_null_class: bool = True
     source_prediction_space: str = "v"
     source_num_classes: int = 1000
+    use_auxiliary_v_head: bool = True
+    guidance_scale_strategy: str = "sampled"
+    fixed_guidance_scale: float = 7.5
 
     # Training dynamics
     norm_p: float = 1.0
@@ -96,6 +99,18 @@ class iMeanFlow(nn.Module):
                 use_null_class=True,
                 eval=False,
             )
+
+    def _uses_auxiliary_v_head(self):
+        return self.use_auxiliary_v_head
+
+    def _sample_guidance_scale(self, bz):
+        if self.guidance_scale_strategy == "fixed":
+            return jnp.full((bz, 1, 1, 1), self.fixed_guidance_scale, dtype=jnp.float32)
+        if self.guidance_scale_strategy != "sampled":
+            raise ValueError(
+                f"Unsupported guidance_scale_strategy: {self.guidance_scale_strategy}"
+            )
+        return self.sample_cfg_scale(bz)
 
     #######################################################
     #                       Solver                        #
@@ -199,7 +214,8 @@ class iMeanFlow(nn.Module):
     def u_fn(self, x, t, h, omega, t_min, t_max, y):
         """
         Compute the predicted u component from the model.
-        By default, we use auxiliary v-head to predict v component as well.
+        In dual-head mode this returns (u, v_head). In single-head mode it
+        returns (u, u_boundary), where u_boundary is u(x_t, t, t, y).
 
         Args:
             x: Noisy image at time t.
@@ -208,20 +224,38 @@ class iMeanFlow(nn.Module):
             omega: CFG scale.
             t_min, t_max: Guidance interval.
             y: Class labels.
-        Returns: (u, v)
+        Returns: (u, v_boundary)
             u: Predicted u (average velocity field).
-            v: Predicted v (instantaneous velocity field).
+            v_boundary: Auxiliary v prediction in dual-head mode, or the
+                single-head boundary estimate in single-head mode.
         """
         bz = x.shape[0]
-        return self.net(
+        if self._uses_auxiliary_v_head():
+            return self.net(
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+
+        del omega, t_min, t_max
+        r = t - h
+        u = self.net(
             x,
             t.reshape(bz),
-            h.reshape(bz),
-            omega.reshape(bz),
-            t_min.reshape(bz),
-            t_max.reshape(bz),
+            r.reshape(bz),
             y,
         )
+        v_boundary = self.net(
+            x,
+            t.reshape(bz),
+            t.reshape(bz),
+            y,
+        )
+        return u, v_boundary
 
     def v_cond_fn(self, x, t, omega, y):
         """
@@ -237,14 +271,10 @@ class iMeanFlow(nn.Module):
             v: Predicted v component.
         """
 
-        # Set h, t_min, t_max to dummy values for v prediction
         h = jnp.zeros_like(t)
         t_min = jnp.zeros_like(t)
         t_max = jnp.ones_like(t)
-
-        v = self.u_fn(x, t, h, omega, t_min, t_max, y=y)[1]
-
-        return v
+        return self.u_fn(x, t, h, omega, t_min, t_max, y=y)[1]
 
     def v_fn(self, x, t, omega, y):
         """
@@ -288,20 +318,30 @@ class iMeanFlow(nn.Module):
                 f"Unsupported source_prediction_space: {self.source_prediction_space}"
             )
 
-        h = jnp.zeros_like(t)
-        t_min = jnp.zeros_like(t)
-        t_max = jnp.ones_like(t)
         bz = x.shape[0]
-        _, v = self.source_net.apply(
-            {"params": source_params["net"]},
-            x,
-            t.reshape(bz),
-            h.reshape(bz),
-            omega.reshape(bz),
-            t_min.reshape(bz),
-            t_max.reshape(bz),
-            y,
-        )
+        if self._uses_auxiliary_v_head():
+            h = jnp.zeros_like(t)
+            t_min = jnp.zeros_like(t)
+            t_max = jnp.ones_like(t)
+            _, v = self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+        else:
+            del omega
+            v = self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+            )
         return v
 
     def source_v_uncond_fn(self, source_params, x, t):
@@ -405,7 +445,7 @@ class iMeanFlow(nn.Module):
 
         # Sample CFG scale and interval
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
-        omega = self.sample_cfg_scale(bz)
+        omega = self._sample_guidance_scale(bz)
 
         # Compute guided velocity v_g and conditioned velocity v_c
         v_g, v_c = self.guidance_fn(
@@ -438,7 +478,7 @@ class iMeanFlow(nn.Module):
         loss_u = jnp.sum((V - v_g) ** 2, axis=(1, 2, 3))
         loss_u = adp_wt_fn(loss_u)
 
-        # auxiliary v-head loss
+        # auxiliary v-head loss, or single-head boundary loss
         loss_v = jnp.sum((v - v_g) ** 2, axis=(1, 2, 3))
         loss_v = adp_wt_fn(loss_v)
 
@@ -467,7 +507,7 @@ class iMeanFlow(nn.Module):
         v_t = e - x
 
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
-        omega = self.sample_cfg_scale(bz)
+        omega = self._sample_guidance_scale(bz)
 
         base_w = omega
         if self.use_dogfit:
@@ -507,4 +547,6 @@ class iMeanFlow(nn.Module):
         }
 
     def __call__(self, x, t, y):
-        return self.net(x, t, t, t, t, t, y)  # initialization only
+        if self._uses_auxiliary_v_head():
+            return self.net(x, t, t, t, t, t, y)  # initialization only
+        return self.net(x, t, t, y)  # initialization only

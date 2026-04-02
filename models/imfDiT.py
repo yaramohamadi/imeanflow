@@ -726,6 +726,112 @@ class imfSiT_MF(nn.Module):
         return self.unpatchify(u), self.unpatchify(v)
 
 
+class imfSiT_DMF(nn.Module):
+    """Decoupled single-head SiT variant with encoder/decoder block split."""
+
+    input_size: int = 32
+    patch_size: int = 2
+    in_channels: int = 4
+    hidden_size: int = 1152
+    encoder_depth: int = 20
+    decoder_depth: int = 8
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    num_classes: int = 1000
+    use_null_class: bool = True
+    eval: bool = False
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        self.out_channels = self.in_channels
+
+        self.x_embedder = PatchEmbedder(
+            self.input_size,
+            self.patch_size,
+            self.in_channels,
+            self.hidden_size,
+            bias=True,
+        )
+        self.t_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.y_embedder = LabelEmbedder(
+            self.num_classes,
+            self.hidden_size,
+            use_null_class=self.use_null_class,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+
+        num_patches = (self.input_size // self.patch_size) ** 2
+        self.pos_embed = self.param(
+            "pos_embed",
+            lambda key, shape: jnp.array(
+                get_2d_sincos_pos_embed(
+                    self.hidden_size,
+                    int(self.input_size / self.patch_size),
+                ).reshape((1, num_patches, self.hidden_size))
+            ),
+            (1, num_patches, self.hidden_size),
+        )
+
+        self.rope_freqs = precompute_rope_freqs(
+            self.hidden_size // self.num_heads,
+            num_patches,
+        )
+
+        block_kwargs = dict(
+            hidden_size=self.hidden_size,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            weight_init=self.weight_init,
+            weight_init_constant=self.weight_init_constant,
+        )
+        self.encoder_blocks = [
+            SiTBlock(**block_kwargs) for _ in range(self.encoder_depth)
+        ]
+        self.decoder_blocks = [
+            SiTBlock(**block_kwargs) for _ in range(self.decoder_depth)
+        ]
+        self.final_layer = SiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+
+    def unpatchify(self, x):
+        c = self.out_channels
+        p = self.patch_size
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape((x.shape[0], h, w, p, p, c))
+        x = jnp.einsum("nhwpqc->nhpwqc", x)
+        return x.reshape((x.shape[0], h * p, w * p, c))
+
+    def __call__(self, x, t, r, y):
+        x = self.x_embedder(x) + self.pos_embed
+
+        if y is None:
+            y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
+
+        y_embed = self.y_embedder(y)
+        encoder_c = self.t_embedder(t) + y_embed
+        decoder_c = self.t_embedder(r) + y_embed
+
+        for block in self.encoder_blocks:
+            x = block(x, self.rope_freqs, encoder_c)
+
+        for block in self.decoder_blocks:
+            x = block(x, self.rope_freqs, decoder_c)
+
+        u = self.final_layer(x, decoder_c)
+        return self.unpatchify(u)
+
+
 #################################################################################
 #                                iMF DiT Configs                                #
 #################################################################################
@@ -792,4 +898,13 @@ imfSiT_XL_2 = partial(
     patch_size=2,
     num_heads=16,
     aux_head_depth=8,
+)
+
+imfSiT_DMF_XL_2 = partial(
+    imfSiT_DMF,
+    hidden_size=1152,
+    patch_size=2,
+    num_heads=16,
+    encoder_depth=20,
+    decoder_depth=8,
 )

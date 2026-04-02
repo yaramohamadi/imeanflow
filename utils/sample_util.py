@@ -64,11 +64,14 @@ def generate_fid_samples(
     return samples_all[:target_num_samples]
 
 
-def _get_eval_descriptor(kwargs, mode_str):
+def _get_eval_descriptor(kwargs, mode_str, cfg_conditioned=True):
     omega = kwargs.get("omega", None)[0]
     t_min = kwargs.get("t_min", None)[0]
     t_max = kwargs.get("t_max", None)[0]
-    descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
+    if cfg_conditioned:
+        descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
+    else:
+        descriptor = f"single_head_{mode_str}"
     return descriptor, omega, t_min, t_max
 
 
@@ -94,6 +97,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
     run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
     use_ema = config.training.get("use_ema", True)
+    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
 
     def _evaluate_one_mode(state, p_sample_step, ema, **kwargs):
         samples_all = generate_fid_samples(
@@ -110,11 +114,18 @@ def get_image_metric_evaluator(config, writer, latent_manager):
         result = {}
 
         mode_str = "ema" if ema else "online"
-        descriptor, omega, t_min, t_max = _get_eval_descriptor(kwargs, mode_str)
-        log_for_0(
-            f"Computing image metrics at omega={omega:.2f}, t_min={t_min:.2f}, "
-            f"t_max={t_max:.2f}, mode={mode_str}..."
+        descriptor, omega, t_min, t_max = _get_eval_descriptor(
+            kwargs, mode_str, cfg_conditioned=cfg_conditioned
         )
+        if cfg_conditioned:
+            log_for_0(
+                f"Computing image metrics at omega={omega:.2f}, t_min={t_min:.2f}, "
+                f"t_max={t_max:.2f}, mode={mode_str}..."
+            )
+        else:
+            log_for_0(
+                f"Computing image metrics for single-head evaluation, mode={mode_str}..."
+            )
 
         fid = fid_util.compute_fid(
             fid_stats_ref["mu"],

@@ -261,9 +261,14 @@ def _get_eval_sampling_configs(config):
     train-style scalar sampling fields.
     """
     sampling = config.sampling
+    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
 
     intervals = sampling.get("interval", None)
     omegas = sampling.get("omegas", None)
+    if not cfg_conditioned and intervals is not None and omegas is not None:
+        t_min, t_max = intervals[0]
+        omega = omegas[0]
+        return [(omega, t_min, t_max)]
     if intervals is not None and omegas is not None:
         configs = []
         for interval in intervals:
@@ -672,6 +677,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     best_config = None
     best_fd_dino_config = None
     best_fd_dino_at_best_fid = None
+    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
     for omega, t_min, t_max in _get_eval_sampling_configs(config):
         kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
         kwargs = jax_utils.replicate(kwargs)
@@ -692,19 +698,26 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     summary = {
         'best_fid': best_fid,
         'best_is': best_is,
-        'omega': best_config[0],
-        't_min': best_config[1],
-        't_max': best_config[2],
     }
-    log_message = (
-        f"Best FID achieved: {best_fid:.2f}, \n"
-        f"IS achieved: {best_is:.2f}, \n"
-        f"omega: {best_config[0]:.2f}, t_min: {best_config[1]:.2f}, t_max: {best_config[2]:.2f}"
-    )
+    if cfg_conditioned:
+        summary['omega'] = best_config[0]
+        summary['t_min'] = best_config[1]
+        summary['t_max'] = best_config[2]
+        log_message = (
+            f"Best FID achieved: {best_fid:.2f}, \n"
+            f"IS achieved: {best_is:.2f}, \n"
+            f"omega: {best_config[0]:.2f}, t_min: {best_config[1]:.2f}, t_max: {best_config[2]:.2f}"
+        )
+    else:
+        log_message = (
+            f"Best FID achieved: {best_fid:.2f}, \n"
+            f"IS achieved: {best_is:.2f}, \n"
+            f"single-head SiT-DMF eval used the model's fixed external guidance settings."
+        )
     if best_fd_dino_at_best_fid is not None:
         summary['best_fd_dino_at_best_fid'] = best_fd_dino_at_best_fid
         log_message += f", \nFD-DINO at best FID config: {best_fd_dino_at_best_fid:.2f}"
-    if best_fd_dino_config is not None:
+    if best_fd_dino_config is not None and cfg_conditioned:
         summary['best_fd_dino'] = best_fd_dino
         summary['best_fd_dino_omega'] = best_fd_dino_config[0]
         summary['best_fd_dino_t_min'] = best_fd_dino_config[1]
@@ -715,6 +728,9 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
             f"t_min: {best_fd_dino_config[1]:.2f}, "
             f"t_max: {best_fd_dino_config[2]:.2f}"
         )
+    elif best_fd_dino_config is not None:
+        summary['best_fd_dino'] = best_fd_dino
+        log_message += f", \nBest FD-DINO achieved: {best_fd_dino:.2f}"
     log_for_0(log_message)
     writer.write_scalars(step, summary)
 
