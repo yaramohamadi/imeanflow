@@ -107,6 +107,24 @@ def _transpose_linear(weight):
     return _to_numpy(weight).T
 
 
+def _slice_patchwise_output_channels(weight, bias, *, patch_size, target_out_channels):
+    """Keep the first target_out_channels within each patch-position channel group."""
+    weight_np = _to_numpy(weight)
+    bias_np = _to_numpy(bias)
+    num_patch_positions = patch_size * patch_size
+    source_out_channels = weight_np.shape[0] // num_patch_positions
+    reshaped_w = weight_np.reshape(num_patch_positions, source_out_channels, weight_np.shape[1])
+    reshaped_b = bias_np.reshape(num_patch_positions, source_out_channels)
+    sliced_w = reshaped_w[:, :target_out_channels, :].reshape(
+        num_patch_positions * target_out_channels,
+        weight_np.shape[1],
+    )
+    sliced_b = reshaped_b[:, :target_out_channels].reshape(
+        num_patch_positions * target_out_channels,
+    )
+    return sliced_w, sliced_b
+
+
 def _convert_qkv(weight, bias):
     w = _to_numpy(weight)
     b = _to_numpy(bias)
@@ -125,7 +143,10 @@ def _convert_qkv(weight, bias):
 
 def _load_torch_checkpoint_state_dict(workdir):
     torch = _import_torch()
-    raw = torch.load(workdir, map_location="cpu")
+    try:
+        raw = torch.load(workdir, map_location="cpu", weights_only=True)
+    except TypeError:
+        raw = torch.load(workdir, map_location="cpu")
     if isinstance(raw, dict) and "state_dict" in raw:
         raw = raw["state_dict"]
     elif isinstance(raw, dict) and "model" in raw and isinstance(raw["model"], dict):
@@ -281,6 +302,34 @@ def _convert_torch_sit_state_dict_to_flax_mf(source_dict):
     return {"net": state}
 
 
+def _convert_torch_sit_state_dict_to_flax_exact(source_dict):
+    """Convert a SiT PyTorch state_dict into the exact Flax SiT tree."""
+    state = _convert_torch_sit_common_state(source_dict)
+
+    time_params = _extract_sit_time_embedder_params(source_dict)
+    if time_params is not None:
+        _set_sit_time_embedder(state, "t_embedder", time_params)
+
+    blocks = [key for key in source_dict.keys() if key.startswith("blocks.")]
+    block_indices = sorted({int(k.split(".")[1]) for k in blocks})
+    for i in block_indices:
+        path_prefix = f"blocks.{i}"
+        block_params = _extract_sit_block_params(source_dict, path_prefix)
+        _assign_sit_block(state, f"blocks_{i}", block_params)
+
+    if "final_layer.linear.weight" in source_dict:
+        final_w = _transpose_linear(source_dict["final_layer.linear.weight"])
+        final_b = _to_numpy(source_dict["final_layer.linear.bias"])
+        final_ada_w = _transpose_linear(source_dict["final_layer.adaLN_modulation.1.weight"])
+        final_ada_b = _to_numpy(source_dict["final_layer.adaLN_modulation.1.bias"])
+        _set_param(state, "final_layer/linear/_flax_linear/kernel", final_w)
+        _set_param(state, "final_layer/linear/_flax_linear/bias", final_b)
+        _set_param(state, "final_layer/adaLN_modulation/_flax_linear/kernel", final_ada_w)
+        _set_param(state, "final_layer/adaLN_modulation/_flax_linear/bias", final_ada_b)
+
+    return {"net": state}
+
+
 def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20):
     """Convert a SiT PyTorch state_dict into the decoupled single-head Flax SiT tree."""
     state = _convert_torch_sit_common_state(source_dict)
@@ -302,8 +351,14 @@ def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20):
                 _assign_sit_block(state, f"decoder_blocks_{i - encoder_depth}", block_params)
 
     if "final_layer.linear.weight" in source_dict:
-        final_w = _transpose_linear(source_dict["final_layer.linear.weight"])
-        final_b = _to_numpy(source_dict["final_layer.linear.bias"])
+        final_w_raw, final_b_raw = _slice_patchwise_output_channels(
+            source_dict["final_layer.linear.weight"],
+            source_dict["final_layer.linear.bias"],
+            patch_size=2,
+            target_out_channels=4,
+        )
+        final_w = final_w_raw.T
+        final_b = final_b_raw
         final_ada_w = _transpose_linear(source_dict["final_layer.adaLN_modulation.1.weight"])
         final_ada_b = _to_numpy(source_dict["final_layer.adaLN_modulation.1.bias"])
         _set_param(state, "final_layer/linear/_flax_linear/kernel", final_w)
@@ -319,6 +374,18 @@ def _target_uses_dmf_sit_layout(target_state):
         return False
     net_state = target_state.get("net")
     return isinstance(net_state, dict) and "encoder_blocks_0" in net_state
+
+
+def _target_uses_exact_sit_layout(target_state):
+    if not isinstance(target_state, dict):
+        return False
+    net_state = target_state.get("net")
+    return (
+        isinstance(net_state, dict)
+        and "blocks_0" in net_state
+        and "shared_blocks_0" not in net_state
+        and "encoder_blocks_0" not in net_state
+    )
 
 
 def _infer_dmf_encoder_depth(target_state):
@@ -343,6 +410,8 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None):
     if os.path.isfile(workdir) and workdir.endswith((".pt", ".pth", ".pth.tar")):
         source_tree = _load_torch_checkpoint_state_dict(workdir)
         log_for_0("Loaded PyTorch checkpoint from {}".format(workdir))
+        if _target_uses_exact_sit_layout(target_state):
+            return _convert_torch_sit_state_dict_to_flax_exact(source_tree)
         if _target_uses_dmf_sit_layout(target_state):
             encoder_depth = _infer_dmf_encoder_depth(target_state)
             return _convert_torch_sit_state_dict_to_flax_dmf(

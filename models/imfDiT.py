@@ -537,7 +537,7 @@ class SiTBlock(nn.Module):
         )
 
     def __call__(self, x, rope_freqs, c):
-        modulation = nn.silu(self.adaLN_modulation(c))
+        modulation = self.adaLN_modulation(nn.silu(c))
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
             modulation, 6, axis=-1
         )
@@ -573,9 +573,215 @@ class SiTFinalLayer(nn.Module):
         )
 
     def __call__(self, x, c):
-        shift, scale = jnp.split(nn.silu(self.adaLN_modulation(c)), 2, axis=-1)
+        shift, scale = jnp.split(self.adaLN_modulation(nn.silu(c)), 2, axis=-1)
         x = modulate(self.norm_final(x), shift, scale)
         return self.linear(x)
+
+
+class ExactSiTAttention(nn.Module):
+    """Attention module matching the original torch SiT block more closely."""
+
+    hidden_size: int
+    num_heads: int
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        init_kwargs = dict(
+            in_features=self.hidden_size,
+            out_features=self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.q_proj = TorchLinear(**init_kwargs)
+        self.k_proj = TorchLinear(**init_kwargs)
+        self.v_proj = TorchLinear(**init_kwargs)
+        self.out_proj = TorchLinear(**init_kwargs)
+        self.head_dim = self.hidden_size // self.num_heads
+
+    def __call__(self, x):
+        batch, seq_len, _ = x.shape
+        q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim)
+        k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim)
+        v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim)
+
+        q = jnp.transpose(q, (0, 2, 1, 3))
+        k = jnp.transpose(k, (0, 2, 1, 3))
+        v = jnp.transpose(v, (0, 2, 1, 3))
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn = jnp.einsum("bhqd,bhkd->bhqk", q, k) * scale
+        attn = nn.softmax(attn.astype(jnp.float32), axis=-1).astype(x.dtype)
+        out = jnp.einsum("bhqk,bhkd->bhqd", attn, v)
+        out = jnp.transpose(out, (0, 2, 1, 3)).reshape(batch, seq_len, self.hidden_size)
+        return self.out_proj(out)
+
+
+class ExactSiTMlp(nn.Module):
+    hidden_size: int
+    mlp_ratio: float = 4.0
+    weight_init: str = "scaled_variance"
+    init_constant: float = 1.0
+
+    def setup(self):
+        hidden_dim = int(self.hidden_size * self.mlp_ratio)
+        self.fc1 = TorchLinear(
+            self.hidden_size,
+            hidden_dim,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+        self.fc2 = TorchLinear(
+            hidden_dim,
+            self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.init_constant,
+        )
+
+    def __call__(self, x):
+        x = self.fc1(x)
+        x = nn.gelu(x, approximate=True)
+        return self.fc2(x)
+
+
+class ExactSiTBlock(nn.Module):
+    hidden_size: int
+    num_heads: int
+    mlp_ratio: float = 4.0
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        self.norm1 = nn.LayerNorm(epsilon=1e-6, use_scale=False, use_bias=False)
+        self.attn = ExactSiTAttention(
+            self.hidden_size,
+            num_heads=self.num_heads,
+            weight_init=self.weight_init,
+            weight_init_constant=self.weight_init_constant,
+        )
+        self.norm2 = nn.LayerNorm(epsilon=1e-6, use_scale=False, use_bias=False)
+        self.mlp = ExactSiTMlp(
+            self.hidden_size,
+            mlp_ratio=self.mlp_ratio,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.adaLN_modulation = TorchLinear(
+            self.hidden_size,
+            6 * self.hidden_size,
+            bias=True,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+
+    def __call__(self, x, c):
+        modulation = self.adaLN_modulation(nn.silu(c))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
+            modulation, 6, axis=-1
+        )
+        x = x + gate_msa[:, None, :] * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa)
+        )
+        x = x + gate_mlp[:, None, :] * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+        return x
+
+
+class FlaxSiT(nn.Module):
+    """Exact-flavor Flax SiT baseline for checkpoint parity debugging."""
+
+    input_size: int = 32
+    patch_size: int = 2
+    in_channels: int = 4
+    hidden_size: int = 1152
+    depth: int = 28
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    num_classes: int = 1000
+    use_null_class: bool = True
+    learn_sigma: bool = True
+    eval: bool = False
+    weight_init: str = "scaled_variance"
+    weight_init_constant: float = 1.0
+
+    def setup(self):
+        self.out_channels = self.in_channels * 2 if self.learn_sigma else self.in_channels
+
+        self.x_embedder = PatchEmbedder(
+            self.input_size,
+            self.patch_size,
+            self.in_channels,
+            self.hidden_size,
+            bias=True,
+        )
+        self.t_embedder = SiTTimeEmbedder(
+            self.hidden_size,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+        self.y_embedder = LabelEmbedder(
+            self.num_classes,
+            self.hidden_size,
+            use_null_class=self.use_null_class,
+            weight_init=self.weight_init,
+            init_constant=self.weight_init_constant,
+        )
+
+        num_patches = (self.input_size // self.patch_size) ** 2
+        self.pos_embed = self.param(
+            "pos_embed",
+            lambda key, shape: jnp.array(
+                get_2d_sincos_pos_embed(
+                    self.hidden_size,
+                    int(self.input_size / self.patch_size),
+                ).reshape((1, num_patches, self.hidden_size))
+            ),
+            (1, num_patches, self.hidden_size),
+        )
+
+        block_kwargs = dict(
+            hidden_size=self.hidden_size,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            weight_init=self.weight_init,
+            weight_init_constant=self.weight_init_constant,
+        )
+        self.blocks = [ExactSiTBlock(**block_kwargs) for _ in range(self.depth)]
+        self.final_layer = SiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+
+    def unpatchify(self, x):
+        c = self.out_channels
+        p = self.patch_size
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape((x.shape[0], h, w, p, p, c))
+        x = jnp.einsum("nhwpqc->nhpwqc", x)
+        return x.reshape((x.shape[0], h * p, w * p, c))
+
+    def __call__(self, x, t, y):
+        x = self.x_embedder(x) + self.pos_embed
+
+        if y is None:
+            y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
+
+        c = self.t_embedder(t) + self.y_embedder(y)
+        for block in self.blocks:
+            x = block(x, c)
+
+        x = self.final_layer(x, c)
+        x = self.unpatchify(x)
+        if self.learn_sigma:
+            x, _ = jnp.split(x, 2, axis=-1)
+        return x
 
 
 class imfSiT_MF(nn.Module):
@@ -778,11 +984,6 @@ class imfSiT_DMF(nn.Module):
             (1, num_patches, self.hidden_size),
         )
 
-        self.rope_freqs = precompute_rope_freqs(
-            self.hidden_size // self.num_heads,
-            num_patches,
-        )
-
         block_kwargs = dict(
             hidden_size=self.hidden_size,
             num_heads=self.num_heads,
@@ -791,10 +992,10 @@ class imfSiT_DMF(nn.Module):
             weight_init_constant=self.weight_init_constant,
         )
         self.encoder_blocks = [
-            SiTBlock(**block_kwargs) for _ in range(self.encoder_depth)
+            ExactSiTBlock(**block_kwargs) for _ in range(self.encoder_depth)
         ]
         self.decoder_blocks = [
-            SiTBlock(**block_kwargs) for _ in range(self.decoder_depth)
+            ExactSiTBlock(**block_kwargs) for _ in range(self.decoder_depth)
         ]
         self.final_layer = SiTFinalLayer(
             self.hidden_size,
@@ -823,10 +1024,10 @@ class imfSiT_DMF(nn.Module):
         decoder_c = self.t_embedder(r) + y_embed
 
         for block in self.encoder_blocks:
-            x = block(x, self.rope_freqs, encoder_c)
+            x = block(x, encoder_c)
 
         for block in self.decoder_blocks:
-            x = block(x, self.rope_freqs, decoder_c)
+            x = block(x, decoder_c)
 
         u = self.final_layer(x, decoder_c)
         return self.unpatchify(u)
@@ -907,4 +1108,22 @@ imfSiT_DMF_XL_2 = partial(
     num_heads=16,
     encoder_depth=20,
     decoder_depth=8,
+)
+
+imfSiT_DMF_XL_2_ZS = partial(
+    imfSiT_DMF,
+    hidden_size=1152,
+    patch_size=2,
+    num_heads=16,
+    encoder_depth=22,
+    decoder_depth=6,
+)
+
+flaxSiT_XL_2 = partial(
+    FlaxSiT,
+    depth=28,
+    hidden_size=1152,
+    patch_size=2,
+    num_heads=16,
+    learn_sigma=True,
 )
