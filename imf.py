@@ -39,7 +39,11 @@ def generate(variable, model, rng, n_sample, config,
     else:
         y = jax.random.randint(rng_sample, (n_sample,), 0, num_classes)
 
-    t_steps = jnp.linspace(1.0, 0.0, num_steps + 1)
+    meanflow_reverse_time = bool(config.sampling.get("meanflow_reverse_time", False))
+    if model._uses_auxiliary_v_head() or meanflow_reverse_time:
+        t_steps = jnp.linspace(1.0, 0.0, num_steps + 1)
+    else:
+        t_steps = jnp.linspace(0.0, 1.0, num_steps + 1)
 
     def step_fn(i, x_i):
         return model.apply(variable, x_i, y, i, t_steps,
@@ -112,6 +116,37 @@ class iMeanFlow(nn.Module):
             )
         return self.sample_cfg_scale(bz)
 
+    def guided_u_fn(self, x, t, r, omega, t_min, t_max, y):
+        """
+        Compute a classifier-free guided average velocity for single-head DMF sampling.
+
+        Guidance is applied on the first three channels to mirror the SiT-compatible
+        preview path; the remaining channel is taken from the conditioned branch.
+        """
+        bz = x.shape[0]
+        y_null = jnp.full((bz,), self.num_classes, dtype=jnp.int32)
+        x_cat = jnp.concatenate([x, x], axis=0)
+        y_cat = jnp.concatenate([y, y_null], axis=0)
+        t_cat = jnp.concatenate([t, t], axis=0)
+        h = t - r
+        h_cat = jnp.concatenate([h, h], axis=0)
+        omega_cat = jnp.concatenate([omega, omega], axis=0)
+        t_min_cat = jnp.concatenate([t_min, t_min], axis=0)
+        t_max_cat = jnp.concatenate([t_max, t_max], axis=0)
+        u_cat, _ = self.u_fn(
+            x_cat,
+            t_cat,
+            h_cat,
+            omega_cat,
+            t_min_cat,
+            t_max_cat,
+            y_cat,
+        )
+        u_c, u_u = jnp.split(u_cat, 2, axis=0)
+        omega_scale = omega.reshape((bz, 1, 1, 1))
+        guided_first_three = u_u[..., :3] + omega_scale * (u_c[..., :3] - u_u[..., :3])
+        return jnp.concatenate([guided_first_three, u_c[..., 3:]], axis=-1)
+
     #######################################################
     #                       Solver                        #
     #######################################################
@@ -138,9 +173,12 @@ class iMeanFlow(nn.Module):
         t_min = jnp.broadcast_to(t_min, (bsz,))
         t_max = jnp.broadcast_to(t_max, (bsz,))
 
-        u = self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels)[0]
+        if self._uses_auxiliary_v_head():
+            u = self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels)[0]
+        else:
+            u = self.guided_u_fn(z_t, t, r, omega, t_min, t_max, labels)
 
-        return z_t - jnp.einsum("n,n...->n...", t - r, u)
+        return z_t + jnp.einsum("n,n...->n...", r - t, u)
 
     #######################################################
     #                       Schedule                      #

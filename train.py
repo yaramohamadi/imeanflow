@@ -405,6 +405,25 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     }
     sample_kwargs = jax_utils.replicate(sample_kwargs)
 
+    def log_preview_samples(state_for_logging, step_for_logging):
+        num_images = config.fid.num_images_to_log
+        grid_size = int(num_images ** 0.5)
+        if grid_size ** 2 != num_images:
+            raise ValueError(
+                f"config.fid.num_images_to_log must be a perfect square, got {num_images}"
+            )
+        log_for_0("Logging %d preview samples at step %d.", num_images, step_for_logging)
+        samples = generate_fid_samples(
+            state_for_logging,
+            config,
+            p_sample_step,
+            partial(run_p_sample_step, latent_manager=latent_manager),
+            use_ema,
+            num_samples=num_images,
+            **sample_kwargs,
+        )
+        writer.write_image_grid(step_for_logging, samples, grid_size)
+
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
     best_fid = float("inf")
     best_fid_ckpt_dir = os.path.join(
@@ -416,6 +435,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     ########### Training Loop ###########
     metrics_tracker = MetricsTracker()
     log_for_0("Initial compilation, this might take some minutes...")
+
+    initial_step = int(jax.device_get(state.step)[0])
+    if initial_step == 0 and config.training.sample_per_step > 0:
+        log_preview_samples(state, 0)
 
     should_stop = False
     for epoch in range(epoch_offset, config.training.num_epochs):
@@ -560,23 +583,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
             ########### Sampling ###########
             if did_update and current_step > 0 and current_step % config.training.sample_per_step == 0:
-                num_images = config.fid.num_images_to_log
-                grid_size = int(num_images ** 0.5)
-                if grid_size ** 2 != num_images:
-                    raise ValueError(
-                        f"config.fid.num_images_to_log must be a perfect square, got {num_images}"
-                    )
-                log_for_0("Logging %d preview samples at step %d.", num_images, current_step)
-                samples = generate_fid_samples(
-                    state,
-                    config,
-                    p_sample_step,
-                    partial(run_p_sample_step, latent_manager=latent_manager),
-                    use_ema,
-                    num_samples=num_images,
-                    **sample_kwargs,
-                )
-                writer.write_image_grid(current_step, samples, grid_size)
+                log_preview_samples(state, current_step)
 
             ########### FID ###########
             if did_update and current_step > 0 and current_step % config.training.fid_per_step == 0:

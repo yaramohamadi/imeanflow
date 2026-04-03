@@ -86,6 +86,7 @@ def get_config():
     config.sampling = sampling = ml_collections.ConfigDict()
     sampling.num_steps = 1
     sampling.num_classes = dataset.num_classes
+    sampling.meanflow_reverse_time = False
 
     # ------------------------------------------------------------
     # FID
