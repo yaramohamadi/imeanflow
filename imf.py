@@ -75,6 +75,7 @@ class iMeanFlow(nn.Module):
     source_prediction_space: str = "v"
     source_num_classes: int = 1000
     use_auxiliary_v_head: bool = True
+    use_training_guidance: bool = True
     guidance_scale_strategy: str = "sampled"
     fixed_guidance_scale: float = 7.5
 
@@ -106,6 +107,12 @@ class iMeanFlow(nn.Module):
 
     def _uses_auxiliary_v_head(self):
         return self.use_auxiliary_v_head
+
+    def _uses_sit_dmf_time_convention(self):
+        return (not self._uses_auxiliary_v_head()) and ("SiT" in self.model_str)
+
+    def _uses_sit_cfg_channel_rule(self):
+        return "SiT" in self.model_str
 
     def _sample_guidance_scale(self, bz):
         if self.guidance_scale_strategy == "fixed":
@@ -196,7 +203,10 @@ class iMeanFlow(nn.Module):
         """
         t = self.logit_normal_dist(bz)
         r = self.logit_normal_dist(bz)
-        t, r = jnp.maximum(t, r), jnp.minimum(t, r)
+        if self._uses_sit_dmf_time_convention():
+            t, r = jnp.minimum(t, r), jnp.maximum(t, r)
+        else:
+            t, r = jnp.maximum(t, r), jnp.minimum(t, r)
 
         data_size = int(bz * self.data_proportion)
         fm_mask = jnp.arange(bz) < data_size
@@ -443,6 +453,10 @@ class iMeanFlow(nn.Module):
 
         del r, fm_mask  # This method variant uses one interval-adjusted v_c everywhere.
 
+        if not self.use_training_guidance:
+            v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
+            return v_t, v_c
+
         w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
 
         if self.use_dogfit:
@@ -451,7 +465,14 @@ class iMeanFlow(nn.Module):
         else:
             v_c, v_u = self.v_fn(z_t, t, w_eff, y=y)
 
-        v_g = v_t + (1 - 1 / w_eff) * (v_c - v_u)
+        if self._uses_sit_cfg_channel_rule():
+            guided_first_three = (
+                v_t[..., :3]
+                + (1 - 1 / w_eff) * (v_c[..., :3] - v_u[..., :3])
+            )
+            v_g = jnp.concatenate([guided_first_three, v_c[..., 3:]], axis=-1)
+        else:
+            v_g = v_t + (1 - 1 / w_eff) * (v_c - v_u)
 
         return v_g, v_c
 
@@ -478,8 +499,12 @@ class iMeanFlow(nn.Module):
         t, r, fm_mask = self.sample_tr(bz)
 
         e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
-        z_t = (1 - t) * x + t * e
-        v_t = e - x
+        if self._uses_sit_dmf_time_convention():
+            z_t = (1 - t) * e + t * x
+            v_t = x - e
+        else:
+            z_t = (1 - t) * x + t * e
+            v_t = e - x
 
         # Sample CFG scale and interval
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
@@ -541,8 +566,12 @@ class iMeanFlow(nn.Module):
         t, r, fm_mask = self.sample_tr(bz)
 
         e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
-        z_t = (1 - t) * x + t * e
-        v_t = e - x
+        if self._uses_sit_dmf_time_convention():
+            z_t = (1 - t) * e + t * x
+            v_t = x - e
+        else:
+            z_t = (1 - t) * x + t * e
+            v_t = e - x
 
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
         omega = self._sample_guidance_scale(bz)

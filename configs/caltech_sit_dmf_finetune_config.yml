@@ -25,7 +25,7 @@ training:
 
     num_epochs: 200
     max_train_steps: 30000
-    batch_size: 16
+    batch_size: 32
     use_ema: False
     learning_rate: 0.0001
     warmup_epochs: 5
@@ -36,9 +36,10 @@ training:
     sample_per_step: 500
     fid_per_step: 1000
     debug_log_during_train: True
+    debug_log_images: True
     debug_num_images: 4
     debug_velocity_decode_scale: 0.1
-    grad_accum_steps: 2
+    grad_accum_steps: 1
     save_best_fid_only: True
     best_fid_checkpoint_dir: 'best_fid'
     capture_source_from_load: False

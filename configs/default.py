@@ -40,6 +40,7 @@ def get_config():
     training.checkpoint_per_epoch = 10
     training.fid_per_step = 1000
     training.debug_log_during_train = False
+    training.debug_log_images = True
     training.debug_num_images = 4
     training.debug_velocity_decode_scale = 0.1
     training.grad_accum_steps = 1
@@ -74,6 +75,7 @@ def get_config():
     model.source_prediction_space = "v"
     model.source_num_classes = dataset.num_classes
     model.use_auxiliary_v_head = True
+    model.use_training_guidance = True
     model.guidance_scale_strategy = "sampled"
     model.fixed_guidance_scale = 7.5
 

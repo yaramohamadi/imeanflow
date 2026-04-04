@@ -5,12 +5,14 @@ Training and evaluation for improved MeanFlow.
 import jax
 import jax.numpy as jnp
 import ml_collections
+import numpy as np
 import os
 import torch
 from flax import jax_utils
 from jax import lax, random
 from functools import partial
 from optax._src.alias import *
+from PIL import Image, ImageDraw
 
 from imf import iMeanFlow, generate
 
@@ -167,6 +169,7 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
         "debug/v_u_abs_mean": jnp.mean(jnp.abs(v_u)),
         "debug/v_c_mean": jnp.mean(v_c),
         "debug/v_c_abs_mean": jnp.mean(jnp.abs(v_c)),
+        "debug/v_c_minus_v_u_abs_mean": jnp.mean(jnp.abs(v_c - v_u)),
         "debug/v_pred_mean": jnp.mean(v_pred),
         "debug/v_pred_abs_mean": jnp.mean(jnp.abs(v_pred)),
         "debug/V_mean": jnp.mean(V),
@@ -210,6 +213,113 @@ def _latents_to_uint8_images(latent_manager, latents_bhwc):
 def _velocity_step_to_uint8_images(latent_manager, z_t_bhwc, velocity_bhwc, step_scale):
     stepped_latents = z_t_bhwc - step_scale * velocity_bhwc
     return _latents_to_uint8_images(latent_manager, stepped_latents)
+
+
+def _make_uint8_image_grid(images, grid_size):
+    if len(images) != grid_size ** 2:
+        raise ValueError(
+            f"Number of images must match grid size squared, got {len(images)} and {grid_size}."
+        )
+
+    images = np.asarray(images, dtype=np.uint8)
+    image_h, image_w, image_c = images.shape[1:]
+    rows = []
+    for row_idx in range(grid_size):
+        row = images[row_idx * grid_size : (row_idx + 1) * grid_size]
+        rows.append(np.concatenate(list(row), axis=1))
+    return np.concatenate(rows, axis=0).reshape(
+        grid_size * image_h, grid_size * image_w, image_c
+    )
+
+
+def _make_side_by_side_preview_panel(step_to_images, grid_size, separator_width=8):
+    ordered_steps = sorted(step_to_images.keys())
+    grids = [_make_uint8_image_grid(step_to_images[num_steps], grid_size) for num_steps in ordered_steps]
+
+    separator = np.full(
+        (grids[0].shape[0], separator_width, grids[0].shape[2]),
+        255,
+        dtype=np.uint8,
+    )
+    panel_parts = []
+    for idx, grid in enumerate(grids):
+        if idx > 0:
+            panel_parts.append(separator)
+        panel_parts.append(grid)
+    return np.concatenate(panel_parts, axis=1)
+
+
+def _make_stacked_grid_panel(
+    image_groups,
+    grid_size,
+    separator_width=8,
+    separator_height=8,
+    header_height=24,
+):
+    ordered_names = list(image_groups.keys())
+    grids = [_make_uint8_image_grid(image_groups[name], grid_size) for name in ordered_names]
+
+    panel_parts = []
+    for idx, (name, grid) in enumerate(zip(ordered_names, grids)):
+        if idx > 0:
+            separator = np.full(
+                (separator_height, grid.shape[1], grid.shape[2]),
+                255,
+                dtype=np.uint8,
+            )
+            panel_parts.append(separator)
+
+        header = Image.new("RGB", (grid.shape[1], header_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(header)
+        draw.text((8, 4), name, fill=(0, 0, 0))
+        panel_parts.append(np.asarray(header, dtype=np.uint8))
+        panel_parts.append(grid)
+    return np.concatenate(panel_parts, axis=0)
+
+
+def _generate_preview_samples_first_device(
+    state,
+    p_sample_step,
+    latent_manager,
+    ema=True,
+    num_samples=None,
+    **kwargs,
+):
+    target_num_samples = num_samples
+    if target_num_samples is None:
+        raise ValueError("num_samples must be provided for first-device preview generation.")
+
+    num_iters = int(np.ceil(target_num_samples / latent_manager.batch_size))
+    samples_all = []
+
+    params = state.ema_params if ema else state.params
+    variable = {"params": params}
+
+    log_for_0("Note: the first preview sample may be significantly slower")
+    for step in range(num_iters):
+        sample_idx = jnp.arange(jax.local_device_count(), dtype=jnp.int32)
+        sample_idx = sample_idx + step * jax.local_device_count()
+        log_for_0(f"Preview sampling step {step} / {num_iters} on first local device...")
+
+        latent = p_sample_step(variable, sample_idx=sample_idx, **kwargs)
+        latent = latent[0]  # first local device only
+        decode_total = latent_manager.batch_size * jax.local_device_count()
+        if latent.shape[0] < decode_total:
+            pad_shape = (decode_total - latent.shape[0],) + latent.shape[1:]
+            latent = jnp.concatenate(
+                [latent, jnp.zeros(pad_shape, dtype=latent.dtype)],
+                axis=0,
+            )
+
+        samples = latent_manager.decode(latent)
+        samples = samples[: latent_manager.batch_size]
+        samples = samples.transpose(0, 2, 3, 1)
+        samples = 127.5 * samples + 128.0
+        samples = jnp.clip(samples, 0, 255).astype(jnp.uint8)
+        samples_all.append(np.asarray(jax.device_get(samples)))
+
+    samples_all = np.concatenate(samples_all, axis=0)
+    return samples_all[:target_num_samples]
 
 
 #######################################################
@@ -386,17 +496,24 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         axis_name="batch",
     )
 
-    p_sample_step = jax.pmap(
-        partial(
-            sample_step,
-            model=model,
-            rng_init=random.PRNGKey(99),
-            config=config,
-            device_batch_size=device_bsz,
-            num_steps=config.sampling.num_steps,
-        ),
-        axis_name="batch",
-    )
+    def build_p_sample_step(num_steps):
+        return jax.pmap(
+            partial(
+                sample_step,
+                model=model,
+                rng_init=random.PRNGKey(99),
+                config=config,
+                device_batch_size=device_bsz,
+                num_steps=num_steps,
+            ),
+            axis_name="batch",
+        )
+
+    p_sample_step = build_p_sample_step(config.sampling.num_steps)
+    preview_num_steps = (1, 2, 4)
+    p_preview_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
+    }
 
     sample_kwargs = {
         "omega": config.sampling.omega,
@@ -406,23 +523,32 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     sample_kwargs = jax_utils.replicate(sample_kwargs)
 
     def log_preview_samples(state_for_logging, step_for_logging):
-        num_images = config.fid.num_images_to_log
+        num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
         grid_size = int(num_images ** 0.5)
-        if grid_size ** 2 != num_images:
+        num_images = grid_size ** 2
+        if num_images <= 0:
             raise ValueError(
-                f"config.fid.num_images_to_log must be a perfect square, got {num_images}"
+                "Preview logging requires at least one square grid image on the first device."
             )
-        log_for_0("Logging %d preview samples at step %d.", num_images, step_for_logging)
-        samples = generate_fid_samples(
-            state_for_logging,
-            config,
-            p_sample_step,
-            partial(run_p_sample_step, latent_manager=latent_manager),
-            use_ema,
-            num_samples=num_images,
-            **sample_kwargs,
+        log_for_0(
+            "Logging %d preview samples at step %d for %s steps.",
+            num_images,
+            step_for_logging,
+            preview_num_steps,
         )
-        writer.write_image_grid(step_for_logging, samples, grid_size)
+        preview_images = {}
+        for num_steps, p_preview_step in p_preview_sample_steps.items():
+            preview_images[num_steps] = _generate_preview_samples_first_device(
+                state_for_logging,
+                p_preview_step,
+                latent_manager,
+                use_ema,
+                num_samples=num_images,
+                **sample_kwargs,
+            )
+
+        preview_panel = _make_side_by_side_preview_panel(preview_images, grid_size)
+        writer.write_images(step_for_logging, {"image_grid": preview_panel})
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
     best_fid = float("inf")
@@ -503,83 +629,63 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     V = jax.device_get(debug_outputs["V"]).reshape(-1, *debug_outputs["V"].shape[2:])[:debug_num_images]
                     v_g = jax.device_get(debug_outputs["v_g"]).reshape(-1, *debug_outputs["v_g"].shape[2:])[:debug_num_images]
 
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(_latents_to_uint8_images(latent_manager, jnp.asarray(x))),
-                        debug_grid_size,
-                        key="debug_clean_latents",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(_latents_to_uint8_images(latent_manager, jnp.asarray(z_t))),
-                        debug_grid_size,
-                        key="debug_noisy_latents",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(
-                            _velocity_step_to_uint8_images(
-                                latent_manager,
-                                jnp.asarray(z_t),
-                                jnp.asarray(v_u),
-                                debug_velocity_decode_scale,
-                            )
-                        ),
-                        debug_grid_size,
-                        key="debug_v_u_step",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(
-                            _velocity_step_to_uint8_images(
-                                latent_manager,
-                                jnp.asarray(z_t),
-                                jnp.asarray(v_c),
-                                debug_velocity_decode_scale,
-                            )
-                        ),
-                        debug_grid_size,
-                        key="debug_v_c_step",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(
-                            _velocity_step_to_uint8_images(
-                                latent_manager,
-                                jnp.asarray(z_t),
-                                jnp.asarray(v_pred),
-                                debug_velocity_decode_scale,
-                            )
-                        ),
-                        debug_grid_size,
-                        key="debug_v_pred_step",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(
-                            _velocity_step_to_uint8_images(
-                                latent_manager,
-                                jnp.asarray(z_t),
-                                jnp.asarray(V),
-                                debug_velocity_decode_scale,
-                            )
-                        ),
-                        debug_grid_size,
-                        key="debug_V_step",
-                    )
-                    writer.write_image_grid(
-                        current_step,
-                        jax.device_get(
-                            _velocity_step_to_uint8_images(
-                                latent_manager,
-                                jnp.asarray(z_t),
-                                jnp.asarray(v_g),
-                                debug_velocity_decode_scale,
-                            )
-                        ),
-                        debug_grid_size,
-                        key="debug_v_g_step",
-                    )
+                    if config.training.get("debug_log_images", True):
+                        debug_image_groups = {
+                            "clean": jax.device_get(
+                                _latents_to_uint8_images(latent_manager, jnp.asarray(x))
+                            ),
+                            "noisy": jax.device_get(
+                                _latents_to_uint8_images(latent_manager, jnp.asarray(z_t))
+                            ),
+                            "v_u": jax.device_get(
+                                _velocity_step_to_uint8_images(
+                                    latent_manager,
+                                    jnp.asarray(z_t),
+                                    jnp.asarray(v_u),
+                                    debug_velocity_decode_scale,
+                                )
+                            ),
+                            "v_c": jax.device_get(
+                                _velocity_step_to_uint8_images(
+                                    latent_manager,
+                                    jnp.asarray(z_t),
+                                    jnp.asarray(v_c),
+                                    debug_velocity_decode_scale,
+                                )
+                            ),
+                            "v_pred": jax.device_get(
+                                _velocity_step_to_uint8_images(
+                                    latent_manager,
+                                    jnp.asarray(z_t),
+                                    jnp.asarray(v_pred),
+                                    debug_velocity_decode_scale,
+                                )
+                            ),
+                            "V": jax.device_get(
+                                _velocity_step_to_uint8_images(
+                                    latent_manager,
+                                    jnp.asarray(z_t),
+                                    jnp.asarray(V),
+                                    debug_velocity_decode_scale,
+                                )
+                            ),
+                            "v_g": jax.device_get(
+                                _velocity_step_to_uint8_images(
+                                    latent_manager,
+                                    jnp.asarray(z_t),
+                                    jnp.asarray(v_g),
+                                    debug_velocity_decode_scale,
+                                )
+                            ),
+                        }
+                        debug_panel = _make_stacked_grid_panel(
+                            debug_image_groups,
+                            debug_grid_size,
+                        )
+                        writer.write_images(
+                            current_step,
+                            {"debug_image_grid": debug_panel},
+                        )
 
             ########### Sampling ###########
             if did_update and current_step > 0 and current_step % config.training.sample_per_step == 0:
