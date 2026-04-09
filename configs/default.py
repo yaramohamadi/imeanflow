@@ -75,9 +75,15 @@ def get_config():
     model.source_prediction_space = "v"
     model.source_num_classes = dataset.num_classes
     model.use_auxiliary_v_head = True
+    model.use_context_guidance_conditioning = False
     model.use_training_guidance = True
+    model.training_guidance_interval_strategy = "sampled"
+    model.training_guidance_t_min = 0.0
+    model.training_guidance_t_max = 1.0
+    model.training_guidance_start_step = 0
     model.guidance_scale_strategy = "sampled"
     model.fixed_guidance_scale = 7.5
+    model.use_positive_sit_dmf_mf_target = False
 
     # Training Dynamics
     model.norm_p = 1.0

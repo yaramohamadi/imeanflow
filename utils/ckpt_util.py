@@ -330,13 +330,17 @@ def _convert_torch_sit_state_dict_to_flax_exact(source_dict):
     return {"net": state}
 
 
-def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20):
+def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20, target_state=None):
     """Convert a SiT PyTorch state_dict into the decoupled single-head Flax SiT tree."""
     state = _convert_torch_sit_common_state(source_dict)
 
     time_params = _extract_sit_time_embedder_params(source_dict)
     if time_params is not None:
         _set_sit_time_embedder(state, "t_embedder", time_params)
+        target_net_state = target_state.get("net", {}) if isinstance(target_state, dict) else {}
+        for name in ["omega_embedder", "t_min_embedder", "t_max_embedder"]:
+            if isinstance(target_net_state, dict) and name in target_net_state:
+                _set_sit_time_embedder(state, name, time_params)
 
     blocks = [key for key in source_dict.keys() if key.startswith("blocks.")]
     block_indices = sorted({int(k.split(".")[1]) for k in blocks})
@@ -417,6 +421,7 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None):
             return _convert_torch_sit_state_dict_to_flax_dmf(
                 source_tree,
                 encoder_depth=20 if encoder_depth is None else encoder_depth,
+                target_state=target_state,
             )
         return _convert_torch_sit_state_dict_to_flax_mf(source_tree)
 

@@ -945,6 +945,9 @@ class imfSiT_DMF(nn.Module):
     mlp_ratio: float = 4.0
     num_classes: int = 1000
     use_null_class: bool = True
+    use_context_guidance_conditioning: bool = False
+    num_cfg_tokens: int = 4
+    num_interval_tokens: int = 2
     eval: bool = False
     weight_init: str = "scaled_variance"
     weight_init_constant: float = 1.0
@@ -964,6 +967,22 @@ class imfSiT_DMF(nn.Module):
             weight_init=self.weight_init,
             init_constant=self.weight_init_constant,
         )
+        if self.use_context_guidance_conditioning:
+            self.omega_embedder = SiTTimeEmbedder(
+                self.hidden_size,
+                weight_init=self.weight_init,
+                init_constant=self.weight_init_constant,
+            )
+            self.t_min_embedder = SiTTimeEmbedder(
+                self.hidden_size,
+                weight_init=self.weight_init,
+                init_constant=self.weight_init_constant,
+            )
+            self.t_max_embedder = SiTTimeEmbedder(
+                self.hidden_size,
+                weight_init=self.weight_init,
+                init_constant=self.weight_init_constant,
+            )
         self.y_embedder = LabelEmbedder(
             self.num_classes,
             self.hidden_size,
@@ -983,6 +1002,28 @@ class imfSiT_DMF(nn.Module):
             ),
             (1, num_patches, self.hidden_size),
         )
+        if self.use_context_guidance_conditioning:
+            token_initializer = nn.initializers.normal(
+                stddev=1.0 / math.sqrt(self.hidden_size)
+            )
+            self.omega_tokens = self.param(
+                "omega_tokens",
+                token_initializer,
+                (self.num_cfg_tokens, self.hidden_size),
+            )
+            self.t_min_tokens = self.param(
+                "t_min_tokens",
+                token_initializer,
+                (self.num_interval_tokens, self.hidden_size),
+            )
+            self.t_max_tokens = self.param(
+                "t_max_tokens",
+                token_initializer,
+                (self.num_interval_tokens, self.hidden_size),
+            )
+            self.prefix_tokens = self.num_cfg_tokens + 2 * self.num_interval_tokens
+        else:
+            self.prefix_tokens = 0
 
         block_kwargs = dict(
             hidden_size=self.hidden_size,
@@ -1013,11 +1054,42 @@ class imfSiT_DMF(nn.Module):
         x = jnp.einsum("nhwpqc->nhpwqc", x)
         return x.reshape((x.shape[0], h * p, w * p, c))
 
-    def __call__(self, x, t, r, y):
+    def _build_guidance_context_tokens(self, omega, t_min, t_max):
+        omega = jnp.asarray(omega, dtype=jnp.float32)
+        t_min = jnp.asarray(t_min, dtype=jnp.float32)
+        t_max = jnp.asarray(t_max, dtype=jnp.float32)
+
+        omega_feature = 1.0 - 1.0 / jnp.maximum(omega, 1e-6)
+        omega_embed = self.omega_embedder(omega_feature)
+        t_min_embed = self.t_min_embedder(t_min)
+        t_max_embed = self.t_max_embedder(t_max)
+
+        omega_tokens = self.omega_tokens + unsqueeze(omega_embed, 1)
+        t_min_tokens = self.t_min_tokens + unsqueeze(t_min_embed, 1)
+        t_max_tokens = self.t_max_tokens + unsqueeze(t_max_embed, 1)
+
+        return jnp.concatenate(
+            [omega_tokens, t_min_tokens, t_max_tokens],
+            axis=1,
+        )
+
+    def __call__(self, x, t, r, y, omega=None, t_min=None, t_max=None):
         x = self.x_embedder(x) + self.pos_embed
 
         if y is None:
             y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
+
+        if self.use_context_guidance_conditioning:
+            if omega is None:
+                omega = jnp.ones_like(t)
+            if t_min is None:
+                t_min = jnp.zeros_like(t)
+            if t_max is None:
+                t_max = jnp.ones_like(t)
+            x = jnp.concatenate(
+                [self._build_guidance_context_tokens(omega, t_min, t_max), x],
+                axis=1,
+            )
 
         y_embed = self.y_embedder(y)
         encoder_c = self.t_embedder(t) + y_embed
@@ -1028,6 +1100,9 @@ class imfSiT_DMF(nn.Module):
 
         for block in self.decoder_blocks:
             x = block(x, decoder_c)
+
+        if self.prefix_tokens:
+            x = x[:, self.prefix_tokens :]
 
         u = self.final_layer(x, decoder_c)
         return self.unpatchify(u)

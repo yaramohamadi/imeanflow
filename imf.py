@@ -75,9 +75,15 @@ class iMeanFlow(nn.Module):
     source_prediction_space: str = "v"
     source_num_classes: int = 1000
     use_auxiliary_v_head: bool = True
+    use_context_guidance_conditioning: bool = False
     use_training_guidance: bool = True
+    training_guidance_interval_strategy: str = "sampled"
+    training_guidance_t_min: float = 0.0
+    training_guidance_t_max: float = 1.0
+    training_guidance_start_step: int = 0
     guidance_scale_strategy: str = "sampled"
     fixed_guidance_scale: float = 7.5
+    use_positive_sit_dmf_mf_target: bool = False
 
     # Training dynamics
     norm_p: float = 1.0
@@ -91,19 +97,27 @@ class iMeanFlow(nn.Module):
         Setup improved MeanFlow model.
         """
         net_fn = getattr(imfDiT, self.model_str)
-        self.net: imfDiT.imfDiT = net_fn(
+        net_kwargs = dict(
             name="net",
             num_classes=self.num_classes,
             use_null_class=self.target_use_null_class,
             eval=self.eval,
         )
+        if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
+            net_kwargs["use_context_guidance_conditioning"] = self.use_context_guidance_conditioning
+        self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
         if self.use_dogfit:
-            self.source_net: imfDiT.imfDiT = net_fn(
+            source_net_kwargs = dict(
                 name="source_net",
                 num_classes=self.source_num_classes,
                 use_null_class=True,
                 eval=False,
             )
+            if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
+                source_net_kwargs["use_context_guidance_conditioning"] = (
+                    self.use_context_guidance_conditioning
+                )
+            self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
 
     def _uses_auxiliary_v_head(self):
         return self.use_auxiliary_v_head
@@ -113,6 +127,18 @@ class iMeanFlow(nn.Module):
 
     def _uses_sit_cfg_channel_rule(self):
         return "SiT" in self.model_str
+
+    def _uses_sit_guidance_context_conditioning(self):
+        return (
+            (not self._uses_auxiliary_v_head())
+            and ("SiT_DMF" in self.model_str)
+            and self.use_context_guidance_conditioning
+        )
+
+    def _mf_target_interval_coeff(self, t, r):
+        if self._uses_sit_dmf_time_convention() and self.use_positive_sit_dmf_mf_target:
+            return r - t
+        return t - r
 
     def _sample_guidance_scale(self, bz):
         if self.guidance_scale_strategy == "fixed":
@@ -241,6 +267,16 @@ class iMeanFlow(nn.Module):
         """
         Sample CFG interval [t_min, t_max] from uniform distribution.
         """
+        if self.training_guidance_interval_strategy == "fixed":
+            t_min = jnp.full((bz, 1, 1, 1), self.training_guidance_t_min, dtype=self.dtype)
+            t_max = jnp.full((bz, 1, 1, 1), self.training_guidance_t_max, dtype=self.dtype)
+            return t_min, t_max
+        if self.training_guidance_interval_strategy != "sampled":
+            raise ValueError(
+                "Unsupported training_guidance_interval_strategy: "
+                f"{self.training_guidance_interval_strategy}"
+            )
+
         rng_start, rng_end = jax.random.split(self.make_rng("gen"))
 
         t_min = jax.random.uniform(
@@ -289,20 +325,40 @@ class iMeanFlow(nn.Module):
                 y,
             )
 
-        del omega, t_min, t_max
         r = t - h
-        u = self.net(
-            x,
-            t.reshape(bz),
-            r.reshape(bz),
-            y,
-        )
-        v_boundary = self.net(
-            x,
-            t.reshape(bz),
-            t.reshape(bz),
-            y,
-        )
+        if self._uses_sit_guidance_context_conditioning():
+            u = self.net(
+                x,
+                t.reshape(bz),
+                r.reshape(bz),
+                y,
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+            )
+            v_boundary = self.net(
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+            )
+        else:
+            del omega, t_min, t_max
+            u = self.net(
+                x,
+                t.reshape(bz),
+                r.reshape(bz),
+                y,
+            )
+            v_boundary = self.net(
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+            )
         return u, v_boundary
 
     def v_cond_fn(self, x, t, omega, y):
@@ -382,14 +438,28 @@ class iMeanFlow(nn.Module):
                 y,
             )
         else:
-            del omega
-            v = self.source_net.apply(
-                {"params": source_params["net"]},
-                x,
-                t.reshape(bz),
-                t.reshape(bz),
-                y,
-            )
+            if self._uses_sit_guidance_context_conditioning():
+                t_min = jnp.zeros_like(t)
+                t_max = jnp.ones_like(t)
+                v = self.source_net.apply(
+                    {"params": source_params["net"]},
+                    x,
+                    t.reshape(bz),
+                    t.reshape(bz),
+                    y,
+                    omega.reshape(bz),
+                    t_min.reshape(bz),
+                    t_max.reshape(bz),
+                )
+            else:
+                del omega
+                v = self.source_net.apply(
+                    {"params": source_params["net"]},
+                    x,
+                    t.reshape(bz),
+                    t.reshape(bz),
+                    y,
+                )
         return v
 
     def source_v_uncond_fn(self, source_params, x, t):
@@ -433,7 +503,20 @@ class iMeanFlow(nn.Module):
 
         return labels, v_g
 
-    def guidance_fn(self, v_t, z_t, t, r, y, fm_mask, w, t_min, t_max, source_params=None):
+    def guidance_fn(
+        self,
+        v_t,
+        z_t,
+        t,
+        r,
+        y,
+        fm_mask,
+        w,
+        t_min,
+        t_max,
+        source_params=None,
+        current_step=None,
+    ):
         """
         Compute the guided velocity v_g using classifier-free guidance.
 
@@ -458,6 +541,11 @@ class iMeanFlow(nn.Module):
             return v_t, v_c
 
         w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
+        if current_step is not None:
+            guidance_enabled = current_step >= jnp.asarray(
+                self.training_guidance_start_step, dtype=current_step.dtype
+            )
+            w_eff = jnp.where(guidance_enabled, w_eff, jnp.ones_like(w_eff))
 
         if self.use_dogfit:
             v_c = self.v_cond_fn(z_t, t, w_eff, y=y)
@@ -470,7 +558,7 @@ class iMeanFlow(nn.Module):
                 v_t[..., :3]
                 + (1 - 1 / w_eff) * (v_c[..., :3] - v_u[..., :3])
             )
-            v_g = jnp.concatenate([guided_first_three, v_c[..., 3:]], axis=-1)
+            v_g = jnp.concatenate([guided_first_three, v_t[..., 3:]], axis=-1)
         else:
             v_g = v_t + (1 - 1 / w_eff) * (v_c - v_u)
 
@@ -480,7 +568,7 @@ class iMeanFlow(nn.Module):
     #               Forward Pass and Loss                 #
     #######################################################
 
-    def forward(self, images, labels, source_params=None):
+    def forward(self, images, labels, source_params=None, current_step=None):
         """
         Forward process of improved MeanFlow and compute loss.
 
@@ -512,7 +600,17 @@ class iMeanFlow(nn.Module):
 
         # Compute guided velocity v_g and conditioned velocity v_c
         v_g, v_c = self.guidance_fn(
-            v_t, z_t, t, r, labels, fm_mask, omega, t_min, t_max, source_params=source_params
+            v_t,
+            z_t,
+            t,
+            r,
+            labels,
+            fm_mask,
+            omega,
+            t_min,
+            t_max,
+            source_params=source_params,
+            current_step=current_step,
         )
 
         # Cond dropout (dropout class labels)
@@ -529,7 +627,7 @@ class iMeanFlow(nn.Module):
         u, du_dt, v = jax.jvp(u_fn, (z_t, t, r), (v_c, dtdt, dtdr), has_aux=True)
 
         # Our compound function V = u + (t - r) * du/dt
-        V = u + (t - r) * jax.lax.stop_gradient(du_dt)
+        V = u + self._mf_target_interval_coeff(t, r) * jax.lax.stop_gradient(du_dt)
 
         v_g = jax.lax.stop_gradient(v_g)
 
@@ -556,7 +654,7 @@ class iMeanFlow(nn.Module):
 
         return loss, dict_losses
 
-    def debug_forward(self, images, labels, source_params=None):
+    def debug_forward(self, images, labels, source_params=None, current_step=None):
         """
         Forward process with intermediate tensors exposed for debugging.
         """
@@ -583,7 +681,17 @@ class iMeanFlow(nn.Module):
             _, v_u = self.v_fn(z_t, t, base_w, y=labels)
 
         v_g, v_c = self.guidance_fn(
-            v_t, z_t, t, r, labels, fm_mask, omega, t_min, t_max, source_params=source_params
+            v_t,
+            z_t,
+            t,
+            r,
+            labels,
+            fm_mask,
+            omega,
+            t_min,
+            t_max,
+            source_params=source_params,
+            current_step=current_step,
         )
 
         labels_after_drop, v_g = self.cond_drop(v_t, v_g, labels)
@@ -594,7 +702,7 @@ class iMeanFlow(nn.Module):
         dtdt = jnp.ones_like(t)
         dtdr = jnp.zeros_like(t)
         u, du_dt, v = jax.jvp(u_fn, (z_t, t, r), (v_c, dtdt, dtdr), has_aux=True)
-        V = u + (t - r) * jax.lax.stop_gradient(du_dt)
+        V = u + self._mf_target_interval_coeff(t, r) * jax.lax.stop_gradient(du_dt)
 
         return {
             "x": x,
@@ -606,6 +714,15 @@ class iMeanFlow(nn.Module):
             "v_pred": v,
             "V": V,
             "omega": omega,
+            "w_eff_mean": jnp.mean(
+                jnp.where(
+                    current_step >= jnp.asarray(self.training_guidance_start_step, dtype=current_step.dtype)
+                    if current_step is not None
+                    else jnp.asarray(True),
+                    jnp.where((t >= t_min) & (t <= t_max), omega, 1.0),
+                    jnp.ones_like(omega),
+                )
+            ),
             "t": t,
             "r": r,
             "t_min": t_min,
@@ -616,4 +733,8 @@ class iMeanFlow(nn.Module):
     def __call__(self, x, t, y):
         if self._uses_auxiliary_v_head():
             return self.net(x, t, t, t, t, t, y)  # initialization only
+        if self._uses_sit_guidance_context_conditioning():
+            ones = jnp.ones_like(t)
+            zeros = jnp.zeros_like(t)
+            return self.net(x, t, t, y, ones, zeros, ones)  # initialization only
         return self.net(x, t, t, y)  # initialization only

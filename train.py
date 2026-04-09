@@ -69,6 +69,7 @@ def train_step_with_vae(
             images=images,
             labels=labels,
             source_params=state.source_params,
+            current_step=state.step,
             rngs=dict(
                 gen=rng_base,
             ),
@@ -150,6 +151,7 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
         images=images,
         labels=labels,
         source_params=state.source_params,
+        current_step=state.step,
         rngs=dict(gen=rng_base),
         method=model.debug_forward,
     )
@@ -162,6 +164,7 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
 
     metrics = {
         "debug/omega_mean": jnp.mean(outputs["omega"]),
+        "debug/w_eff_mean": jnp.mean(outputs["w_eff_mean"]),
         "debug/t_mean": jnp.mean(outputs["t"]),
         "debug/r_mean": jnp.mean(outputs["r"]),
         "debug/fm_fraction": jnp.mean(outputs["fm_mask"]),
