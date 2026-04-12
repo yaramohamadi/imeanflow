@@ -330,7 +330,12 @@ def _convert_torch_sit_state_dict_to_flax_exact(source_dict):
     return {"net": state}
 
 
-def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20, target_state=None):
+def _convert_torch_sit_state_dict_to_flax_dmf(
+    source_dict,
+    encoder_depth=20,
+    target_state=None,
+    target_model_config=None,
+):
     """Convert a SiT PyTorch state_dict into the decoupled single-head Flax SiT tree."""
     state = _convert_torch_sit_common_state(source_dict)
 
@@ -338,9 +343,20 @@ def _convert_torch_sit_state_dict_to_flax_dmf(source_dict, encoder_depth=20, tar
     if time_params is not None:
         _set_sit_time_embedder(state, "t_embedder", time_params)
         target_net_state = target_state.get("net", {}) if isinstance(target_state, dict) else {}
-        for name in ["omega_embedder", "t_min_embedder", "t_max_embedder"]:
-            if isinstance(target_net_state, dict) and name in target_net_state:
-                _set_sit_time_embedder(state, name, time_params)
+        model_cfg = target_model_config or {}
+        use_context = bool(model_cfg.get("use_context_guidance_conditioning", False))
+        use_adaln = bool(
+            model_cfg.get("use_adaln_guidance_scale_conditioning", False)
+        )
+        adaln_init = model_cfg.get("adaln_guidance_scale_init", "timestep")
+
+        if isinstance(target_net_state, dict):
+            if use_context:
+                for name in ["omega_embedder", "t_min_embedder", "t_max_embedder"]:
+                    if name in target_net_state:
+                        _set_sit_time_embedder(state, name, time_params)
+            elif use_adaln and adaln_init == "timestep" and "omega_embedder" in target_net_state:
+                _set_sit_time_embedder(state, "omega_embedder", time_params)
 
     blocks = [key for key in source_dict.keys() if key.startswith("blocks.")]
     block_indices = sorted({int(k.split(".")[1]) for k in blocks})
@@ -405,7 +421,7 @@ def _shape_matches(target_value, source_value):
     return target_value.shape == source_value.shape
 
 
-def load_checkpoint_params(workdir, prefer_ema=True, target_state=None):
+def load_checkpoint_params(workdir, prefer_ema=True, target_state=None, target_model_config=None):
     """
     Load params or ema_params from a checkpoint without shape adaptation.
     Supports Flax checkpoints and PyTorch .pt checkpoints.
@@ -422,6 +438,7 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None):
                 source_tree,
                 encoder_depth=20 if encoder_depth is None else encoder_depth,
                 target_state=target_state,
+                target_model_config=target_model_config,
             )
         return _convert_torch_sit_state_dict_to_flax_mf(source_tree)
 
@@ -436,7 +453,7 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None):
     return source_tree
 
 
-def restore_partial_checkpoint(state, workdir, prefer_ema=True):
+def restore_partial_checkpoint(state, workdir, prefer_ema=True, target_model_config=None):
     """
     Restore shape-compatible model parameters from a checkpoint.
 
@@ -450,6 +467,7 @@ def restore_partial_checkpoint(state, workdir, prefer_ema=True):
         workdir,
         prefer_ema=prefer_ema,
         target_state=target_state,
+        target_model_config=target_model_config,
     )
     source_state = serialization.to_state_dict(source_tree)
 

@@ -76,6 +76,8 @@ def get_config():
     model.source_num_classes = dataset.num_classes
     model.use_auxiliary_v_head = True
     model.use_context_guidance_conditioning = False
+    model.use_adaln_guidance_scale_conditioning = False
+    model.adaln_guidance_scale_init = "timestep"
     model.use_training_guidance = True
     model.training_guidance_interval_strategy = "sampled"
     model.training_guidance_t_min = 0.0

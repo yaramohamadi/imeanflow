@@ -452,7 +452,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
     if config.load_from != "":
         if config.get("partial_load", False):
-            state = restore_partial_checkpoint(state, config.load_from)
+            state = restore_partial_checkpoint(
+                state,
+                config.load_from,
+                target_model_config=config.model,
+            )
         else:
             state = restore_checkpoint(state, config.load_from)
         if config.training.get("capture_source_from_load", False):

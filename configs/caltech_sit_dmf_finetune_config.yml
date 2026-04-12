@@ -17,6 +17,8 @@ model:
     source_num_classes: 1000
     use_auxiliary_v_head: False
     use_context_guidance_conditioning: False
+    use_adaln_guidance_scale_conditioning: False
+    adaln_guidance_scale_init: 'timestep'
     guidance_scale_strategy: 'fixed'
     fixed_guidance_scale: 7.5
 

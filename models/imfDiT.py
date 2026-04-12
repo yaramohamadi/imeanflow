@@ -946,6 +946,8 @@ class imfSiT_DMF(nn.Module):
     num_classes: int = 1000
     use_null_class: bool = True
     use_context_guidance_conditioning: bool = False
+    use_adaln_guidance_scale_conditioning: bool = False
+    adaln_guidance_scale_init: str = "timestep"
     num_cfg_tokens: int = 4
     num_interval_tokens: int = 2
     eval: bool = False
@@ -953,6 +955,22 @@ class imfSiT_DMF(nn.Module):
     weight_init_constant: float = 1.0
 
     def setup(self):
+        if (
+            self.use_context_guidance_conditioning
+            and self.use_adaln_guidance_scale_conditioning
+        ):
+            raise ValueError(
+                "use_context_guidance_conditioning and "
+                "use_adaln_guidance_scale_conditioning are mutually exclusive."
+            )
+        if self.use_adaln_guidance_scale_conditioning and (
+            self.adaln_guidance_scale_init not in {"timestep", "random", "zero"}
+        ):
+            raise ValueError(
+                "adaln_guidance_scale_init must be one of "
+                "['timestep', 'random', 'zero']."
+            )
+
         self.out_channels = self.in_channels
 
         self.x_embedder = PatchEmbedder(
@@ -967,12 +985,22 @@ class imfSiT_DMF(nn.Module):
             weight_init=self.weight_init,
             init_constant=self.weight_init_constant,
         )
-        if self.use_context_guidance_conditioning:
+        if (
+            self.use_context_guidance_conditioning
+            or self.use_adaln_guidance_scale_conditioning
+        ):
+            omega_weight_init = (
+                "zeros"
+                if self.use_adaln_guidance_scale_conditioning
+                and self.adaln_guidance_scale_init == "zero"
+                else self.weight_init
+            )
             self.omega_embedder = SiTTimeEmbedder(
                 self.hidden_size,
-                weight_init=self.weight_init,
+                weight_init=omega_weight_init,
                 init_constant=self.weight_init_constant,
             )
+        if self.use_context_guidance_conditioning:
             self.t_min_embedder = SiTTimeEmbedder(
                 self.hidden_size,
                 weight_init=self.weight_init,
@@ -1090,10 +1118,20 @@ class imfSiT_DMF(nn.Module):
                 [self._build_guidance_context_tokens(omega, t_min, t_max), x],
                 axis=1,
             )
+        elif self.use_adaln_guidance_scale_conditioning and omega is None:
+            omega = jnp.ones_like(t)
 
         y_embed = self.y_embedder(y)
         encoder_c = self.t_embedder(t) + y_embed
         decoder_c = self.t_embedder(r) + y_embed
+        if self.use_adaln_guidance_scale_conditioning:
+            omega_feature = 1.0 - 1.0 / jnp.maximum(
+                jnp.asarray(omega, dtype=jnp.float32), 1e-6
+            )
+            omega_embed = self.omega_embedder(omega_feature)
+            omega_delta = omega_embed * jax.lax.stop_gradient(y_embed)
+            encoder_c = encoder_c + omega_delta
+            decoder_c = decoder_c + omega_delta
 
         for block in self.encoder_blocks:
             x = block(x, encoder_c)

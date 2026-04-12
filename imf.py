@@ -76,6 +76,8 @@ class iMeanFlow(nn.Module):
     source_num_classes: int = 1000
     use_auxiliary_v_head: bool = True
     use_context_guidance_conditioning: bool = False
+    use_adaln_guidance_scale_conditioning: bool = False
+    adaln_guidance_scale_init: str = "timestep"
     use_training_guidance: bool = True
     training_guidance_interval_strategy: str = "sampled"
     training_guidance_t_min: float = 0.0
@@ -105,6 +107,10 @@ class iMeanFlow(nn.Module):
         )
         if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
             net_kwargs["use_context_guidance_conditioning"] = self.use_context_guidance_conditioning
+            net_kwargs["use_adaln_guidance_scale_conditioning"] = (
+                self.use_adaln_guidance_scale_conditioning
+            )
+            net_kwargs["adaln_guidance_scale_init"] = self.adaln_guidance_scale_init
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
         if self.use_dogfit:
             source_net_kwargs = dict(
@@ -116,6 +122,12 @@ class iMeanFlow(nn.Module):
             if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
                 source_net_kwargs["use_context_guidance_conditioning"] = (
                     self.use_context_guidance_conditioning
+                )
+                source_net_kwargs["use_adaln_guidance_scale_conditioning"] = (
+                    self.use_adaln_guidance_scale_conditioning
+                )
+                source_net_kwargs["adaln_guidance_scale_init"] = (
+                    self.adaln_guidance_scale_init
                 )
             self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
 
@@ -135,6 +147,13 @@ class iMeanFlow(nn.Module):
             and self.use_context_guidance_conditioning
         )
 
+    def _uses_sit_adaln_guidance_scale_conditioning(self):
+        return (
+            (not self._uses_auxiliary_v_head())
+            and ("SiT_DMF" in self.model_str)
+            and self.use_adaln_guidance_scale_conditioning
+        )
+
     def _mf_target_interval_coeff(self, t, r):
         if self._uses_sit_dmf_time_convention() and self.use_positive_sit_dmf_mf_target:
             return r - t
@@ -148,6 +167,15 @@ class iMeanFlow(nn.Module):
                 f"Unsupported guidance_scale_strategy: {self.guidance_scale_strategy}"
             )
         return self.sample_cfg_scale(bz)
+
+    def _effective_training_guidance_scale(self, t, w, t_min, t_max, current_step=None):
+        w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
+        if current_step is not None:
+            guidance_enabled = current_step >= jnp.asarray(
+                self.training_guidance_start_step, dtype=current_step.dtype
+            )
+            w_eff = jnp.where(guidance_enabled, w_eff, jnp.ones_like(w_eff))
+        return w_eff
 
     def guided_u_fn(self, x, t, r, omega, t_min, t_max, y):
         """
@@ -345,6 +373,22 @@ class iMeanFlow(nn.Module):
                 t_min.reshape(bz),
                 t_max.reshape(bz),
             )
+        elif self._uses_sit_adaln_guidance_scale_conditioning():
+            del t_min, t_max
+            u = self.net(
+                x,
+                t.reshape(bz),
+                r.reshape(bz),
+                y,
+                omega.reshape(bz),
+            )
+            v_boundary = self.net(
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+                omega.reshape(bz),
+            )
         else:
             del omega, t_min, t_max
             u = self.net(
@@ -451,6 +495,15 @@ class iMeanFlow(nn.Module):
                     t_min.reshape(bz),
                     t_max.reshape(bz),
                 )
+            elif self._uses_sit_adaln_guidance_scale_conditioning():
+                v = self.source_net.apply(
+                    {"params": source_params["net"]},
+                    x,
+                    t.reshape(bz),
+                    t.reshape(bz),
+                    y,
+                    omega.reshape(bz),
+                )
             else:
                 del omega
                 v = self.source_net.apply(
@@ -540,12 +593,9 @@ class iMeanFlow(nn.Module):
             v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             return v_t, v_c
 
-        w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
-        if current_step is not None:
-            guidance_enabled = current_step >= jnp.asarray(
-                self.training_guidance_start_step, dtype=current_step.dtype
-            )
-            w_eff = jnp.where(guidance_enabled, w_eff, jnp.ones_like(w_eff))
+        w_eff = self._effective_training_guidance_scale(
+            t, w, t_min, t_max, current_step=current_step
+        )
 
         if self.use_dogfit:
             v_c = self.v_cond_fn(z_t, t, w_eff, y=y)
@@ -597,6 +647,13 @@ class iMeanFlow(nn.Module):
         # Sample CFG scale and interval
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
         omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
 
         # Compute guided velocity v_g and conditioned velocity v_c
         v_g, v_c = self.guidance_fn(
@@ -618,7 +675,7 @@ class iMeanFlow(nn.Module):
 
         # Warped u-function for jvp computation
         def u_fn(z_t, t, r):
-            return self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels)
+            return self.u_fn(z_t, t, t - r, model_omega, t_min, t_max, y=labels)
 
         dtdt = jnp.ones_like(t)
         dtdr = jnp.zeros_like(t)
@@ -673,8 +730,15 @@ class iMeanFlow(nn.Module):
 
         t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
         omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
 
-        base_w = omega
+        base_w = model_omega if self._uses_sit_adaln_guidance_scale_conditioning() else omega
         if self.use_dogfit:
             v_u = self.source_v_uncond_fn(source_params, z_t, t)
         else:
@@ -697,7 +761,7 @@ class iMeanFlow(nn.Module):
         labels_after_drop, v_g = self.cond_drop(v_t, v_g, labels)
 
         def u_fn(z_t, t, r):
-            return self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels_after_drop)
+            return self.u_fn(z_t, t, t - r, model_omega, t_min, t_max, y=labels_after_drop)
 
         dtdt = jnp.ones_like(t)
         dtdr = jnp.zeros_like(t)
@@ -737,4 +801,7 @@ class iMeanFlow(nn.Module):
             ones = jnp.ones_like(t)
             zeros = jnp.zeros_like(t)
             return self.net(x, t, t, y, ones, zeros, ones)  # initialization only
+        if self._uses_sit_adaln_guidance_scale_conditioning():
+            ones = jnp.ones_like(t)
+            return self.net(x, t, t, y, ones)  # initialization only
         return self.net(x, t, t, y)  # initialization only
