@@ -78,12 +78,15 @@ class iMeanFlow(nn.Module):
     use_context_guidance_conditioning: bool = False
     use_adaln_guidance_scale_conditioning: bool = False
     adaln_guidance_scale_init: str = "timestep"
+    use_adaln_condition_mixing: bool = False
+    decoder_only_guidance_conditioning: bool = False
     use_training_guidance: bool = True
     training_guidance_interval_strategy: str = "sampled"
     training_guidance_t_min: float = 0.0
     training_guidance_t_max: float = 1.0
     training_guidance_start_step: int = 0
     guidance_scale_strategy: str = "sampled"
+    max_sampled_guidance_scale: float = 8.0
     fixed_guidance_scale: float = 7.5
     use_positive_sit_dmf_mf_target: bool = False
 
@@ -111,6 +114,10 @@ class iMeanFlow(nn.Module):
                 self.use_adaln_guidance_scale_conditioning
             )
             net_kwargs["adaln_guidance_scale_init"] = self.adaln_guidance_scale_init
+            net_kwargs["use_adaln_condition_mixing"] = self.use_adaln_condition_mixing
+            net_kwargs["decoder_only_guidance_conditioning"] = (
+                self.decoder_only_guidance_conditioning
+            )
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
         if self.use_dogfit:
             source_net_kwargs = dict(
@@ -128,6 +135,12 @@ class iMeanFlow(nn.Module):
                 )
                 source_net_kwargs["adaln_guidance_scale_init"] = (
                     self.adaln_guidance_scale_init
+                )
+                source_net_kwargs["use_adaln_condition_mixing"] = (
+                    self.use_adaln_condition_mixing
+                )
+                source_net_kwargs["decoder_only_guidance_conditioning"] = (
+                    self.decoder_only_guidance_conditioning
                 )
             self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
 
@@ -166,7 +179,11 @@ class iMeanFlow(nn.Module):
             raise ValueError(
                 f"Unsupported guidance_scale_strategy: {self.guidance_scale_strategy}"
             )
-        return self.sample_cfg_scale(bz)
+        if self.max_sampled_guidance_scale < 1.0:
+            raise ValueError(
+                "max_sampled_guidance_scale must be >= 1.0 for sampled guidance."
+            )
+        return self.sample_cfg_scale(bz, s_max=self.max_sampled_guidance_scale - 1.0)
 
     def _effective_training_guidance_scale(self, t, w, t_min, t_max, current_step=None):
         w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)

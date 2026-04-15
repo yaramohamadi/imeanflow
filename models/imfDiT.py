@@ -477,6 +477,30 @@ class SiTTimeEmbedder(nn.Module):
         return self.fc2(x)
 
 
+class ResidualConcatConditionProjector(nn.Module):
+    """Project concatenated condition pairs back to hidden size with [I, 0] init."""
+
+    hidden_size: int
+
+    def setup(self):
+        self.delta_kernel = self.param(
+            "delta_kernel",
+            nn.initializers.zeros,
+            (2 * self.hidden_size, self.hidden_size),
+        )
+        self.bias = self.param("bias", nn.initializers.zeros, (self.hidden_size,))
+
+    def _base_kernel(self):
+        eye = jnp.eye(self.hidden_size, dtype=jnp.float32)
+        zeros = jnp.zeros_like(eye)
+        return jnp.concatenate([eye, zeros], axis=0)
+
+    def __call__(self, first, second):
+        x = jnp.concatenate([first, second], axis=-1)
+        kernel = self._base_kernel().astype(x.dtype) + self.delta_kernel.astype(x.dtype)
+        return jnp.einsum("...d,df->...f", x, kernel) + self.bias.astype(x.dtype)
+
+
 class SiTMlp(nn.Module):
     hidden_size: int
     mlp_ratio: float = 4.0
@@ -948,6 +972,8 @@ class imfSiT_DMF(nn.Module):
     use_context_guidance_conditioning: bool = False
     use_adaln_guidance_scale_conditioning: bool = False
     adaln_guidance_scale_init: str = "timestep"
+    use_adaln_condition_mixing: bool = False
+    decoder_only_guidance_conditioning: bool = False
     num_cfg_tokens: int = 4
     num_interval_tokens: int = 2
     eval: bool = False
@@ -969,6 +995,18 @@ class imfSiT_DMF(nn.Module):
             raise ValueError(
                 "adaln_guidance_scale_init must be one of "
                 "['timestep', 'random', 'zero']."
+            )
+        if self.use_adaln_condition_mixing and (
+            not self.use_adaln_guidance_scale_conditioning
+        ):
+            raise ValueError(
+                "use_adaln_condition_mixing requires "
+                "use_adaln_guidance_scale_conditioning=True."
+            )
+        if self.use_adaln_condition_mixing and self.decoder_only_guidance_conditioning:
+            raise ValueError(
+                "use_adaln_condition_mixing and "
+                "decoder_only_guidance_conditioning cannot both be enabled."
             )
 
         self.out_channels = self.in_channels
@@ -1010,6 +1048,13 @@ class imfSiT_DMF(nn.Module):
                 self.hidden_size,
                 weight_init=self.weight_init,
                 init_constant=self.weight_init_constant,
+            )
+        if self.use_adaln_condition_mixing:
+            self.time_condition_projector = ResidualConcatConditionProjector(
+                self.hidden_size
+            )
+            self.class_condition_projector = ResidualConcatConditionProjector(
+                self.hidden_size
             )
         self.y_embedder = LabelEmbedder(
             self.num_classes,
@@ -1107,6 +1152,7 @@ class imfSiT_DMF(nn.Module):
         if y is None:
             y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
 
+        guidance_tokens = None
         if self.use_context_guidance_conditioning:
             if omega is None:
                 omega = jnp.ones_like(t)
@@ -1114,27 +1160,43 @@ class imfSiT_DMF(nn.Module):
                 t_min = jnp.zeros_like(t)
             if t_max is None:
                 t_max = jnp.ones_like(t)
-            x = jnp.concatenate(
-                [self._build_guidance_context_tokens(omega, t_min, t_max), x],
-                axis=1,
-            )
+            guidance_tokens = self._build_guidance_context_tokens(omega, t_min, t_max)
+            if not self.decoder_only_guidance_conditioning:
+                x = jnp.concatenate([guidance_tokens, x], axis=1)
         elif self.use_adaln_guidance_scale_conditioning and omega is None:
             omega = jnp.ones_like(t)
 
         y_embed = self.y_embedder(y)
-        encoder_c = self.t_embedder(t) + y_embed
-        decoder_c = self.t_embedder(r) + y_embed
-        if self.use_adaln_guidance_scale_conditioning:
+        if self.use_adaln_condition_mixing:
+            t_embed = self.t_embedder(t)
+            r_embed = self.t_embedder(r)
+            omega_feature = 1.0 - 1.0 / jnp.maximum(
+                jnp.asarray(omega, dtype=jnp.float32), 1e-6
+            )
+            omega_embed = self.omega_embedder(omega_feature)
+            time_c = self.time_condition_projector(t_embed, r_embed)
+            class_c = self.class_condition_projector(y_embed, omega_embed)
+            shared_c = time_c + class_c
+            encoder_c = shared_c
+            decoder_c = shared_c
+        else:
+            encoder_c = self.t_embedder(t) + y_embed
+            decoder_c = self.t_embedder(r) + y_embed
+        if self.use_adaln_guidance_scale_conditioning and not self.use_adaln_condition_mixing:
             omega_feature = 1.0 - 1.0 / jnp.maximum(
                 jnp.asarray(omega, dtype=jnp.float32), 1e-6
             )
             omega_embed = self.omega_embedder(omega_feature)
             omega_delta = omega_embed * jax.lax.stop_gradient(y_embed)
-            encoder_c = encoder_c + omega_delta
             decoder_c = decoder_c + omega_delta
+            if not self.decoder_only_guidance_conditioning:
+                encoder_c = encoder_c + omega_delta
 
         for block in self.encoder_blocks:
             x = block(x, encoder_c)
+
+        if guidance_tokens is not None and self.decoder_only_guidance_conditioning:
+            x = jnp.concatenate([guidance_tokens, x], axis=1)
 
         for block in self.decoder_blocks:
             x = block(x, decoder_c)

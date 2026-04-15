@@ -125,6 +125,7 @@ class Writer:
 
         if self.use_wandb:
             wandb.init(
+                name=config.logging.wandb_name if config.logging.wandb_name else None,
                 project=config.logging.wandb_project,
                 entity=config.logging.wandb_entity if config.logging.wandb_entity else None,
                 notes=config.logging.wandb_notes if config.logging.wandb_notes else None,

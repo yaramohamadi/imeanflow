@@ -39,6 +39,7 @@ def get_config():
     training.sample_per_step = 1000
     training.checkpoint_per_epoch = 10
     training.fid_per_step = 1000
+    training.preview_guidance_scales = ()
     training.debug_log_during_train = False
     training.debug_log_images = True
     training.debug_num_images = 4
@@ -78,12 +79,15 @@ def get_config():
     model.use_context_guidance_conditioning = False
     model.use_adaln_guidance_scale_conditioning = False
     model.adaln_guidance_scale_init = "timestep"
+    model.use_adaln_condition_mixing = False
+    model.decoder_only_guidance_conditioning = False
     model.use_training_guidance = True
     model.training_guidance_interval_strategy = "sampled"
     model.training_guidance_t_min = 0.0
     model.training_guidance_t_max = 1.0
     model.training_guidance_start_step = 0
     model.guidance_scale_strategy = "sampled"
+    model.max_sampled_guidance_scale = 8.0
     model.fixed_guidance_scale = 7.5
     model.use_positive_sit_dmf_mf_target = False
 
@@ -115,6 +119,7 @@ def get_config():
     # Logging
     config.logging = logging = ml_collections.ConfigDict()
     logging.use_wandb = False
+    logging.wandb_name = ""
     logging.wandb_project = ""
     logging.wandb_entity = ""
     logging.wandb_notes = ""

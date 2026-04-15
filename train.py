@@ -280,6 +280,10 @@ def _make_stacked_grid_panel(
     return np.concatenate(panel_parts, axis=0)
 
 
+def _format_preview_guidance_label(omega, t_min, t_max):
+    return f"omega={float(omega):g}, t=[{float(t_min):g}, {float(t_max):g}]"
+
+
 def _generate_preview_samples_first_device(
     state,
     p_sample_step,
@@ -521,13 +525,19 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     p_preview_sample_steps = {
         num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
     }
-
-    sample_kwargs = {
-        "omega": config.sampling.omega,
-        "t_min": config.sampling.t_min,
-        "t_max": config.sampling.t_max,
+    preview_guidance_scales = config.training.get("preview_guidance_scales", [])
+    if preview_guidance_scales:
+        preview_guidance_scales = [float(omega) for omega in preview_guidance_scales]
+    else:
+        preview_guidance_scales = [float(config.sampling.omega)]
+    preview_t_min = float(config.sampling.t_min)
+    preview_t_max = float(config.sampling.t_max)
+    eval_sample_kwargs = {
+        "omega": float(config.sampling.omega),
+        "t_min": preview_t_min,
+        "t_max": preview_t_max,
     }
-    sample_kwargs = jax_utils.replicate(sample_kwargs)
+    sample_kwargs = jax_utils.replicate(eval_sample_kwargs)
 
     def log_preview_samples(state_for_logging, step_for_logging):
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
@@ -538,24 +548,39 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 "Preview logging requires at least one square grid image on the first device."
             )
         log_for_0(
-            "Logging %d preview samples at step %d for %s steps.",
+            "Logging %d preview samples at step %d for %s steps and omegas %s.",
             num_images,
             step_for_logging,
             preview_num_steps,
+            preview_guidance_scales,
         )
-        preview_images = {}
-        for num_steps, p_preview_step in p_preview_sample_steps.items():
-            preview_images[num_steps] = _generate_preview_samples_first_device(
-                state_for_logging,
-                p_preview_step,
-                latent_manager,
-                use_ema,
-                num_samples=num_images,
-                **sample_kwargs,
+        preview_image_groups = {}
+        for omega in preview_guidance_scales:
+            preview_kwargs = jax_utils.replicate(
+                {
+                    "omega": omega,
+                    "t_min": preview_t_min,
+                    "t_max": preview_t_max,
+                }
             )
+            preview_images = {}
+            for num_steps, p_preview_step in p_preview_sample_steps.items():
+                preview_images[num_steps] = _generate_preview_samples_first_device(
+                    state_for_logging,
+                    p_preview_step,
+                    latent_manager,
+                    use_ema,
+                    num_samples=num_images,
+                    **preview_kwargs,
+                )
 
-        preview_panel = _make_side_by_side_preview_panel(preview_images, grid_size)
-        writer.write_images(step_for_logging, {"image_grid": preview_panel})
+            preview_panel = _make_side_by_side_preview_panel(preview_images, grid_size)
+            preview_image_groups[
+                _format_preview_guidance_label(omega, preview_t_min, preview_t_max)
+            ] = [preview_panel]
+
+        stacked_preview_panel = _make_stacked_grid_panel(preview_image_groups, 1)
+        writer.write_images(step_for_logging, {"image_grid": stacked_preview_panel})
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
     best_fid = float("inf")
