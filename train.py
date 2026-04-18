@@ -32,6 +32,7 @@ from utils.lr_utils import lr_schedules
 from utils.sample_util import (
     generate_fid_samples,
     get_image_metric_evaluator,
+    has_controllable_sampling_guidance,
     run_p_sample_step,
 )
 from utils.trainstate_util import create_train_state, TrainState
@@ -165,6 +166,7 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
     metrics = {
         "debug/omega_mean": jnp.mean(outputs["omega"]),
         "debug/w_eff_mean": jnp.mean(outputs["w_eff_mean"]),
+        "debug/guidance_blend_mean": jnp.mean(outputs["guidance_blend_mean"]),
         "debug/t_mean": jnp.mean(outputs["t"]),
         "debug/r_mean": jnp.mean(outputs["r"]),
         "debug/fm_fraction": jnp.mean(outputs["fm_mask"]),
@@ -378,11 +380,11 @@ def _get_eval_sampling_configs(config):
     train-style scalar sampling fields.
     """
     sampling = config.sampling
-    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
+    guidance_controllable = has_controllable_sampling_guidance(config.model)
 
     intervals = sampling.get("interval", None)
     omegas = sampling.get("omegas", None)
-    if not cfg_conditioned and intervals is not None and omegas is not None:
+    if (not guidance_controllable) and intervals is not None and omegas is not None:
         t_min, t_max = intervals[0]
         omega = omegas[0]
         return [(omega, t_min, t_max)]
@@ -525,15 +527,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     p_preview_sample_steps = {
         num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
     }
+    guidance_controllable = has_controllable_sampling_guidance(config.model)
     preview_guidance_scales = config.training.get("preview_guidance_scales", [])
     if preview_guidance_scales:
         preview_guidance_scales = [float(omega) for omega in preview_guidance_scales]
     else:
         preview_guidance_scales = [float(config.sampling.omega)]
+    if not guidance_controllable:
+        preview_guidance_scales = [1.0]
     preview_t_min = float(config.sampling.t_min)
     preview_t_max = float(config.sampling.t_max)
     eval_sample_kwargs = {
-        "omega": float(config.sampling.omega),
+        "omega": 1.0 if not guidance_controllable else float(config.sampling.omega),
         "t_min": preview_t_min,
         "t_max": preview_t_max,
     }
@@ -822,7 +827,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     best_config = None
     best_fd_dino_config = None
     best_fd_dino_at_best_fid = None
-    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
+    guidance_controllable = has_controllable_sampling_guidance(config.model)
     for omega, t_min, t_max in _get_eval_sampling_configs(config):
         kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
         kwargs = jax_utils.replicate(kwargs)
@@ -844,7 +849,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
         'best_fid': best_fid,
         'best_is': best_is,
     }
-    if cfg_conditioned:
+    if guidance_controllable:
         summary['omega'] = best_config[0]
         summary['t_min'] = best_config[1]
         summary['t_max'] = best_config[2]
@@ -857,12 +862,13 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
         log_message = (
             f"Best FID achieved: {best_fid:.2f}, \n"
             f"IS achieved: {best_is:.2f}, \n"
-            f"single-head SiT-DMF eval used the model's fixed external guidance settings."
+            f"single-head SiT-DMF eval used the model's baked fixed-guidance output "
+            f"(no sampling-time guidance control)."
         )
     if best_fd_dino_at_best_fid is not None:
         summary['best_fd_dino_at_best_fid'] = best_fd_dino_at_best_fid
         log_message += f", \nFD-DINO at best FID config: {best_fd_dino_at_best_fid:.2f}"
-    if best_fd_dino_config is not None and cfg_conditioned:
+    if best_fd_dino_config is not None and guidance_controllable:
         summary['best_fd_dino'] = best_fd_dino
         summary['best_fd_dino_omega'] = best_fd_dino_config[0]
         summary['best_fd_dino_t_min'] = best_fd_dino_config[1]

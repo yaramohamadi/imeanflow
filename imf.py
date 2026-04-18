@@ -80,6 +80,7 @@ class iMeanFlow(nn.Module):
     adaln_guidance_scale_init: str = "timestep"
     use_adaln_condition_mixing: bool = False
     decoder_only_guidance_conditioning: bool = False
+    time_conditioning_mode: str = "split"
     use_training_guidance: bool = True
     training_guidance_interval_strategy: str = "sampled"
     training_guidance_t_min: float = 0.0
@@ -88,6 +89,7 @@ class iMeanFlow(nn.Module):
     guidance_scale_strategy: str = "sampled"
     max_sampled_guidance_scale: float = 8.0
     fixed_guidance_scale: float = 7.5
+    baked_guidance_blend: float = 0.5
     use_positive_sit_dmf_mf_target: bool = False
 
     # Training dynamics
@@ -118,6 +120,7 @@ class iMeanFlow(nn.Module):
             net_kwargs["decoder_only_guidance_conditioning"] = (
                 self.decoder_only_guidance_conditioning
             )
+            net_kwargs["time_conditioning_mode"] = self.time_conditioning_mode
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
         if self.use_dogfit:
             source_net_kwargs = dict(
@@ -142,6 +145,9 @@ class iMeanFlow(nn.Module):
                 source_net_kwargs["decoder_only_guidance_conditioning"] = (
                     self.decoder_only_guidance_conditioning
                 )
+                source_net_kwargs["time_conditioning_mode"] = (
+                    self.time_conditioning_mode
+                )
             self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
 
     def _uses_auxiliary_v_head(self):
@@ -165,6 +171,15 @@ class iMeanFlow(nn.Module):
             (not self._uses_auxiliary_v_head())
             and ("SiT_DMF" in self.model_str)
             and self.use_adaln_guidance_scale_conditioning
+        )
+
+    def _uses_baked_fixed_guidance_sampling(self):
+        return (
+            (not self._uses_auxiliary_v_head())
+            and self.use_training_guidance
+            and self.guidance_scale_strategy == "fixed"
+            and not self._uses_sit_guidance_context_conditioning()
+            and not self._uses_sit_adaln_guidance_scale_conditioning()
         )
 
     def _mf_target_interval_coeff(self, t, r):
@@ -193,6 +208,22 @@ class iMeanFlow(nn.Module):
             )
             w_eff = jnp.where(guidance_enabled, w_eff, jnp.ones_like(w_eff))
         return w_eff
+
+    def _effective_training_guidance_blend(self, t, w, t_min, t_max, current_step=None):
+        if self._uses_baked_fixed_guidance_sampling():
+            alpha = jnp.full_like(w, self.baked_guidance_blend, dtype=jnp.float32)
+            alpha = jnp.where((t >= t_min) & (t <= t_max), alpha, jnp.zeros_like(alpha))
+            if current_step is not None:
+                guidance_enabled = current_step >= jnp.asarray(
+                    self.training_guidance_start_step, dtype=current_step.dtype
+                )
+                alpha = jnp.where(guidance_enabled, alpha, jnp.zeros_like(alpha))
+            return alpha
+
+        w_eff = self._effective_training_guidance_scale(
+            t, w, t_min, t_max, current_step=current_step
+        )
+        return 1.0 - 1.0 / w_eff
 
     def guided_u_fn(self, x, t, r, omega, t_min, t_max, y):
         """
@@ -253,6 +284,10 @@ class iMeanFlow(nn.Module):
 
         if self._uses_auxiliary_v_head():
             u = self.u_fn(z_t, t, t - r, omega, t_min, t_max, y=labels)[0]
+        elif self._uses_baked_fixed_guidance_sampling():
+            # In the baked fixed-guidance regime the model already predicts the
+            # desired guided field, so sampling should not re-apply external CFG.
+            u = self.u_fn(z_t, t, t - r, jnp.ones_like(omega), t_min, t_max, y=labels)[0]
         else:
             u = self.guided_u_fn(z_t, t, r, omega, t_min, t_max, labels)
 
@@ -441,30 +476,28 @@ class iMeanFlow(nn.Module):
         t_max = jnp.ones_like(t)
         return self.u_fn(x, t, h, omega, t_min, t_max, y=y)[1]
 
-    def v_fn(self, x, t, omega, y):
+    def v_fn(self, x, t, y):
         """
-        Compute both conditioned and unconditioned predicted v components.
+        Compute the conditioned and unconditioned v components used in CFG.
 
         Args:
             x: Noisy image at time t.
             t: Current time step.
-            omega: CFG scale.
             y: Class labels.
 
         Returns:
-            v_c: Predicted v component conditioned on class labels.
-            v_u: Predicted v component without class labels.
+            v_c: Predicted conditioned v component evaluated at unit guidance.
+            v_u: Predicted unconditioned v component evaluated at unit guidance.
         """
         bz = x.shape[0]
 
-        # Create duplicated batch for conditioned and unconditioned predictions
         x = jnp.concatenate([x, x], axis=0)
-        y_null = jnp.array([self.num_classes] * bz)
+        y_null = jnp.full((bz,), self.num_classes, dtype=jnp.int32)
         y = jnp.concatenate([y, y_null], axis=0)
         t = jnp.concatenate([t, t], axis=0)
-        w = jnp.concatenate([omega, jnp.ones_like(omega)], axis=0)
+        omega = jnp.ones_like(t)
 
-        out = self.v_cond_fn(x, t, w, y)
+        out = self.v_cond_fn(x, t, omega, y)
         v_c, v_u = jnp.split(out, 2, axis=0)
 
         return v_c, v_u
@@ -610,24 +643,24 @@ class iMeanFlow(nn.Module):
             v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             return v_t, v_c
 
-        w_eff = self._effective_training_guidance_scale(
+        guidance_blend = self._effective_training_guidance_blend(
             t, w, t_min, t_max, current_step=current_step
         )
 
         if self.use_dogfit:
-            v_c = self.v_cond_fn(z_t, t, w_eff, y=y)
+            v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             v_u = self.source_v_uncond_fn(source_params, z_t, t)
         else:
-            v_c, v_u = self.v_fn(z_t, t, w_eff, y=y)
+            v_c, v_u = self.v_fn(z_t, t, y=y)
 
         if self._uses_sit_cfg_channel_rule():
             guided_first_three = (
                 v_t[..., :3]
-                + (1 - 1 / w_eff) * (v_c[..., :3] - v_u[..., :3])
+                + guidance_blend * (v_c[..., :3] - v_u[..., :3])
             )
             v_g = jnp.concatenate([guided_first_three, v_t[..., 3:]], axis=-1)
         else:
-            v_g = v_t + (1 - 1 / w_eff) * (v_c - v_u)
+            v_g = v_t + guidance_blend * (v_c - v_u)
 
         return v_g, v_c
 
@@ -755,11 +788,10 @@ class iMeanFlow(nn.Module):
             else omega
         )
 
-        base_w = model_omega if self._uses_sit_adaln_guidance_scale_conditioning() else omega
         if self.use_dogfit:
             v_u = self.source_v_uncond_fn(source_params, z_t, t)
         else:
-            _, v_u = self.v_fn(z_t, t, base_w, y=labels)
+            _, v_u = self.v_fn(z_t, t, y=labels)
 
         v_g, v_c = self.guidance_fn(
             v_t,
@@ -796,12 +828,13 @@ class iMeanFlow(nn.Module):
             "V": V,
             "omega": omega,
             "w_eff_mean": jnp.mean(
-                jnp.where(
-                    current_step >= jnp.asarray(self.training_guidance_start_step, dtype=current_step.dtype)
-                    if current_step is not None
-                    else jnp.asarray(True),
-                    jnp.where((t >= t_min) & (t <= t_max), omega, 1.0),
-                    jnp.ones_like(omega),
+                self._effective_training_guidance_scale(
+                    t, omega, t_min, t_max, current_step=current_step
+                )
+            ),
+            "guidance_blend_mean": jnp.mean(
+                self._effective_training_guidance_blend(
+                    t, omega, t_min, t_max, current_step=current_step
                 )
             ),
             "t": t,

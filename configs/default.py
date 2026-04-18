@@ -81,6 +81,7 @@ def get_config():
     model.adaln_guidance_scale_init = "timestep"
     model.use_adaln_condition_mixing = False
     model.decoder_only_guidance_conditioning = False
+    model.time_conditioning_mode = "split"
     model.use_training_guidance = True
     model.training_guidance_interval_strategy = "sampled"
     model.training_guidance_t_min = 0.0
@@ -89,6 +90,7 @@ def get_config():
     model.guidance_scale_strategy = "sampled"
     model.max_sampled_guidance_scale = 8.0
     model.fixed_guidance_scale = 7.5
+    model.baked_guidance_blend = 0.5
     model.use_positive_sit_dmf_mf_target = False
 
     # Training Dynamics

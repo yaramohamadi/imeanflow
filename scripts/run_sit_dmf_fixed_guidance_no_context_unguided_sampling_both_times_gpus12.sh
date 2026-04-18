@@ -6,7 +6,7 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES_VALUE:-1,2}"
 BASE_WORKDIR="${BASE_WORKDIR:-files/logs/finetuning}"
 
-WORKDIR="${BASE_WORKDIR}/caltech_SiT_DMF_fixed_guidance_no_context_unguided_sampling_${RUN_LABEL}"
+WORKDIR="${BASE_WORKDIR}/caltech_SiT_DMF_fixed_guidance_no_context_unguided_sampling_both_times_${RUN_LABEL}"
 
 echo "=== Running ${WORKDIR} ==="
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
@@ -30,6 +30,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
     --config.model.training_guidance_t_max=1.0 \
     --config.model.training_guidance_start_step=0 \
     --config.model.use_context_guidance_conditioning=False \
-    --config.model.time_conditioning_mode=split \
+    --config.model.time_conditioning_mode=both \
     --config.model.use_positive_sit_dmf_mf_target=False \
     2>&1 | stdbuf -oL grep -a -v -E '(\+ptx[0-9]+|recognized feature for this target|ignoring feature)'

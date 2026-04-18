@@ -8,6 +8,19 @@ from utils import fid_util
 from utils.logging_util import log_for_0
 
 
+def has_controllable_sampling_guidance(model_config):
+    if model_config.get("use_auxiliary_v_head", True):
+        return True
+    if model_config.get("use_context_guidance_conditioning", False):
+        return True
+    if model_config.get("use_adaln_guidance_scale_conditioning", False):
+        return True
+    return not (
+        model_config.get("use_training_guidance", True)
+        and model_config.get("guidance_scale_strategy", "sampled") == "fixed"
+    )
+
+
 def run_p_sample_step(
     p_sample_step, state, sample_idx, latent_manager, ema=True, **kwargs
 ):
@@ -64,11 +77,11 @@ def generate_fid_samples(
     return samples_all[:target_num_samples]
 
 
-def _get_eval_descriptor(kwargs, mode_str, cfg_conditioned=True):
+def _get_eval_descriptor(kwargs, mode_str, guidance_controllable=True):
     omega = kwargs.get("omega", None)[0]
     t_min = kwargs.get("t_min", None)[0]
     t_max = kwargs.get("t_max", None)[0]
-    if cfg_conditioned:
+    if guidance_controllable:
         descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
     else:
         descriptor = f"single_head_{mode_str}"
@@ -97,7 +110,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
     run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
     use_ema = config.training.get("use_ema", True)
-    cfg_conditioned = config.model.get("use_auxiliary_v_head", True)
+    guidance_controllable = has_controllable_sampling_guidance(config.model)
 
     def _evaluate_one_mode(state, p_sample_step, ema, **kwargs):
         samples_all = generate_fid_samples(
@@ -115,16 +128,17 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
         mode_str = "ema" if ema else "online"
         descriptor, omega, t_min, t_max = _get_eval_descriptor(
-            kwargs, mode_str, cfg_conditioned=cfg_conditioned
+            kwargs, mode_str, guidance_controllable=guidance_controllable
         )
-        if cfg_conditioned:
+        if guidance_controllable:
             log_for_0(
                 f"Computing image metrics at omega={omega:.2f}, t_min={t_min:.2f}, "
                 f"t_max={t_max:.2f}, mode={mode_str}..."
             )
         else:
             log_for_0(
-                f"Computing image metrics for single-head evaluation, mode={mode_str}..."
+                f"Computing image metrics for single-head evaluation without "
+                f"sampling-time guidance control, mode={mode_str}..."
             )
 
         fid = fid_util.compute_fid(

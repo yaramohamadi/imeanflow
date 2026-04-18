@@ -974,6 +974,7 @@ class imfSiT_DMF(nn.Module):
     adaln_guidance_scale_init: str = "timestep"
     use_adaln_condition_mixing: bool = False
     decoder_only_guidance_conditioning: bool = False
+    time_conditioning_mode: str = "split"
     num_cfg_tokens: int = 4
     num_interval_tokens: int = 2
     eval: bool = False
@@ -1007,6 +1008,10 @@ class imfSiT_DMF(nn.Module):
             raise ValueError(
                 "use_adaln_condition_mixing and "
                 "decoder_only_guidance_conditioning cannot both be enabled."
+            )
+        if self.time_conditioning_mode not in {"split", "both"}:
+            raise ValueError(
+                "time_conditioning_mode must be one of ['split', 'both']."
             )
 
         self.out_channels = self.in_channels
@@ -1049,10 +1054,11 @@ class imfSiT_DMF(nn.Module):
                 weight_init=self.weight_init,
                 init_constant=self.weight_init_constant,
             )
-        if self.use_adaln_condition_mixing:
+        if self.use_adaln_condition_mixing or self.time_conditioning_mode == "both":
             self.time_condition_projector = ResidualConcatConditionProjector(
                 self.hidden_size
             )
+        if self.use_adaln_condition_mixing:
             self.class_condition_projector = ResidualConcatConditionProjector(
                 self.hidden_size
             )
@@ -1180,8 +1186,15 @@ class imfSiT_DMF(nn.Module):
             encoder_c = shared_c
             decoder_c = shared_c
         else:
-            encoder_c = self.t_embedder(t) + y_embed
-            decoder_c = self.t_embedder(r) + y_embed
+            t_embed = self.t_embedder(t)
+            r_embed = self.t_embedder(r)
+            if self.time_conditioning_mode == "both":
+                shared_time = self.time_condition_projector(t_embed, r_embed)
+                encoder_c = shared_time + y_embed
+                decoder_c = shared_time + y_embed
+            else:
+                encoder_c = t_embed + y_embed
+                decoder_c = r_embed + y_embed
         if self.use_adaln_guidance_scale_conditioning and not self.use_adaln_condition_mixing:
             omega_feature = 1.0 - 1.0 / jnp.maximum(
                 jnp.asarray(omega, dtype=jnp.float32), 1e-6
