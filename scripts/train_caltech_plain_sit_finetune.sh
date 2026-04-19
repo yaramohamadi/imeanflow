@@ -28,6 +28,8 @@ Optional env vars:
   DATASET_ROOT=/path/to/root         # optional explicit latent dataset root, overrides DATASET_NAME root
   FID_CACHE_REF=/path/to/ref.npz     # optional explicit FID stats ref
   FD_DINO_CACHE_REF=/path/to/ref.npz # optional explicit FD-DINO stats ref; empty disables FD-DINO
+  FORCE_FID_PER_STEP=5               # optional: ignore config fid_schedule and run FID every N steps
+  METRIC_NUM_STEPS="1"               # optional: space-separated sampling step counts for FID
   BACKBONE=sit                       # sit or dit; selects model_str and default checkpoint
   MODEL_STR=flaxDiT_XL_2             # optional explicit Flax backbone override
   LOAD_FROM=/path/to/checkpoint      # optional initial checkpoint override
@@ -81,13 +83,17 @@ case "${DATASET_NAME}" in
     DATASET_LABEL="caltech101"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
     FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+    if [[ ! -v FD_DINO_CACHE_REF ]]; then
+      FD_DINO_CACHE_REF="/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
+    fi
     ;;
   artbench10|artbench-10)
     DATASET_LABEL="artbench10"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/artbench-10_processed_latents}"
     FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/artbench-10_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
+    if [[ ! -v FD_DINO_CACHE_REF ]]; then
+      FD_DINO_CACHE_REF="/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz"
+    fi
     ;;
   cub200|cub-200|cub-200-2011)
     DATASET_LABEL="cub200"
@@ -136,6 +142,14 @@ if [[ -n "${SAMPLE_DEVICE_BATCH_SIZE:-}" ]]; then
 fi
 if [[ -n "${SAMPLE_LOG_EVERY:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_log_every="${SAMPLE_LOG_EVERY}")
+fi
+
+if [[ -n "${FORCE_FID_PER_STEP:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.force_fid_per_step="${FORCE_FID_PER_STEP}")
+fi
+
+if [[ -n "${METRIC_NUM_STEPS:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.force_metric_num_steps="${METRIC_NUM_STEPS}")
 fi
 
 if [[ -n "${HALF_PRECISION:-}" ]]; then

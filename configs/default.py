@@ -40,6 +40,8 @@ def get_config():
     training.checkpoint_per_epoch = 10
     training.fid_per_step = 1000
     training.fid_schedule = []
+    training.force_fid_per_step = 0
+    training.force_metric_num_steps = ""
     training.metric_num_steps = ()
     training.preview_guidance_scales = ()
     training.preview_num_steps = ()

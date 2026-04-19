@@ -247,6 +247,10 @@ def _get_eval_sampling_configs(config):
 
 
 def _should_run_fid(current_step, training_config):
+    force_fid_per_step = int(training_config.get("force_fid_per_step", 0) or 0)
+    if force_fid_per_step > 0:
+        return current_step % force_fid_per_step == 0
+
     fid_schedule = training_config.get("fid_schedule", [])
     if fid_schedule:
         for schedule_item in fid_schedule:
@@ -266,6 +270,10 @@ def _should_run_fid(current_step, training_config):
 
 
 def _get_metric_num_steps(config):
+    forced_steps = str(config.training.get("force_metric_num_steps", "") or "").strip()
+    if forced_steps:
+        return tuple(int(step) for step in forced_steps.replace(",", " ").split())
+
     configured_steps = config.training.get("metric_num_steps", ())
     if configured_steps:
         num_steps = [int(step) for step in configured_steps]
@@ -708,15 +716,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 log_preview_samples(state, current_step)
 
             if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
-                checkpoint_path_for_csv = ""
-                if save_eval_checkpoint_per_fid:
-                    log_for_0(
-                        "Saving latest evaluation checkpoint at step %d to %s.",
-                        current_step,
-                        eval_ckpt_dir,
-                    )
-                    save_best_checkpoint(state, eval_ckpt_dir)
-                    checkpoint_path_for_csv = eval_ckpt_dir
+                checkpoint_path_for_csv = (
+                    eval_ckpt_dir if save_eval_checkpoint_per_fid else ""
+                )
 
                 for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
                     log_for_0(
@@ -778,6 +780,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         is_best_fid=is_best_fid,
                         is_best_fd_dino=is_best_fd_dino,
                     )
+
+                if save_eval_checkpoint_per_fid:
+                    log_for_0(
+                        "Saving latest evaluation checkpoint after metric evaluation at step %d to %s.",
+                        current_step,
+                        eval_ckpt_dir,
+                    )
+                    save_best_checkpoint(state, eval_ckpt_dir)
 
             if max_train_steps is not None and current_step >= max_train_steps:
                 should_stop = True
