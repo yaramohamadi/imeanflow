@@ -69,7 +69,8 @@ fid:
     device_batch_size: 16
     sample_device_batch_size: 32
     sample_log_every: 1
-    num_samples: 10000 
+    sample_first_device_only: False
+    num_samples: 10000
     cache_ref: '/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
     num_images_to_log: 16
 

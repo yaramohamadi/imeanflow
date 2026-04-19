@@ -17,10 +17,12 @@ Optional env vars:
   LOAD_FROM=/path/to/DiT-XL-2-256x256.pt
   SAMPLE_DEVICE_BATCH_SIZE=16
   SAMPLE_LOG_EVERY=1
+  SAMPLE_FIRST_DEVICE_ONLY=False # set True to make preview/eval sampling use only visible GPU 0
   HALF_PRECISION=True
   HALF_PRECISION_DTYPE=float16
   SAMPLING_HALF_PRECISION=True
   SAMPLING_HALF_PRECISION_DTYPE=float16
+  GUIDANCE_SCALE=1.5             # sets both sampling.omega and sampling.cfg_scale
   WANDB_PROJECT=plain_dit_finetune   # optional wandb project override
   WANDB_NAME=food101_plain_dit_base  # optional wandb run name override
 EOF
@@ -38,6 +40,7 @@ LOG_DIR="${LOG_DIR:-files/logs}"
 LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
 SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
+SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_dit_finetune}"
 CONFIG_OVERRIDE_ARGS=()
@@ -60,19 +63,19 @@ case "${DATASET_NAME}" in
     DATASET_LABEL="cub200"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/cub-200-2011_processed_latents}"
     FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
     ;;
   food101|food-101)
     DATASET_LABEL="food101"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/food-101_processed_latents}"
     FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/food-101_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
     ;;
   stanfordcars|stanford-cars|cars)
     DATASET_LABEL="stanfordcars"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/stanford-cars_processed_latents}"
     FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
     ;;
   *)
     echo "ERROR: unknown DATASET_NAME='$DATASET_NAME'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
@@ -103,6 +106,11 @@ fi
 if [[ -n "${SAMPLE_LOG_EVERY:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_log_every="${SAMPLE_LOG_EVERY}")
 fi
+case "${SAMPLE_FIRST_DEVICE_ONLY,,}" in
+  1|true|yes|y|on) CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_first_device_only=True) ;;
+  0|false|no|n|off) CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_first_device_only=False) ;;
+  *) echo "ERROR: SAMPLE_FIRST_DEVICE_ONLY must be boolean-like, got '$SAMPLE_FIRST_DEVICE_ONLY'." >&2; exit 2 ;;
+esac
 if [[ -n "${HALF_PRECISION:-}" ]]; then
   case "${HALF_PRECISION,,}" in
     1|true|yes|y|on) CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision=True) ;;
@@ -123,6 +131,10 @@ fi
 if [[ -n "${SAMPLING_HALF_PRECISION_DTYPE:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision_dtype="${SAMPLING_HALF_PRECISION_DTYPE}")
 fi
+if [[ -n "${GUIDANCE_SCALE:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.sampling.omega="${GUIDANCE_SCALE}")
+  CONFIG_OVERRIDE_ARGS+=(--config.sampling.cfg_scale="${GUIDANCE_SCALE}")
+fi
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
@@ -142,6 +154,7 @@ DATASET_NAME: ${DATASET_NAME}
 DATASET_ROOT override: ${DATASET_ROOT:-<config default>}
 LOAD_FROM override: ${LOAD_FROM:-<config default>}
 SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE:-<config default>}
+SAMPLE_FIRST_DEVICE_ONLY override: ${SAMPLE_FIRST_DEVICE_ONLY:-<config default>}
 HALF_PRECISION override: ${HALF_PRECISION:-<config default>}
 HALF_PRECISION_DTYPE override: ${HALF_PRECISION_DTYPE:-<config default>}
 SAMPLING_HALF_PRECISION override: ${SAMPLING_HALF_PRECISION:-<config default>}
