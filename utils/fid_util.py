@@ -103,11 +103,11 @@ def revert_pmap_shape(x):
     return x.reshape((-1, *x.shape[2:]))
 
 
-def _gather_feature_matrix(features):
+def _gather_feature_matrix(features, local_device_count=LDC):
     if jax.process_count() == 1:
         return jax.device_get(features)
 
-    features = features.reshape((-1, LDC, features.shape[-1]))
+    features = features.reshape((-1, local_device_count, features.shape[-1]))
     features = features.transpose((1, 0, 2))  # (LDC, N//LDC, feat_dim)
     all_features = multihost_utils.process_allgather(features)
     all_features = all_features.reshape((-1,) + all_features.shape[2:])
@@ -128,12 +128,14 @@ def compute_stats(
     inception_net,
     batch_size=200,
     fid_samples=50000,
+    num_local_devices=None,
 ):
     inception_fn = inception_net["fn"]
     inception_params = inception_net["params"]
 
     num_samples = len(samples)
-    full_batch_size = batch_size * LDC
+    local_device_count = LDC if num_local_devices is None else int(num_local_devices)
+    full_batch_size = batch_size * local_device_count
     pad = int(np.ceil(num_samples / full_batch_size)) * full_batch_size - num_samples
     samples = np.concatenate(
         [samples, np.zeros((pad, *samples.shape[1:]), dtype=np.uint8)]
@@ -161,7 +163,7 @@ def compute_stats(
     # Process pooled features
     np_feats = jnp.concatenate(l_feats)
     np_feats = np_feats[:num_samples]
-    all_feats = _gather_feature_matrix(np_feats)
+    all_feats = _gather_feature_matrix(np_feats, local_device_count=local_device_count)
 
     log_for_0(
         f"FID final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
@@ -175,7 +177,7 @@ def compute_stats(
     if jax.process_count() == 1:
         all_logits = jax.device_get(np_logits)
     else:
-        np_logits = np_logits.reshape((-1, LDC, np_logits.shape[-1]))
+        np_logits = np_logits.reshape((-1, local_device_count, np_logits.shape[-1]))
         np_logits = np_logits.transpose((1, 0, 2))  # (LDC, N//LDC, num_classes)
         all_logits = multihost_utils.process_allgather(np_logits)
         all_logits = all_logits.reshape((-1,) + all_logits.shape[2:])
@@ -194,9 +196,11 @@ def compute_dinov2_stats(
     dino_net,
     batch_size=200,
     fid_samples=50000,
+    num_local_devices=None,
 ):
     num_samples = len(samples)
-    full_batch_size = batch_size * LDC
+    local_device_count = LDC if num_local_devices is None else int(num_local_devices)
+    full_batch_size = batch_size * local_device_count
     pad = int(np.ceil(num_samples / full_batch_size)) * full_batch_size - num_samples
     samples = np.concatenate(
         [samples, np.zeros((pad, *samples.shape[1:]), dtype=np.uint8)]
@@ -211,7 +215,7 @@ def compute_dinov2_stats(
 
     np_feats = jnp.concatenate(l_feats)
     np_feats = np_feats[:num_samples]
-    all_feats = _gather_feature_matrix(np_feats)
+    all_feats = _gather_feature_matrix(np_feats, local_device_count=local_device_count)
 
     log_for_0(
         f"FD-DINO final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"

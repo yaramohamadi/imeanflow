@@ -32,6 +32,8 @@ from utils.preview_util import (
 from utils.sample_util import (
     get_image_metric_evaluator,
     get_sample_device_batch_size,
+    get_sample_devices,
+    get_sample_local_device_count,
     get_sampling_param_dtype,
     get_training_param_dtype,
 )
@@ -350,9 +352,12 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
     image_size = config.dataset.image_size
     metric_device_bsz = int(config.fid.device_batch_size)
     sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
     log_for_0("config.fid.device_batch_size: %s", metric_device_bsz)
     log_for_0("config.fid.sample_device_batch_size: %s", sample_device_bsz)
+    log_for_0("sampling local device count: %s", sample_local_device_count)
 
     model = _build_plain_sit(config, eval_mode=True)
     state = _restore_eval_state(config, model, image_size, use_ema)
@@ -363,6 +368,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         config.dataset.vae,
         sample_device_bsz,
         image_size,
+        decode_num_local_devices=sample_local_device_count,
     )
     p_sample_step = jax.pmap(
         partial(
@@ -374,6 +380,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
             num_steps=config.sampling.num_steps,
         ),
         axis_name="batch",
+        devices=sample_devices,
     )
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
@@ -389,7 +396,8 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
 
     for omega, t_min, t_max in _get_eval_sampling_configs(config):
         kwargs = jax_utils.replicate(
-            {"omega": omega, "t_min": t_min, "t_max": t_max}
+            {"omega": omega, "t_min": t_min, "t_max": t_max},
+            devices=sample_devices,
         )
         result = image_metric_evaluator(
             state,
@@ -496,6 +504,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     image_size = config.dataset.image_size
     metric_device_bsz = int(config.fid.device_batch_size)
     sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
     max_train_steps = config.training.get("max_train_steps", None)
     grad_accum_steps = config.training.get("grad_accum_steps", 1)
@@ -508,6 +518,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     log_for_0("config.training.fid_per_step: %s", config.training.fid_per_step)
     log_for_0("config.fid.device_batch_size: %s", metric_device_bsz)
     log_for_0("config.fid.sample_device_batch_size: %s", sample_device_bsz)
+    log_for_0("sampling local device count: %s", sample_local_device_count)
 
     local_batch_size = config.training.batch_size // jax.process_count()
     log_for_0("local_batch_size: %s", local_batch_size)
@@ -554,6 +565,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         config.dataset.vae,
         sample_device_bsz,
         image_size,
+        decode_num_local_devices=sample_local_device_count,
     )
     sample_model = _build_plain_sit(config, eval_mode=True)
 
@@ -568,6 +580,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 num_steps=num_steps,
             ),
             axis_name="batch",
+            devices=sample_devices,
         )
 
     metric_num_steps = _get_metric_num_steps(config)
@@ -598,7 +611,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             "omega": float(config.sampling.omega),
             "t_min": preview_t_min,
             "t_max": preview_t_max,
-        }
+        },
+        devices=sample_devices,
     )
 
     def log_preview_samples(state_for_logging, step_for_logging):
@@ -627,7 +641,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     "omega": omega,
                     "t_min": preview_t_min,
                     "t_max": preview_t_max,
-                }
+                },
+                devices=sample_devices,
             )
             preview_images = {}
             for num_steps, p_preview_step in p_preview_sample_steps.items():
@@ -638,6 +653,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     use_ema,
                     num_samples=num_images,
                     param_dtype=get_sampling_param_dtype(config),
+                    sample_local_device_count=sample_local_device_count,
                     **preview_kwargs,
                 )
 

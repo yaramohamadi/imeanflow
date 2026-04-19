@@ -7,6 +7,32 @@ from jax import random
 from utils.dit_diffusion import create_diffusion
 
 
+def get_default_cfg_scale(config):
+    """Return the config-level DiT classifier-free guidance scale.
+
+    The project uses `sampling.omega` as the common guidance-scale name across
+    SiT and DiT. `sampling.cfg_scale` is accepted as a DiT-compatible fallback.
+    """
+    sampling = config.sampling
+    has_omega = "omega" in sampling
+    has_cfg_scale = "cfg_scale" in sampling
+    if has_omega and has_cfg_scale:
+        omega = float(sampling.omega)
+        cfg_scale = float(sampling.cfg_scale)
+        if abs(omega - cfg_scale) > 1e-8:
+            raise ValueError(
+                "DiT config has both sampling.omega and sampling.cfg_scale, "
+                f"but they differ: omega={omega}, cfg_scale={cfg_scale}. "
+                "Set them to the same value or remove one to avoid ambiguous guidance."
+            )
+        return omega
+    if has_omega:
+        return float(sampling.omega)
+    if has_cfg_scale:
+        return float(sampling.cfg_scale)
+    return 1.0
+
+
 def _get_sampling_dtype(config):
     sampling = config.get("sampling", {})
     if not sampling.get("half_precision", False):
@@ -82,10 +108,10 @@ def generate(
         int(config.dataset.num_classes),
         sample_idx=sample_idx,
     )
-    cfg_scale = jnp.asarray(
-        config.sampling.get("cfg_scale", omega),
-        dtype=sample_dtype,
-    )
+    cfg_scale_value = omega
+    if cfg_scale_value is None:
+        cfg_scale_value = get_default_cfg_scale(config)
+    cfg_scale = jnp.asarray(cfg_scale_value, dtype=sample_dtype)
 
     diffusion = create_diffusion(
         str(num_steps),

@@ -9,7 +9,42 @@ from utils import fid_util
 from utils.logging_util import log_for_0
 
 
+def get_sample_local_device_count(config):
+    fid_config = config.get("fid", {})
+    local_device_count = jax.local_device_count()
+    if fid_config.get("sample_first_device_only", False):
+        return 1
+
+    requested = int(fid_config.get("sample_num_local_devices", 0))
+    if requested <= 0:
+        return local_device_count
+    if requested > local_device_count:
+        raise ValueError(
+            f"Requested {requested} sample local devices, but only "
+            f"{local_device_count} local devices are visible."
+        )
+    return requested
+
+
+def get_sample_devices(config):
+    return jax.local_devices()[: get_sample_local_device_count(config)]
+
+
+def _slice_local_device_axis(tree, num_local_devices):
+    if num_local_devices >= jax.local_device_count():
+        return tree
+
+    def maybe_slice(x):
+        if hasattr(x, "shape") and x.shape and x.shape[0] == jax.local_device_count():
+            return x[:num_local_devices]
+        return x
+
+    return jax.tree_util.tree_map(maybe_slice, tree)
+
+
 def has_controllable_sampling_guidance(model_config):
+    if model_config.get("uses_classifier_free_guidance", False):
+        return True
     if model_config.get("use_auxiliary_v_head", True):
         return True
     if model_config.get("use_context_guidance_conditioning", False):
@@ -23,12 +58,21 @@ def has_controllable_sampling_guidance(model_config):
 
 
 def run_p_sample_step(
-    p_sample_step, state, sample_idx, latent_manager, ema=True, **kwargs
+    p_sample_step,
+    state,
+    sample_idx,
+    latent_manager,
+    ema=True,
+    sample_local_device_count=None,
+    **kwargs,
 ):
     """
     Run one p_sample_step to get samples from the model.
     """
     params = state.ema_params if ema else state.params
+    if sample_local_device_count is not None:
+        params = _slice_local_device_axis(params, sample_local_device_count)
+        kwargs = _slice_local_device_axis(kwargs, sample_local_device_count)
 
     variable = {"params": params}
     latent = p_sample_step(variable, sample_idx=sample_idx, **kwargs)
@@ -118,9 +162,11 @@ def generate_fid_samples(
     """
     target_num_samples = config.fid.num_samples if num_samples is None else num_samples
     sample_device_batch_size = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_global_device_count = sample_local_device_count * jax.process_count()
     state = maybe_cast_state_for_sampling(state, config)
     num_steps = np.ceil(
-        target_num_samples / sample_device_batch_size / jax.device_count()
+        target_num_samples / sample_device_batch_size / sample_global_device_count
     ).astype(int)
     log_sample_every = max(1, int(config.fid.get("sample_log_every", 1)))
 
@@ -131,20 +177,25 @@ def generate_fid_samples(
         "Generating %d samples with sample_device_batch_size=%d, global_batch_size=%d, batches=%d",
         target_num_samples,
         sample_device_batch_size,
-        sample_device_batch_size * jax.device_count(),
+        sample_device_batch_size * sample_global_device_count,
         num_steps,
     )
     for step in range(num_steps):
-        sample_idx = jax.process_index() * jax.local_device_count() + jnp.arange(
-            jax.local_device_count()
+        sample_idx = jax.process_index() * sample_local_device_count + jnp.arange(
+            sample_local_device_count
         )
-        sample_idx = jax.device_count() * step + sample_idx
+        sample_idx = sample_global_device_count * step + sample_idx
         should_log = step == 0 or step + 1 == num_steps or step % log_sample_every == 0
         if should_log:
             log_for_0(f"Sampling step {step} / {num_steps}...")
         sample_start = time.time()
         samples = run_p_sample_step(
-            p_sample_step, state, sample_idx=sample_idx, ema=ema, **kwargs
+            p_sample_step,
+            state,
+            sample_idx=sample_idx,
+            ema=ema,
+            sample_local_device_count=sample_local_device_count,
+            **kwargs,
         )
         samples.block_until_ready()
         device_seconds = time.time() - sample_start
@@ -183,7 +234,8 @@ def get_image_metric_evaluator(config, writer, latent_manager):
     """
     Create a single evaluator that logs FID, Inception Score, and optionally FD-DINO.
     """
-    inception_batch_size = config.fid.device_batch_size * jax.local_device_count()
+    sample_local_device_count = get_sample_local_device_count(config)
+    inception_batch_size = config.fid.device_batch_size * sample_local_device_count
     inception_net = fid_util.build_jax_inception(batch_size=inception_batch_size)
     fid_stats_ref = fid_util.get_reference(config.fid.cache_ref)
 
@@ -195,7 +247,9 @@ def get_image_metric_evaluator(config, writer, latent_manager):
         dino_net = dino_util.build_jax_dinov2(
             arch=fd_dino_config.get("arch", "vitb14"),
             model_name=fd_dino_config.get("model_name", None),
-            batch_size=config.fid.device_batch_size * jax.device_count(),
+            batch_size=config.fid.device_batch_size
+            * sample_local_device_count
+            * jax.process_count(),
         )
         fd_dino_stats_ref = fid_util.get_reference(fd_dino_config.cache_ref)
 
@@ -213,6 +267,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
             inception_net,
             batch_size=config.fid.device_batch_size,
             fid_samples=config.fid.num_samples,
+            num_local_devices=sample_local_device_count,
         )
         metric = {}
         result = {}
@@ -254,6 +309,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
                 dino_net,
                 batch_size=config.fid.device_batch_size,
                 fid_samples=config.fid.num_samples,
+                num_local_devices=sample_local_device_count,
             )
             fd_dino = fid_util.compute_fid(
                 fd_dino_stats_ref["mu"],

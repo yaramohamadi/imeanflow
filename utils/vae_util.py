@@ -37,7 +37,13 @@ class LatentDist(
 
 
 class LatentManager:
-    def __init__(self, vae_type, decode_batch_size, input_size):
+    def __init__(
+        self,
+        vae_type,
+        decode_batch_size,
+        input_size,
+        decode_num_local_devices=None,
+    ):
         # init VAE
         vae, vae_params = FlaxAutoencoderKL.from_pretrained(
             f"pcuenq/sd-vae-ft-{vae_type}-flax"
@@ -47,6 +53,17 @@ class LatentManager:
 
         self.batch_size = decode_batch_size
         self.latent_size = input_size
+        if decode_num_local_devices is None:
+            decode_num_local_devices = jax.local_device_count()
+        self.decode_num_local_devices = int(decode_num_local_devices)
+        if self.decode_num_local_devices < 1:
+            raise ValueError("decode_num_local_devices must be >= 1.")
+        if self.decode_num_local_devices > jax.local_device_count():
+            raise ValueError(
+                f"Requested {self.decode_num_local_devices} VAE decode devices, "
+                f"but only {jax.local_device_count()} local devices are visible."
+            )
+        self.decode_devices = jax.local_devices()[: self.decode_num_local_devices]
 
         # create decode function
         self.decode_fn = self.get_decode_fn()
@@ -63,7 +80,7 @@ class LatentManager:
         def dist_prepare_batch_data(batch):
             # reshape (host_batch_size, 3, height, width) to
             # (local_devices, device_batch_size, height, width, 3)
-            local_device_count = jax.local_device_count()
+            local_device_count = self.decode_num_local_devices
 
             return_dict = {}
             for k, v in batch.items():
@@ -76,7 +93,7 @@ class LatentManager:
 
         z_dummy = jnp.ones(
             (
-                jax.local_device_count(),
+                self.decode_num_local_devices,
                 self.batch_size,
                 4,
                 self.latent_size,
@@ -84,16 +101,23 @@ class LatentManager:
             )
         )
 
-        p_vae_variable = jax_utils.replicate({"params": self.vae_params})
+        p_vae_variable = jax_utils.replicate(
+            {"params": self.vae_params},
+            devices=self.decode_devices,
+        )
         p_decode_fn = partial(self.vae.apply, method=FlaxAutoencoderKL.decode)
-        p_decode_fn = jax.pmap(p_decode_fn, axis_name="batch")
+        p_decode_fn = jax.pmap(
+            p_decode_fn,
+            axis_name="batch",
+            devices=self.decode_devices,
+        )
 
         lowered = p_decode_fn.lower(p_vae_variable, z_dummy)
         compiled_decod_fn = lowered.compile()
         Bflops = (
             compiled_decod_fn.cost_analysis()[0]["flops"]
             / 1e9
-            / (self.batch_size * jax.local_device_count())
+            / (self.batch_size * self.decode_num_local_devices)
         )
         log_for_0("Compiling VAE decoder done in %.2f seconds." % (time.time() - now))
         log_for_0(f"FLOPs (1e9): {Bflops}")
@@ -124,9 +148,21 @@ class LatentManager:
 class DiTLatentManager(LatentManager):
     """VAE decode helper for original DiT-scaled latents."""
 
-    def __init__(self, vae_type, decode_batch_size, input_size, latent_scale=0.18215):
+    def __init__(
+        self,
+        vae_type,
+        decode_batch_size,
+        input_size,
+        latent_scale=0.18215,
+        decode_num_local_devices=None,
+    ):
         self.latent_scale = latent_scale
-        super().__init__(vae_type, decode_batch_size, input_size)
+        super().__init__(
+            vae_type,
+            decode_batch_size,
+            input_size,
+            decode_num_local_devices=decode_num_local_devices,
+        )
 
     def decode(self, latents):
         return self.decode_fn(latents / self.latent_scale)["sample"]

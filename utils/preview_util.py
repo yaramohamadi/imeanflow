@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from utils.logging_util import log_for_0
+from utils.sample_util import _slice_local_device_axis
 
 
 def make_uint8_image_grid(images, grid_size):
@@ -84,6 +85,7 @@ def generate_preview_samples_first_device(
     ema=True,
     num_samples=None,
     param_dtype=None,
+    sample_local_device_count=None,
     **kwargs,
 ):
     if num_samples is None:
@@ -100,17 +102,30 @@ def generate_preview_samples_first_device(
             else x,
             params,
         )
+    if sample_local_device_count is not None:
+        params = _slice_local_device_axis(params, sample_local_device_count)
+        kwargs = _slice_local_device_axis(kwargs, sample_local_device_count)
     variable = {"params": params}
 
     log_for_0("Note: the first preview sample may be significantly slower")
     for step in range(num_iters):
-        sample_idx = jnp.arange(jax.local_device_count(), dtype=jnp.int32)
-        sample_idx = sample_idx + step * jax.local_device_count()
+        preview_device_count = (
+            jax.local_device_count()
+            if sample_local_device_count is None
+            else sample_local_device_count
+        )
+        sample_idx = jnp.arange(preview_device_count, dtype=jnp.int32)
+        sample_idx = sample_idx + step * preview_device_count
         log_for_0(f"Preview sampling step {step} / {num_iters} on first local device...")
 
         latent = p_sample_step(variable, sample_idx=sample_idx, **kwargs)
         latent = latent[0]
-        decode_total = latent_manager.batch_size * jax.local_device_count()
+        decode_local_device_count = getattr(
+            latent_manager,
+            "decode_num_local_devices",
+            jax.local_device_count(),
+        )
+        decode_total = latent_manager.batch_size * decode_local_device_count
         if latent.shape[0] < decode_total:
             pad_shape = (decode_total - latent.shape[0],) + latent.shape[1:]
             latent = jnp.concatenate(
