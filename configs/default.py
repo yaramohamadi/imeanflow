@@ -139,6 +139,8 @@ def get_config():
     fid.device_batch_size = 128
     fid.sample_device_batch_size = -1
     fid.sample_log_every = 1
+    fid.sample_first_device_only = False
+    fid.sample_num_local_devices = 0
     fid.cache_ref = "FID_CACHE_REF"
     fid.num_images_to_log = 100
 

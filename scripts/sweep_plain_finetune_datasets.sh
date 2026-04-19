@@ -14,7 +14,7 @@ Examples:
     --config.training.max_train_steps=10000
 
 Env knobs:
-  BACKBONE=sit                       # sit or dit
+  BACKBONE=sit                       # sit, dit, or imf
   DATASETS="caltech101 artbench10 cub200 food101 stanfordcars"
   SWEEP_LOG_DIR=files/logs/sweeps/... # default: files/logs/sweeps/plain_<backbone>_<label>_<time>
   WANDB_PROJECT=plain_sit_finetune    # default depends on BACKBONE
@@ -45,8 +45,13 @@ case "${BACKBONE,,}" in
     BACKBONE_LABEL="dit"
     DEFAULT_WANDB_PROJECT="plain_dit_finetune"
     ;;
+  imf)
+    TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
+    BACKBONE_LABEL="imf"
+    DEFAULT_WANDB_PROJECT="plain_imf_finetune"
+    ;;
   *)
-    echo "ERROR: BACKBONE must be sit or dit, got '${BACKBONE}'." >&2
+    echo "ERROR: BACKBONE must be sit, dit, or imf, got '${BACKBONE}'." >&2
     exit 2
     ;;
 esac
