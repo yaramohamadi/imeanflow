@@ -3,11 +3,11 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: CONFIG_MODE=caltech_plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh <best_fid_dir_or_run_dir> [num_steps...]
+Usage: CONFIG_MODE=plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh <best_fid_dir_or_run_dir> [num_steps...]
 
 Example:
-  CONFIG_MODE=caltech_plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh \
-    files/logs/finetuning/caltech_plain_SiT_finetune_baseline_20260418_123456_ab12cd 1 2 4
+  CONFIG_MODE=plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh \
+    files/logs/finetuning/plain_SiT_finetune_caltech101_baseline_20260418_123456_ab12cd 1 2 4
 
 If the first argument points to the run directory, the script assumes the checkpoint is under <run_dir>/best_fid.
 If the first argument points to the best_fid directory itself, it uses that directly.
@@ -23,7 +23,7 @@ else
   STEPS=(1 2 4)
 fi
 
-CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_finetune}"
+CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 

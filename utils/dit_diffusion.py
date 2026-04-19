@@ -133,9 +133,14 @@ class GaussianDiffusion:
         self.posterior_variance = (
             betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
-        self.posterior_log_variance_clipped = np.log(
-            np.append(self.posterior_variance[1], self.posterior_variance[1:])
-        )
+        if self.posterior_variance.shape[0] == 1:
+            self.posterior_log_variance_clipped = np.log(
+                np.maximum(self.posterior_variance, 1e-20)
+            )
+        else:
+            self.posterior_log_variance_clipped = np.log(
+                np.append(self.posterior_variance[1], self.posterior_variance[1:])
+            )
         self.posterior_mean_coef1 = (
             betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )

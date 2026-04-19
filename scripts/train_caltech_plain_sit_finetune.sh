@@ -3,32 +3,36 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: USE_WANDB=True bash scripts/train_caltech_plain_sit_finetune.sh <run_label> [extra main_sit.py args...]
+Usage: USE_WANDB=True bash scripts/train_plain_sit_finetune.sh <run_label> [extra main_sit.py args...]
 
 Example:
-  USE_WANDB=True bash scripts/train_caltech_plain_sit_finetune.sh baseline
+  DATASET_NAME=food101 USE_WANDB=True bash scripts/train_plain_sit_finetune.sh baseline
 
 This script:
-  1) launches the default Caltech plain-SiT finetuning config
+  1) launches the dataset-agnostic plain-SiT finetuning config
   2) keeps the config-defined official transport settings
   3) lets you append extra `main_sit.py` config overrides if needed
-  4) by default, re-evaluates the saved best-FID checkpoint at 1, 2, and 4 steps
+  4) by default, skips post-training eval; multi-step metrics run during training
 
 Optional env vars:
-  RUN_FINAL_BEST_FID_EVAL=False      # skip the post-training best-checkpoint eval
+  RUN_FINAL_BEST_FID_EVAL=False      # run post-training best-checkpoint eval only if explicitly enabled
   FINAL_EVAL_STEPS="1 2 4"           # override the final evaluation step list
   FINAL_EVAL_USE_WANDB=False         # disable wandb for the final eval runs
   SAMPLE_DEVICE_BATCH_SIZE=16        # optional override for per-GPU sampling/decode batch size
   SAMPLE_LOG_EVERY=10                # optional override for sampling timing log frequency
-  HALF_PRECISION=True                # optional override for half precision
-  HALF_PRECISION_DTYPE=float16       # optional override; bf16 fails on this environment's PTX path
-  DATASET_NAME=caltech101            # optional named latent dataset: caltech101, artbench10, cub200, food101, stanfordcars
+  HALF_PRECISION=True                # optional override for training/model half precision
+  HALF_PRECISION_DTYPE=float16       # optional training/model dtype; bf16 fails on this environment's PTX path
+  SAMPLING_HALF_PRECISION=True       # optional override for preview/FID sampling half precision
+  SAMPLING_HALF_PRECISION_DTYPE=float16
+  DATASET_NAME=caltech101            # named latent dataset: caltech101, artbench10, cub200, food101, stanfordcars
   DATASET_ROOT=/path/to/root         # optional explicit latent dataset root, overrides DATASET_NAME root
   FID_CACHE_REF=/path/to/ref.npz     # optional explicit FID stats ref
   FD_DINO_CACHE_REF=/path/to/ref.npz # optional explicit FD-DINO stats ref; empty disables FD-DINO
   BACKBONE=sit                       # sit or dit; selects model_str and default checkpoint
   MODEL_STR=flaxDiT_XL_2             # optional explicit Flax backbone override
   LOAD_FROM=/path/to/checkpoint      # optional initial checkpoint override
+  WANDB_PROJECT=plain_sit_finetune   # optional wandb project override
+  WANDB_NAME=food101_plain_sit_base  # optional wandb run name override
 EOF
   exit 1
 fi
@@ -37,14 +41,17 @@ RUN_LABEL="$1"
 shift
 EXTRA_ARGS=("$@")
 
-CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_finetune}"
+CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
-RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-False}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 4}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-${USE_WANDB}}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
+SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
+DATASET_NAME="${DATASET_NAME:-caltech101}"
+WANDB_PROJECT="${WANDB_PROJECT:-plain_sit_finetune}"
 CONFIG_OVERRIDE_ARGS=()
 
 case "${BACKBONE:-}" in
@@ -69,9 +76,7 @@ if [[ -n "${MODEL_STR:-}" ]]; then
 fi
 
 DATASET_LABEL=""
-case "${DATASET_NAME:-}" in
-  "")
-    ;;
+case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
@@ -107,6 +112,11 @@ case "${DATASET_NAME:-}" in
     exit 2
     ;;
 esac
+
+WANDB_NAME="${WANDB_NAME:-${DATASET_LABEL}_plain_sit_${RUN_LABEL}}"
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_name="${WANDB_NAME}")
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_project="${WANDB_PROJECT}")
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_notes="Dataset ${DATASET_LABEL} plain SiT fine-tuning run ${RUN_LABEL}")
 
 if [[ -n "${DATASET_ROOT:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.dataset.root="${DATASET_ROOT}")
@@ -147,15 +157,39 @@ if [[ -n "${HALF_PRECISION_DTYPE:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision_dtype="${HALF_PRECISION_DTYPE}")
 fi
 
+if [[ -n "${SAMPLING_HALF_PRECISION:-}" ]]; then
+  case "${SAMPLING_HALF_PRECISION,,}" in
+    1|true|yes|y|on)
+      CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision=True)
+      ;;
+    0|false|no|n|off)
+      CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision=False)
+      ;;
+    *)
+      echo "ERROR: SAMPLING_HALF_PRECISION must be a boolean-like value, got '$SAMPLING_HALF_PRECISION'." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "${SAMPLING_HALF_PRECISION_DTYPE:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision_dtype="${SAMPLING_HALF_PRECISION_DTYPE}")
+fi
+
 case "${HALF_PRECISION_DTYPE:-}" in
   bf16|bfloat16)
     echo "WARNING: bf16 failed on this environment with a PTX ISA error; use float16 unless the CUDA/JAX toolchain is fixed." >&2
     ;;
 esac
+case "${SAMPLING_HALF_PRECISION_DTYPE:-}" in
+  bf16|bfloat16)
+    echo "WARNING: sampling bf16 failed on this environment with a PTX ISA error; use float16 unless the CUDA/JAX toolchain is fixed." >&2
+    ;;
+esac
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
-JOB_PREFIX="${JOB_PREFIX:-caltech_plain_SiT_finetune}"
+JOB_PREFIX="${JOB_PREFIX:-plain_SiT_finetune}"
 if [[ -n "$DATASET_LABEL" ]]; then
   JOB_PREFIX="${JOB_PREFIX}_${DATASET_LABEL}"
 fi
@@ -171,7 +205,7 @@ USE_WANDB: $USE_WANDB
 RUN_FINAL_BEST_FID_EVAL: $RUN_FINAL_BEST_FID_EVAL
 FINAL_EVAL_STEPS: $FINAL_EVAL_STEPS
 FINAL_EVAL_USE_WANDB: $FINAL_EVAL_USE_WANDB
-DATASET_NAME: ${DATASET_NAME:-<config default>}
+DATASET_NAME: ${DATASET_NAME}
 DATASET_ROOT override: ${DATASET_ROOT:-<config default>}
 FID_CACHE_REF override: ${FID_CACHE_REF:-<config default>}
 FD_DINO_CACHE_REF override: ${FD_DINO_CACHE_REF:-<config default>}
@@ -182,6 +216,10 @@ SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE:-<config default>}
 SAMPLE_LOG_EVERY override: ${SAMPLE_LOG_EVERY:-<config default>}
 HALF_PRECISION override: ${HALF_PRECISION:-<config default>}
 HALF_PRECISION_DTYPE override: ${HALF_PRECISION_DTYPE:-<config default>}
+SAMPLING_HALF_PRECISION override: ${SAMPLING_HALF_PRECISION:-<config default>}
+SAMPLING_HALF_PRECISION_DTYPE override: ${SAMPLING_HALF_PRECISION_DTYPE:-<config default>}
+WANDB_NAME: $WANDB_NAME
+WANDB_PROJECT: $WANDB_PROJECT
 EOF
 
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \

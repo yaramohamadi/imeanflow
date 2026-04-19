@@ -70,7 +70,7 @@ def parse_args():
         description="Run plain-SiT sampling batches from a checkpoint."
     )
     parser.add_argument("checkpoint_or_run_dir")
-    parser.add_argument("--config-mode", default="caltech_plain_sit_finetune")
+    parser.add_argument("--config-mode", default="plain_sit_finetune")
     parser.add_argument("--workdir", default="files/debug/plain_sit_250_once")
     parser.add_argument("--device-batch-size", type=int, required=True)
     parser.add_argument("--num-samples", type=int, default=50000)

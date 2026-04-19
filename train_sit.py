@@ -158,7 +158,12 @@ def infer_num_classes_from_latents(dataset_root):
 
 
 def _build_plain_sit(config, *, eval_mode=False):
-    dtype = get_training_param_dtype(config) or jnp.float32
+    dtype = (
+        get_sampling_param_dtype(config)
+        if eval_mode
+        else get_training_param_dtype(config)
+    )
+    dtype = dtype or jnp.float32
     return PlainSiT(
         model_str=config.model.model_str,
         dtype=dtype,
@@ -258,6 +263,23 @@ def _should_run_fid(current_step, training_config):
 
     fid_per_step = int(training_config.get("fid_per_step", 0))
     return fid_per_step > 0 and current_step % fid_per_step == 0
+
+
+def _get_metric_num_steps(config):
+    configured_steps = config.training.get("metric_num_steps", ())
+    if configured_steps:
+        num_steps = [int(step) for step in configured_steps]
+    else:
+        num_steps = [int(config.sampling.num_steps)]
+
+    primary_steps = int(config.sampling.num_steps)
+    ordered_steps = []
+    for step in [primary_steps] + num_steps:
+        if step < 1:
+            raise ValueError("Metric sampling steps must be >= 1.")
+        if step not in ordered_steps:
+            ordered_steps.append(step)
+    return tuple(ordered_steps)
 
 
 def _primary_metric_mode(use_ema):
@@ -540,7 +562,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             axis_name="batch",
         )
 
-    p_sample_step = build_p_sample_step(int(config.sampling.num_steps))
+    metric_num_steps = _get_metric_num_steps(config)
+    p_metric_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in metric_num_steps
+    }
+    log_for_0("Metric evaluation sampling steps: %s", metric_num_steps)
     preview_num_steps = config.training.get("preview_num_steps", (1, 2, 4))
     preview_num_steps = (
         tuple(int(num) for num in preview_num_steps)
@@ -620,8 +646,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         writer,
         sample_latent_manager,
     )
-    best_fid = float("inf")
-    best_fd_dino = float("inf")
+    best_fid_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
+    best_fd_dino_by_steps = {
+        num_steps: float("inf") for num_steps in metric_num_steps
+    }
     best_fid_ckpt_dir = os.path.join(
         workdir,
         config.training.get("best_fid_checkpoint_dir", "best_fid"),
@@ -690,49 +718,66 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     save_best_checkpoint(state, eval_ckpt_dir)
                     checkpoint_path_for_csv = eval_ckpt_dir
 
-                result = image_metric_evaluator(
-                    state,
-                    p_sample_step,
-                    current_step - 1,
-                    **sample_kwargs,
-                )
-                fid = result["fid"]
-                fd_dino = result.get("fd_dino", None)
-                is_best_fid = fid < best_fid
-                is_best_fd_dino = fd_dino is not None and fd_dino < best_fd_dino
-                if is_best_fd_dino:
-                    best_fd_dino = fd_dino
-                if is_best_fid:
-                    best_fid = fid
+                for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
                     log_for_0(
-                        "New best FID %.4f at step %d. Saving best checkpoint to %s.",
-                        best_fid,
+                        "Running metric evaluation at step %d with %d sampling steps.",
                         current_step,
-                        best_fid_ckpt_dir,
+                        metric_num_steps,
                     )
-                    save_best_checkpoint(state, best_fid_ckpt_dir)
-                    checkpoint_path_for_csv = best_fid_ckpt_dir
+                    result = image_metric_evaluator(
+                        state,
+                        p_metric_sample_step,
+                        current_step - 1,
+                        metric_suffix=f"steps_{metric_num_steps}",
+                        **sample_kwargs,
+                    )
+                    fid = result["fid"]
+                    fd_dino = result.get("fd_dino", None)
+                    is_best_fid = fid < best_fid_by_steps[metric_num_steps]
+                    is_best_fd_dino = (
+                        fd_dino is not None
+                        and fd_dino < best_fd_dino_by_steps[metric_num_steps]
+                    )
+                    if is_best_fid:
+                        best_fid_by_steps[metric_num_steps] = fid
+                    if is_best_fd_dino:
+                        best_fd_dino_by_steps[metric_num_steps] = fd_dino
 
-                _write_eval_metrics_csv(
-                    workdir,
-                    eval_phase="train",
-                    metric_mode=metric_mode,
-                    training_step=current_step,
-                    sampling_num_steps=config.sampling.num_steps,
-                    omega=float(config.sampling.omega),
-                    t_min=float(config.sampling.t_min),
-                    t_max=float(config.sampling.t_max),
-                    fid=fid,
-                    is_score=result["is"],
-                    fd_dino=fd_dino,
-                    checkpoint_path=(
-                        os.path.abspath(checkpoint_path_for_csv)
-                        if checkpoint_path_for_csv
-                        else ""
-                    ),
-                    is_best_fid=is_best_fid,
-                    is_best_fd_dino=is_best_fd_dino,
-                )
+                    row_checkpoint_path = checkpoint_path_for_csv
+                    if (
+                        metric_num_steps == int(config.sampling.num_steps)
+                        and is_best_fid
+                    ):
+                        log_for_0(
+                            "New best %d-step FID %.4f at step %d. Saving best checkpoint to %s.",
+                            metric_num_steps,
+                            fid,
+                            current_step,
+                            best_fid_ckpt_dir,
+                        )
+                        save_best_checkpoint(state, best_fid_ckpt_dir)
+                        row_checkpoint_path = best_fid_ckpt_dir
+
+                    _write_eval_metrics_csv(
+                        workdir,
+                        eval_phase="train",
+                        metric_mode=metric_mode,
+                        training_step=current_step,
+                        sampling_num_steps=metric_num_steps,
+                        omega=float(config.sampling.omega),
+                        t_min=float(config.sampling.t_min),
+                        t_max=float(config.sampling.t_max),
+                        fid=fid,
+                        is_score=result["is"],
+                        fd_dino=fd_dino,
+                        checkpoint_path=(
+                            os.path.abspath(row_checkpoint_path)
+                            if row_checkpoint_path
+                            else ""
+                        ),
+                        is_best_fid=is_best_fid,
+                        is_best_fd_dino=is_best_fd_dino,
+                    )
 
             if max_train_steps is not None and current_step >= max_train_steps:
                 should_stop = True

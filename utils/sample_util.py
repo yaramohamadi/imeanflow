@@ -166,7 +166,7 @@ def generate_fid_samples(
     return samples_all[:target_num_samples]
 
 
-def _get_eval_descriptor(kwargs, mode_str, guidance_controllable=True):
+def _get_eval_descriptor(kwargs, mode_str, guidance_controllable=True, metric_suffix=""):
     omega = kwargs.get("omega", None)[0]
     t_min = kwargs.get("t_min", None)[0]
     t_max = kwargs.get("t_max", None)[0]
@@ -174,6 +174,8 @@ def _get_eval_descriptor(kwargs, mode_str, guidance_controllable=True):
         descriptor = f"omega_{omega:.2f}_tmin_{t_min:.2f}_tmax_{t_max:.2f}_{mode_str}"
     else:
         descriptor = f"single_head_{mode_str}"
+    if metric_suffix:
+        descriptor = f"{descriptor}_{metric_suffix}"
     return descriptor, omega, t_min, t_max
 
 
@@ -201,7 +203,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
     use_ema = config.training.get("use_ema", True)
     guidance_controllable = has_controllable_sampling_guidance(config.model)
 
-    def _evaluate_one_mode(state, p_sample_step, ema, **kwargs):
+    def _evaluate_one_mode(state, p_sample_step, ema, metric_suffix="", **kwargs):
         samples_all = generate_fid_samples(
             state, config, p_sample_step, run_p_sample_step_inner, ema, **kwargs
         )
@@ -217,7 +219,10 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
         mode_str = "ema" if ema else "online"
         descriptor, omega, t_min, t_max = _get_eval_descriptor(
-            kwargs, mode_str, guidance_controllable=guidance_controllable
+            kwargs,
+            mode_str,
+            guidance_controllable=guidance_controllable,
+            metric_suffix=metric_suffix,
         )
         if guidance_controllable:
             log_for_0(
@@ -261,22 +266,41 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
         return metric, result
 
-    def evaluator(state, p_sample_step, step, ema_only=False, **kwargs):
+    def evaluator(
+        state,
+        p_sample_step,
+        step,
+        ema_only=False,
+        metric_suffix="",
+        **kwargs,
+    ):
         metric_dict = {}
         primary_result = None
         if use_ema:
             metric, primary_result = _evaluate_one_mode(
-                state, p_sample_step, True, **kwargs
+                state,
+                p_sample_step,
+                True,
+                metric_suffix=metric_suffix,
+                **kwargs,
             )
             metric_dict.update(metric)
             if not ema_only:
                 metric, _ = _evaluate_one_mode(
-                    state, p_sample_step, False, **kwargs
+                    state,
+                    p_sample_step,
+                    False,
+                    metric_suffix=metric_suffix,
+                    **kwargs,
                 )
                 metric_dict.update(metric)
         else:
             metric, primary_result = _evaluate_one_mode(
-                state, p_sample_step, False, **kwargs
+                state,
+                p_sample_step,
+                False,
+                metric_suffix=metric_suffix,
+                **kwargs,
             )
             metric_dict.update(metric)
 

@@ -42,12 +42,19 @@ training:
           every_steps: 5000
         - from_step: 20000
           every_steps: 2000
+    metric_num_steps:
+        - 250
+        - 4
+        - 2
+        - 1
     preview_guidance_scales:
         - 1.0
         - 1.5
         - 4.0
     preview_num_steps:
-        - 50
+        - 1
+        - 2    
+        - 4
         - 250
     grad_accum_steps: 1
     save_best_fid_only: True
@@ -60,10 +67,10 @@ training:
     seed: 42
 
 fid:
-    device_batch_size: 8
-    sample_device_batch_size: 16
+    device_batch_size: 16
+    sample_device_batch_size: 32
     sample_log_every: 1
-    num_samples: 50000
+    num_samples: 10000
     cache_ref: '/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
     num_images_to_log: 16
 
@@ -75,6 +82,8 @@ fd_dino:
 sampling:
     num_steps: 250
     method: p_sample
+    half_precision: False
+    half_precision_dtype: float16
     omega: 1.5
     cfg_scale: 1.5
     t_min: 0.0
@@ -82,8 +91,8 @@ sampling:
 
 logging:
     use_wandb: True
-    wandb_name: 'caltech-dit'
-    wandb_project: 'sit_finetune'
+    wandb_name: 'CALTECH_DIT_plain'
+    wandb_project: 'plain_dit_finetune'
     wandb_entity: 'yara-mohammadi-bahram-1-ecole-superieure-de-technologie'
     wandb_tags:
         - caltech101

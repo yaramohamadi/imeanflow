@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_finetune}"
+CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
 PYTHON="${PYTHON:-python3}"
 SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-16}"
 NUM_SAMPLES="${NUM_SAMPLES:-50000}"
@@ -18,7 +18,7 @@ if [[ -n "$CHECKPOINT_OR_RUN_DIR" ]]; then
   shift
 else
   if [[ -d "$LOG_DIR/finetuning" ]]; then
-    CHECKPOINT_OR_RUN_DIR="$(find "$LOG_DIR/finetuning" -maxdepth 1 -type d -name 'caltech_plain_SiT_finetune_*' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+    CHECKPOINT_OR_RUN_DIR="$(find "$LOG_DIR/finetuning" -maxdepth 1 -type d -name 'plain_SiT_finetune_*' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
   fi
 fi
 

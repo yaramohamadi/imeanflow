@@ -3,13 +3,13 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: USE_WANDB=True bash scripts/train_caltech_dit_finetune.sh <run_label> [extra main_dit.py args...]
+Usage: USE_WANDB=True bash scripts/train_plain_dit_finetune.sh <run_label> [extra main_dit.py args...]
 
 Example:
-  CUDA_VISIBLE_DEVICES=0,1 PYTHON=.venv/bin/python USE_WANDB=True bash scripts/train_caltech_dit_finetune.sh baseline
+  DATASET_NAME=food101 CUDA_VISIBLE_DEVICES=0,1 PYTHON=.venv/bin/python USE_WANDB=True bash scripts/train_plain_dit_finetune.sh baseline
 
 Optional env vars:
-  CONFIG_MODE=caltech_plain_dit_finetune
+  CONFIG_MODE=plain_dit_finetune
   DATASET_NAME=caltech101            # caltech101, artbench10, cub200, food101, stanfordcars
   DATASET_ROOT=/path/to/root
   FID_CACHE_REF=/path/to/ref.npz
@@ -19,6 +19,10 @@ Optional env vars:
   SAMPLE_LOG_EVERY=1
   HALF_PRECISION=True
   HALF_PRECISION_DTYPE=float16
+  SAMPLING_HALF_PRECISION=True
+  SAMPLING_HALF_PRECISION_DTYPE=float16
+  WANDB_PROJECT=plain_dit_finetune   # optional wandb project override
+  WANDB_NAME=food101_plain_dit_base  # optional wandb run name override
 EOF
   exit 1
 fi
@@ -27,18 +31,19 @@ RUN_LABEL="$1"
 shift
 EXTRA_ARGS=("$@")
 
-CONFIG_MODE="${CONFIG_MODE:-caltech_plain_dit_finetune}"
+CONFIG_MODE="${CONFIG_MODE:-plain_dit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
 LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
+SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
+DATASET_NAME="${DATASET_NAME:-caltech101}"
+WANDB_PROJECT="${WANDB_PROJECT:-plain_dit_finetune}"
 CONFIG_OVERRIDE_ARGS=()
 
 DATASET_LABEL=""
-case "${DATASET_NAME:-}" in
-  "")
-    ;;
+case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
     DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
@@ -75,6 +80,11 @@ case "${DATASET_NAME:-}" in
     ;;
 esac
 
+WANDB_NAME="${WANDB_NAME:-${DATASET_LABEL}_plain_dit_${RUN_LABEL}}"
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_name="${WANDB_NAME}")
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_project="${WANDB_PROJECT}")
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_notes="Dataset ${DATASET_LABEL} plain DiT fine-tuning run ${RUN_LABEL}")
+
 if [[ -n "${DATASET_ROOT:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.dataset.root="${DATASET_ROOT}")
 fi
@@ -103,10 +113,20 @@ fi
 if [[ -n "${HALF_PRECISION_DTYPE:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision_dtype="${HALF_PRECISION_DTYPE}")
 fi
+if [[ -n "${SAMPLING_HALF_PRECISION:-}" ]]; then
+  case "${SAMPLING_HALF_PRECISION,,}" in
+    1|true|yes|y|on) CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision=True) ;;
+    0|false|no|n|off) CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision=False) ;;
+    *) echo "ERROR: SAMPLING_HALF_PRECISION must be boolean-like, got '$SAMPLING_HALF_PRECISION'." >&2; exit 2 ;;
+  esac
+fi
+if [[ -n "${SAMPLING_HALF_PRECISION_DTYPE:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.sampling.half_precision_dtype="${SAMPLING_HALF_PRECISION_DTYPE}")
+fi
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
-JOB_PREFIX="${JOB_PREFIX:-caltech_plain_DiT_finetune}"
+JOB_PREFIX="${JOB_PREFIX:-plain_DiT_finetune}"
 if [[ -n "$DATASET_LABEL" ]]; then
   JOB_PREFIX="${JOB_PREFIX}_${DATASET_LABEL}"
 fi
@@ -118,12 +138,16 @@ cat <<EOF
 DiT JAX training workdir: $WORKDIR
 CONFIG_MODE: $CONFIG_MODE
 USE_WANDB: $USE_WANDB
-DATASET_NAME: ${DATASET_NAME:-<config default>}
+DATASET_NAME: ${DATASET_NAME}
 DATASET_ROOT override: ${DATASET_ROOT:-<config default>}
 LOAD_FROM override: ${LOAD_FROM:-<config default>}
 SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE:-<config default>}
 HALF_PRECISION override: ${HALF_PRECISION:-<config default>}
 HALF_PRECISION_DTYPE override: ${HALF_PRECISION_DTYPE:-<config default>}
+SAMPLING_HALF_PRECISION override: ${SAMPLING_HALF_PRECISION:-<config default>}
+SAMPLING_HALF_PRECISION_DTYPE override: ${SAMPLING_HALF_PRECISION_DTYPE:-<config default>}
+WANDB_NAME: $WANDB_NAME
+WANDB_PROJECT: $WANDB_PROJECT
 EOF
 
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
