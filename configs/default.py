@@ -39,7 +39,9 @@ def get_config():
     training.sample_per_step = 1000
     training.checkpoint_per_epoch = 10
     training.fid_per_step = 1000
+    training.fid_schedule = []
     training.preview_guidance_scales = ()
+    training.preview_num_steps = ()
     training.debug_log_during_train = False
     training.debug_log_images = True
     training.debug_num_images = 4
@@ -47,8 +49,11 @@ def get_config():
     training.grad_accum_steps = 1
     training.save_best_fid_only = False
     training.best_fid_checkpoint_dir = "best_fid"
+    training.save_eval_checkpoint_per_fid = False
+    training.eval_checkpoint_dir = "latest_eval"
     training.capture_source_from_load = False
     training.half_precision = False
+    training.half_precision_dtype = "float16"
 
     training.seed = 42
 
@@ -103,12 +108,36 @@ def get_config():
     sampling.num_steps = 1
     sampling.num_classes = dataset.num_classes
     sampling.meanflow_reverse_time = False
+    sampling.method = "euler"
+    sampling.flip_time = False
+    sampling.half_precision = False
+    sampling.half_precision_dtype = "float16"
+
+    # ------------------------------------------------------------
+    # Plain SiT transport
+    config.transport = transport = ml_collections.ConfigDict()
+    transport.path_type = "Linear"
+    transport.prediction = "velocity"
+    transport.loss_weight = None
+    transport.train_eps = None
+    transport.sample_eps = None
+
+    # ------------------------------------------------------------
+    # Original DiT diffusion
+    config.diffusion = diffusion = ml_collections.ConfigDict()
+    diffusion.diffusion_steps = 1000
+    diffusion.noise_schedule = "linear"
+    diffusion.learn_sigma = True
+    diffusion.predict_xstart = False
+    diffusion.rescale_learned_sigmas = False
 
     # ------------------------------------------------------------
     # FID
     config.fid = fid = ml_collections.ConfigDict()
     fid.num_samples = 50000
     fid.device_batch_size = 128
+    fid.sample_device_batch_size = -1
+    fid.sample_log_every = 1
     fid.cache_ref = "FID_CACHE_REF"
     fid.num_images_to_log = 100
 

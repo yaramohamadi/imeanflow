@@ -393,7 +393,10 @@ def apply_rotary_pos_emb(x, freqs_cis):
 
 def modulate(x, shift, scale):
     """Apply adaptive layer-norm modulation."""
-    return x * (1.0 + scale[:, None, :]) + shift[:, None, :]
+    shift = shift.astype(x.dtype)
+    scale = scale.astype(x.dtype)
+    one = jnp.asarray(1.0, dtype=x.dtype)
+    return x * (one + scale[:, None, :]) + shift[:, None, :]
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -728,6 +731,7 @@ class FlaxSiT(nn.Module):
     num_classes: int = 1000
     use_null_class: bool = True
     learn_sigma: bool = True
+    return_learned_sigma: bool = False
     eval: bool = False
     weight_init: str = "scaled_variance"
     weight_init_constant: float = 1.0
@@ -797,13 +801,13 @@ class FlaxSiT(nn.Module):
         if y is None:
             y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
 
-        c = self.t_embedder(t) + self.y_embedder(y)
+        c = self.t_embedder(t).astype(x.dtype) + self.y_embedder(y).astype(x.dtype)
         for block in self.blocks:
             x = block(x, c)
 
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
-        if self.learn_sigma:
+        if self.learn_sigma and not self.return_learned_sigma:
             x, _ = jnp.split(x, 2, axis=-1)
         return x
 
@@ -1315,3 +1319,9 @@ flaxSiT_XL_2 = partial(
     num_heads=16,
     learn_sigma=True,
 )
+
+# DiT-XL/2 and SiT-XL/2 share the same transformer state-dict key layout and
+# tensor shapes in the local PyTorch ports. This alias lets the plain transport
+# path initialize from DiT checkpoints while keeping the source family explicit
+# in config and logs.
+flaxDiT_XL_2 = flaxSiT_XL_2

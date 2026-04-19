@@ -2,6 +2,7 @@ import jax
 from jax import random
 import jax.numpy as jnp
 import numpy as np
+import time
 from functools import partial
 from utils import dino_util
 from utils import fid_util
@@ -46,6 +47,69 @@ def run_p_sample_step(
     return samples
 
 
+def get_sample_device_batch_size(config):
+    sample_device_batch_size = int(config.fid.get("sample_device_batch_size", -1))
+    if sample_device_batch_size <= 0:
+        sample_device_batch_size = config.fid.device_batch_size
+    return int(sample_device_batch_size)
+
+
+def _get_half_precision_dtype(dtype_name):
+    dtype_name = str(dtype_name).lower()
+    if dtype_name in ("bf16", "bfloat16"):
+        return jnp.bfloat16
+    if dtype_name in ("fp16", "float16"):
+        return jnp.float16
+    raise ValueError(
+        "half precision dtype must be one of: bfloat16, bf16, float16, fp16. "
+        f"Got {dtype_name!r}."
+    )
+
+
+def get_training_param_dtype(config):
+    if not config.training.get("half_precision", False):
+        return None
+
+    return _get_half_precision_dtype(config.training.get("half_precision_dtype", "float16"))
+
+
+def get_sampling_param_dtype(config):
+    sampling = config.get("sampling", {})
+    if not sampling.get("half_precision", False):
+        return None
+
+    return _get_half_precision_dtype(
+        sampling.get(
+            "half_precision_dtype",
+            config.training.get("half_precision_dtype", "float16"),
+        )
+    )
+
+
+def _cast_floating_tree(tree, dtype):
+    if tree is None or dtype is None:
+        return tree
+
+    def maybe_cast(x):
+        if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(dtype)
+        return x
+
+    return jax.tree_util.tree_map(maybe_cast, tree)
+
+
+def maybe_cast_state_for_sampling(state, config):
+    dtype = get_sampling_param_dtype(config)
+    if dtype is None:
+        return state
+
+    log_for_0("Casting sampling params to %s.", dtype)
+    return state.replace(
+        params=_cast_floating_tree(state.params, dtype),
+        ema_params=_cast_floating_tree(state.ema_params, dtype),
+    )
+
+
 def generate_fid_samples(
     state, config, p_sample_step, run_p_sample_step, ema=True, num_samples=None, **kwargs
 ):
@@ -53,23 +117,48 @@ def generate_fid_samples(
     Generate samples for FID evaluation or preview logging.
     """
     target_num_samples = config.fid.num_samples if num_samples is None else num_samples
+    sample_device_batch_size = get_sample_device_batch_size(config)
+    state = maybe_cast_state_for_sampling(state, config)
     num_steps = np.ceil(
-        target_num_samples / config.fid.device_batch_size / jax.device_count()
+        target_num_samples / sample_device_batch_size / jax.device_count()
     ).astype(int)
+    log_sample_every = max(1, int(config.fid.get("sample_log_every", 1)))
 
     samples_all = []
 
     log_for_0("Note: the first sample may be significant slower")
+    log_for_0(
+        "Generating %d samples with sample_device_batch_size=%d, global_batch_size=%d, batches=%d",
+        target_num_samples,
+        sample_device_batch_size,
+        sample_device_batch_size * jax.device_count(),
+        num_steps,
+    )
     for step in range(num_steps):
         sample_idx = jax.process_index() * jax.local_device_count() + jnp.arange(
             jax.local_device_count()
         )
         sample_idx = jax.device_count() * step + sample_idx
-        log_for_0(f"Sampling step {step} / {num_steps}...")
+        should_log = step == 0 or step + 1 == num_steps or step % log_sample_every == 0
+        if should_log:
+            log_for_0(f"Sampling step {step} / {num_steps}...")
+        sample_start = time.time()
         samples = run_p_sample_step(
             p_sample_step, state, sample_idx=sample_idx, ema=ema, **kwargs
         )
+        samples.block_until_ready()
+        device_seconds = time.time() - sample_start
+        transfer_start = time.time()
         samples = jax.device_get(samples)
+        transfer_seconds = time.time() - transfer_start
+        if should_log:
+            log_for_0(
+                "Sampling batch %d / %d timing: device %.2fs, device_get %.2fs",
+                step,
+                num_steps,
+                device_seconds,
+                transfer_seconds,
+            )
         samples_all.append(samples)
 
     samples_all = np.concatenate(samples_all, axis=0)

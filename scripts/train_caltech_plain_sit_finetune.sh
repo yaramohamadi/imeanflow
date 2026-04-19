@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  cat <<'EOF'
+Usage: USE_WANDB=True bash scripts/train_caltech_plain_sit_finetune.sh <run_label> [extra main_sit.py args...]
+
+Example:
+  USE_WANDB=True bash scripts/train_caltech_plain_sit_finetune.sh baseline
+
+This script:
+  1) launches the default Caltech plain-SiT finetuning config
+  2) keeps the config-defined official transport settings
+  3) lets you append extra `main_sit.py` config overrides if needed
+  4) by default, re-evaluates the saved best-FID checkpoint at 1, 2, and 4 steps
+
+Optional env vars:
+  RUN_FINAL_BEST_FID_EVAL=False      # skip the post-training best-checkpoint eval
+  FINAL_EVAL_STEPS="1 2 4"           # override the final evaluation step list
+  FINAL_EVAL_USE_WANDB=False         # disable wandb for the final eval runs
+  SAMPLE_DEVICE_BATCH_SIZE=16        # optional override for per-GPU sampling/decode batch size
+  SAMPLE_LOG_EVERY=10                # optional override for sampling timing log frequency
+  HALF_PRECISION=True                # optional override for half precision
+  HALF_PRECISION_DTYPE=float16       # optional override; bf16 fails on this environment's PTX path
+  DATASET_NAME=caltech101            # optional named latent dataset: caltech101, artbench10, cub200, food101, stanfordcars
+  DATASET_ROOT=/path/to/root         # optional explicit latent dataset root, overrides DATASET_NAME root
+  FID_CACHE_REF=/path/to/ref.npz     # optional explicit FID stats ref
+  FD_DINO_CACHE_REF=/path/to/ref.npz # optional explicit FD-DINO stats ref; empty disables FD-DINO
+  BACKBONE=sit                       # sit or dit; selects model_str and default checkpoint
+  MODEL_STR=flaxDiT_XL_2             # optional explicit Flax backbone override
+  LOAD_FROM=/path/to/checkpoint      # optional initial checkpoint override
+EOF
+  exit 1
+fi
+
+RUN_LABEL="$1"
+shift
+EXTRA_ARGS=("$@")
+
+CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_finetune}"
+PYTHON="${PYTHON:-python3}"
+USE_WANDB="${USE_WANDB:-True}"
+LOG_DIR="${LOG_DIR:-files/logs}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 4}"
+FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-${USE_WANDB}}"
+HALF_PRECISION="${HALF_PRECISION:-False}"
+CONFIG_OVERRIDE_ARGS=()
+
+case "${BACKBONE:-}" in
+  "")
+    ;;
+  sit|SiT)
+    MODEL_STR="${MODEL_STR:-flaxSiT_XL_2}"
+    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/SiT-XL-2-256.pt}"
+    ;;
+  dit|DiT)
+    MODEL_STR="${MODEL_STR:-flaxDiT_XL_2}"
+    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt}"
+    ;;
+  *)
+    echo "ERROR: unknown BACKBONE='$BACKBONE'. Known: sit, dit." >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "${MODEL_STR:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.model.model_str="${MODEL_STR}")
+fi
+
+DATASET_LABEL=""
+case "${DATASET_NAME:-}" in
+  "")
+    ;;
+  caltech101|caltech-101)
+    DATASET_LABEL="caltech101"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+    ;;
+  artbench10|artbench-10)
+    DATASET_LABEL="artbench10"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/artbench-10_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/artbench-10_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
+    ;;
+  cub200|cub-200|cub-200-2011)
+    DATASET_LABEL="cub200"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/cub-200-2011_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    ;;
+  food101|food-101)
+    DATASET_LABEL="food101"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/food-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/food-101_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    ;;
+  stanfordcars|stanford-cars|cars)
+    DATASET_LABEL="stanfordcars"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/stanford-cars_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
+    ;;
+  *)
+    echo "ERROR: unknown DATASET_NAME='$DATASET_NAME'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "${DATASET_ROOT:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.dataset.root="${DATASET_ROOT}")
+fi
+if [[ -n "${FID_CACHE_REF:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.fid.cache_ref="${FID_CACHE_REF}")
+fi
+if [[ -n "${FD_DINO_CACHE_REF+x}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.fd_dino.cache_ref="${FD_DINO_CACHE_REF}")
+fi
+if [[ -n "${LOAD_FROM:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.load_from="${LOAD_FROM}")
+fi
+
+if [[ -n "${SAMPLE_DEVICE_BATCH_SIZE:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_device_batch_size="${SAMPLE_DEVICE_BATCH_SIZE}")
+fi
+if [[ -n "${SAMPLE_LOG_EVERY:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_log_every="${SAMPLE_LOG_EVERY}")
+fi
+
+if [[ -n "${HALF_PRECISION:-}" ]]; then
+  case "${HALF_PRECISION,,}" in
+    1|true|yes|y|on)
+      CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision=True)
+      ;;
+    0|false|no|n|off)
+      CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision=False)
+      ;;
+    *)
+      echo "ERROR: HALF_PRECISION must be a boolean-like value, got '$HALF_PRECISION'." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "${HALF_PRECISION_DTYPE:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.half_precision_dtype="${HALF_PRECISION_DTYPE}")
+fi
+
+case "${HALF_PRECISION_DTYPE:-}" in
+  bf16|bfloat16)
+    echo "WARNING: bf16 failed on this environment with a PTX ISA error; use float16 unless the CUDA/JAX toolchain is fixed." >&2
+    ;;
+esac
+
+NOW=$(date '+%Y%m%d_%H%M%S')
+SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
+JOB_PREFIX="${JOB_PREFIX:-caltech_plain_SiT_finetune}"
+if [[ -n "$DATASET_LABEL" ]]; then
+  JOB_PREFIX="${JOB_PREFIX}_${DATASET_LABEL}"
+fi
+JOBNAME="${JOB_PREFIX}_${RUN_LABEL}_${NOW}_${SALT}"
+WORKDIR="$LOG_DIR/finetuning/$JOBNAME"
+
+mkdir -p "$WORKDIR"
+
+cat <<EOF
+Training workdir: $WORKDIR
+CONFIG_MODE: $CONFIG_MODE
+USE_WANDB: $USE_WANDB
+RUN_FINAL_BEST_FID_EVAL: $RUN_FINAL_BEST_FID_EVAL
+FINAL_EVAL_STEPS: $FINAL_EVAL_STEPS
+FINAL_EVAL_USE_WANDB: $FINAL_EVAL_USE_WANDB
+DATASET_NAME: ${DATASET_NAME:-<config default>}
+DATASET_ROOT override: ${DATASET_ROOT:-<config default>}
+FID_CACHE_REF override: ${FID_CACHE_REF:-<config default>}
+FD_DINO_CACHE_REF override: ${FD_DINO_CACHE_REF:-<config default>}
+LOAD_FROM override: ${LOAD_FROM:-<config default>}
+BACKBONE: ${BACKBONE:-<config default>}
+MODEL_STR override: ${MODEL_STR:-<config default>}
+SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE:-<config default>}
+SAMPLE_LOG_EVERY override: ${SAMPLE_LOG_EVERY:-<config default>}
+HALF_PRECISION override: ${HALF_PRECISION:-<config default>}
+HALF_PRECISION_DTYPE override: ${HALF_PRECISION_DTYPE:-<config default>}
+EOF
+
+TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
+  XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
+  PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
+  $PYTHON \
+    main_sit.py \
+    --workdir="$WORKDIR" \
+    --config=configs/load_config.py:${CONFIG_MODE} \
+    --config.logging.use_wandb=${USE_WANDB} \
+    "${CONFIG_OVERRIDE_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}" \
+    2>&1 | tee -a "$WORKDIR/output.log"
+
+case "${RUN_FINAL_BEST_FID_EVAL,,}" in
+  1|true|yes|y)
+    read -r -a FINAL_EVAL_STEP_ARRAY <<< "$FINAL_EVAL_STEPS"
+    echo "Training finished. Evaluating best-FID checkpoint at steps: ${FINAL_EVAL_STEP_ARRAY[*]}"
+    CONFIG_MODE="$CONFIG_MODE" \
+      PYTHON="$PYTHON" \
+      USE_WANDB="$FINAL_EVAL_USE_WANDB" \
+      bash scripts/eval_best_fid_steps_plain_sit.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}"
+    ;;
+  0|false|no|n)
+    ;;
+  *)
+    echo "ERROR: RUN_FINAL_BEST_FID_EVAL must be a boolean-like value, got '$RUN_FINAL_BEST_FID_EVAL'." >&2
+    exit 2
+    ;;
+esac

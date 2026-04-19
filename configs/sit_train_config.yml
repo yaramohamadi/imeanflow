@@ -1,0 +1,71 @@
+dataset:
+    root: DATA_ROOT
+
+model:
+    # Dedicated plain SiT backbone; this bypasses the iMF loss entirely.
+    model_str: flaxSiT_XL_2
+    target_use_null_class: True
+    class_dropout_prob: 0.1
+
+transport:
+    # Official SiT defaults: Linear interpolant + velocity prediction.
+    path_type: Linear
+    prediction: velocity
+    loss_weight: null
+    train_eps: null
+    sample_eps: null
+
+training:
+    log_per_step: 100
+    checkpoint_per_epoch: 20
+
+    num_epochs: 1400
+    batch_size: 256
+    use_ema: True
+    learning_rate: 0.0001
+    warmup_epochs: 0
+
+    adam_b2: 0.999
+    ema_type: const
+    ema_val: 0.9999
+
+    sample_per_step: 1000
+    fid_per_step: 1000
+    fid_schedule: []
+    preview_guidance_scales:
+        - 1.0
+        - 2.0
+        - 4.0
+    preview_num_steps:
+        - 1
+        - 2
+        - 4
+    save_best_fid_only: True
+    best_fid_checkpoint_dir: best_fid
+
+    seed: 0
+
+fid:
+    device_batch_size: 8
+    num_samples: 50000
+    cache_ref: FID_CACHE_REF
+    num_images_to_log: 16
+
+sampling:
+    num_steps: 250
+    method: heun
+    omega: 4.0
+    t_min: 0.0
+    t_max: 1.0
+
+logging:
+    use_wandb: False
+    wandb_project: 'YOUR PROJECT'
+    wandb_entity: 'YOUR ENTITY'
+    wandb_tags:
+        - sit
+        - plain
+    wandb_notes: 'Plain SiT training'
+
+load_from: ''
+partial_load: False

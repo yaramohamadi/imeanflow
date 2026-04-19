@@ -121,6 +121,17 @@ class LatentManager:
         return self.decode_fn(latents)["sample"]
 
 
+class DiTLatentManager(LatentManager):
+    """VAE decode helper for original DiT-scaled latents."""
+
+    def __init__(self, vae_type, decode_batch_size, input_size, latent_scale=0.18215):
+        self.latent_scale = latent_scale
+        super().__init__(vae_type, decode_batch_size, input_size)
+
+    def decode(self, latents):
+        return self.decode_fn(latents / self.latent_scale)["sample"]
+
+
 class LatentDataset(torch.utils.data.Dataset):
     def __init__(self, root, use_flip=False):
         self.root = root
