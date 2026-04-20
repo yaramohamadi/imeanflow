@@ -11,6 +11,21 @@ if [ -d "${CC_WHEELHOUSE_ROOT}" ]; then
     IS_COMPUTE_CANADA=1
 fi
 
+VENV_DIR="${VENV_DIR:-.venv}"
+
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    if [ ! -d "${VENV_DIR}" ]; then
+        if [ "${IS_COMPUTE_CANADA}" -eq 1 ] && command -v virtualenv >/dev/null 2>&1; then
+            virtualenv --no-download "${VENV_DIR}"
+        else
+            python -m venv "${VENV_DIR}"
+        fi
+    fi
+
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+fi
+
 if ! python -m pip --version >/dev/null 2>&1; then
     python -m ensurepip --upgrade
 fi
