@@ -58,15 +58,20 @@ def build_jax_dinov2(
     )
     params = model.params
 
-    def dinov2_apply(model_params, pixel_values):
+    def dinov2_apply_one(model_params, pixel_value):
         outputs = model(
-            pixel_values=pixel_values,
+            pixel_values=pixel_value[jnp.newaxis, ...],
             params=model_params,
             train=False,
         )
         if outputs.pooler_output is not None:
-            return outputs.pooler_output
-        return outputs.last_hidden_state[:, 0]
+            return outputs.pooler_output[0]
+        return outputs.last_hidden_state[0, 0]
+
+    def dinov2_apply(model_params, pixel_values):
+        return jax.vmap(lambda pixel_value: dinov2_apply_one(model_params, pixel_value))(
+            pixel_values
+        )
 
     dino_fn = jax.jit(dinov2_apply)
     fake_x = jnp.zeros((batch_size, 3, DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), dtype=jnp.float32)

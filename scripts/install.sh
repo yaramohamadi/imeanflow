@@ -41,7 +41,9 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     FLAX_VERSION="${FLAX_VERSION:-0.8.5}"
     OPTAX_VERSION="${OPTAX_VERSION:-0.2.2}"
     CHEX_VERSION="${CHEX_VERSION:-0.1.86}"
+    ORBAX_CHECKPOINT_VERSION="${ORBAX_CHECKPOINT_VERSION:-0.6.4}"
     DIFFUSERS_VERSION="${DIFFUSERS_VERSION:-0.32.2}"
+    TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-4.49.0}"
     TORCH_VERSION="${TORCH_VERSION:-2.4.1}"
     TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.19.1}"
     export PIP_NO_INDEX="${PIP_NO_INDEX:-1}"
@@ -56,38 +58,42 @@ fi
 #   JAX_PLATFORM=tpu bash scripts/install.sh
 JAX_PLATFORM="${JAX_PLATFORM:-gpu}"
 
-case "$JAX_PLATFORM" in
-    gpu)
-        if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
+install_jax() {
+    case "$JAX_PLATFORM" in
+        gpu)
+            if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
+                python -m pip install --upgrade \
+                    "jax==${GPU_JAX_VERSION}+computecanada" \
+                    "jaxlib==${GPU_JAX_VERSION}+cuda12.cudnn89.computecanada"
+            else
+                python -m pip install --upgrade \
+                    "jax[cuda12_pip]==${JAX_VERSION}" \
+                    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+            fi
+            ;;
+        cpu)
+            if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
+                python -m pip install --upgrade \
+                    "jax==${CPU_JAX_VERSION}+computecanada" \
+                    "jaxlib==${CPU_JAX_VERSION}+computecanada"
+            else
+                python -m pip install --upgrade "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}"
+            fi
+            ;;
+        tpu)
             python -m pip install --upgrade \
-                "jax==${GPU_JAX_VERSION}+computecanada" \
-                "jaxlib==${GPU_JAX_VERSION}+cuda12.cudnn89.computecanada"
-        else
-            python -m pip install --upgrade \
-                "jax[cuda12_pip]==${JAX_VERSION}" \
-                -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-        fi
-        ;;
-    cpu)
-        if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
-            python -m pip install --upgrade \
-                "jax==${CPU_JAX_VERSION}+computecanada" \
-                "jaxlib==${CPU_JAX_VERSION}+computecanada"
-        else
-            python -m pip install --upgrade "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}"
-        fi
-        ;;
-    tpu)
-        python -m pip install --upgrade \
-            "jax[tpu]==${JAX_VERSION}" \
-            -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        ;;
-    *)
-        echo "Unsupported JAX_PLATFORM: $JAX_PLATFORM"
-        echo "Expected one of: gpu, cpu, tpu"
-        exit 1
-        ;;
-esac
+                "jax[tpu]==${JAX_VERSION}" \
+                -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            ;;
+        *)
+            echo "Unsupported JAX_PLATFORM: $JAX_PLATFORM"
+            echo "Expected one of: gpu, cpu, tpu"
+            exit 1
+            ;;
+    esac
+}
+
+install_jax
 
 if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     python -m pip install --upgrade \
@@ -99,13 +105,19 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
         "ml-collections" \
         "ml-dtypes==0.5.0" \
         "optax==${OPTAX_VERSION}+computecanada" \
+        "orbax-checkpoint==${ORBAX_CHECKPOINT_VERSION}+computecanada" \
         "pillow" \
         "PyYAML" \
         "requests" \
         "timm" \
         "tqdm" \
-        "transformers" \
+        "transformers==${TRANSFORMERS_VERSION}+computecanada" \
         "wandb"
+
+    # Some Compute Canada wheels have broad JAX requirements and may pull in a
+    # newer CPU-only jaxlib during the dependency install above. Re-apply the
+    # requested JAX platform pin so GPU jobs do not silently fall back to CPU.
+    install_jax
 else
     python -m pip install --upgrade \
         "flax>=0.8" \

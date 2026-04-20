@@ -176,6 +176,21 @@ ensure_dataset_root() {
   fi
 }
 
+ensure_cuda_ptxas() {
+  if command -v ptxas >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v module >/dev/null 2>&1; then
+    local cuda_module="${CUDA_MODULE:-cuda/12.6}"
+    module load "$cuda_module" 2>/dev/null || module load cuda 2>/dev/null || true
+  fi
+
+  if ! command -v ptxas >/dev/null 2>&1; then
+    echo "WARNING: ptxas was not found. On Compute Canada, run: module load ${CUDA_MODULE:-cuda/12.6}" >&2
+  fi
+}
+
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
 JOB_PREFIX="${JOB_PREFIX:-plain_iMF_finetune}"
@@ -207,6 +222,7 @@ WANDB_PROJECT: $WANDB_PROJECT
 EOF
 
 ensure_dataset_root
+ensure_cuda_ptxas
 
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
   XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
