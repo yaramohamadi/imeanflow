@@ -29,11 +29,20 @@ from utils.ema_util import ema_schedules, update_ema
 from utils.logging_util import MetricsTracker, Timer, log_for_0, Writer
 from utils.vae_util import LatentManager
 from utils.lr_utils import lr_schedules
+from utils.eval_csv_util import append_eval_metrics_row
+from utils.preview_util import (
+    format_preview_guidance_label,
+    generate_preview_samples_first_device,
+    make_side_by_side_preview_panel,
+    make_stacked_grid_panel,
+)
 from utils.sample_util import (
-    generate_fid_samples,
     get_image_metric_evaluator,
+    get_sample_device_batch_size,
+    get_sample_devices,
+    get_sample_local_device_count,
+    get_sampling_param_dtype,
     has_controllable_sampling_guidance,
-    run_p_sample_step,
 )
 from utils.trainstate_util import create_train_state, TrainState
 
@@ -408,6 +417,62 @@ def _get_eval_sampling_configs(config):
     )
 
 
+def _should_run_fid(current_step, training_config):
+    fid_schedule = training_config.get("fid_schedule", [])
+    if fid_schedule:
+        for schedule_item in fid_schedule:
+            from_step = int(schedule_item.get("from_step", 0))
+            until_step = schedule_item.get("until_step", None)
+            every_steps = int(schedule_item["every_steps"])
+            if current_step < from_step:
+                continue
+            if until_step is not None and current_step >= int(until_step):
+                continue
+            if (current_step - from_step) % every_steps == 0:
+                return True
+        return False
+
+    fid_per_step = int(training_config.get("fid_per_step", 0))
+    return fid_per_step > 0 and current_step % fid_per_step == 0
+
+
+def _get_metric_num_steps(config):
+    configured_steps = config.training.get("metric_num_steps", ())
+    if configured_steps:
+        num_steps = [int(step) for step in configured_steps]
+    else:
+        num_steps = [int(config.sampling.num_steps)]
+
+    primary_steps = int(config.sampling.num_steps)
+    ordered_steps = []
+    for step in [primary_steps] + num_steps:
+        if step < 1:
+            raise ValueError("Metric sampling steps must be >= 1.")
+        if step not in ordered_steps:
+            ordered_steps.append(step)
+    return tuple(ordered_steps)
+
+
+def _primary_metric_mode(use_ema):
+    return "ema" if use_ema else "online"
+
+
+def _write_eval_metrics_csv(workdir, **row):
+    append_eval_metrics_row(workdir, row)
+
+
+def _set_num_classes_from_data(config):
+    if config.dataset.get("num_classes_from_data", False):
+        inferred_num_classes = infer_num_classes_from_latents(config.dataset.root)
+        config.dataset.num_classes = inferred_num_classes
+        config.model.num_classes = inferred_num_classes
+        config.sampling.num_classes = inferred_num_classes
+        log_for_0(
+            "Inferred dataset.num_classes from latent data: %s",
+            inferred_num_classes,
+        )
+
+
 #######################################################
 #                       Main                          #
 #######################################################
@@ -417,16 +482,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     ########### Initialize ###########
     writer = Writer(config, workdir)
 
-    if config.dataset.get("num_classes_from_data", False):
-        inferred_num_classes = infer_num_classes_from_latents(config.dataset.root)
-        config.dataset.num_classes = inferred_num_classes
-        config.model.num_classes = inferred_num_classes
-        config.sampling.num_classes = inferred_num_classes
-        log_for_0("Inferred dataset.num_classes from latent data: {}".format(inferred_num_classes))
+    _set_num_classes_from_data(config)
 
     rng = random.key(config.training.seed)
     image_size = config.dataset.image_size
-    device_bsz = config.fid.device_batch_size
+    metric_device_bsz = int(config.fid.device_batch_size)
+    sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
     max_train_steps = config.training.get("max_train_steps", None)
     grad_accum_steps = config.training.get("grad_accum_steps", 1)
@@ -435,6 +498,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     log_for_0("config.training.use_ema: {}".format(use_ema))
     log_for_0("config.training.max_train_steps: {}".format(max_train_steps))
     log_for_0("config.training.grad_accum_steps: {}".format(grad_accum_steps))
+    log_for_0("config.fid.device_batch_size: %s", metric_device_bsz)
+    log_for_0("config.fid.sample_device_batch_size: %s", sample_device_bsz)
+    log_for_0("sampling local device count: %s", sample_local_device_count)
     local_batch_size = config.training.batch_size // jax.process_count()
     log_for_0("local_batch_size: {}".format(local_batch_size))
     log_for_0("jax.local_device_count: {}".format(jax.local_device_count()))
@@ -481,7 +547,12 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
     ########### Create Latent Manager ###########
 
-    latent_manager = LatentManager(config.dataset.vae, device_bsz, image_size)
+    latent_manager = LatentManager(
+        config.dataset.vae,
+        sample_device_bsz,
+        image_size,
+        decode_num_local_devices=sample_local_device_count,
+    )
 
     ########### Create train and sample pmap ###########
 
@@ -516,14 +587,25 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 model=model,
                 rng_init=random.PRNGKey(99),
                 config=config,
-                device_batch_size=device_bsz,
+                device_batch_size=sample_device_bsz,
                 num_steps=num_steps,
             ),
             axis_name="batch",
+            devices=sample_devices,
         )
 
-    p_sample_step = build_p_sample_step(config.sampling.num_steps)
-    preview_num_steps = (1, 2, 4)
+    metric_num_steps = _get_metric_num_steps(config)
+    p_metric_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in metric_num_steps
+    }
+    log_for_0("Metric evaluation sampling steps: %s", metric_num_steps)
+
+    preview_num_steps = config.training.get("preview_num_steps", (1, 2, 4))
+    preview_num_steps = (
+        tuple(int(num) for num in preview_num_steps)
+        if preview_num_steps
+        else (1, 2, 4)
+    )
     p_preview_sample_steps = {
         num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
     }
@@ -542,7 +624,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         "t_min": preview_t_min,
         "t_max": preview_t_max,
     }
-    sample_kwargs = jax_utils.replicate(eval_sample_kwargs)
+    sample_kwargs = jax_utils.replicate(eval_sample_kwargs, devices=sample_devices)
 
     def log_preview_samples(state_for_logging, step_for_logging):
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
@@ -566,34 +648,48 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     "omega": omega,
                     "t_min": preview_t_min,
                     "t_max": preview_t_max,
-                }
+                },
+                devices=sample_devices,
             )
             preview_images = {}
             for num_steps, p_preview_step in p_preview_sample_steps.items():
-                preview_images[num_steps] = _generate_preview_samples_first_device(
+                preview_images[num_steps] = generate_preview_samples_first_device(
                     state_for_logging,
                     p_preview_step,
                     latent_manager,
                     use_ema,
                     num_samples=num_images,
+                    param_dtype=get_sampling_param_dtype(config),
+                    sample_local_device_count=sample_local_device_count,
                     **preview_kwargs,
                 )
 
-            preview_panel = _make_side_by_side_preview_panel(preview_images, grid_size)
+            preview_panel = make_side_by_side_preview_panel(preview_images, grid_size)
             preview_image_groups[
-                _format_preview_guidance_label(omega, preview_t_min, preview_t_max)
+                format_preview_guidance_label(omega, preview_t_min, preview_t_max)
             ] = [preview_panel]
 
-        stacked_preview_panel = _make_stacked_grid_panel(preview_image_groups, 1)
+        stacked_preview_panel = make_stacked_grid_panel(preview_image_groups, 1)
         writer.write_images(step_for_logging, {"image_grid": stacked_preview_panel})
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
-    best_fid = float("inf")
+    best_fid_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
+    best_fd_dino_by_steps = {
+        num_steps: float("inf") for num_steps in metric_num_steps
+    }
     best_fid_ckpt_dir = os.path.join(
         workdir,
         config.training.get("best_fid_checkpoint_dir", "best_fid"),
     )
     save_best_fid_only = config.training.get("save_best_fid_only", False)
+    save_eval_checkpoint_per_fid = config.training.get(
+        "save_eval_checkpoint_per_fid", False
+    )
+    eval_ckpt_dir = os.path.join(
+        workdir,
+        config.training.get("eval_checkpoint_dir", "latest_eval"),
+    )
+    metric_mode = _primary_metric_mode(use_ema)
 
     ########### Training Loop ###########
     metrics_tracker = MetricsTracker()
@@ -725,24 +821,82 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         )
 
             ########### Sampling ###########
-            if did_update and current_step > 0 and current_step % config.training.sample_per_step == 0:
+            if (
+                did_update
+                and config.training.sample_per_step > 0
+                and current_step > 0
+                and current_step % config.training.sample_per_step == 0
+            ):
                 log_preview_samples(state, current_step)
 
             ########### FID ###########
-            if did_update and current_step > 0 and current_step % config.training.fid_per_step == 0:
-                result = image_metric_evaluator(
-                    state, p_sample_step, current_step - 1, **sample_kwargs
-                )
-                fid = result["fid"]
-                if fid < best_fid:
-                    best_fid = fid
+            if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
+                checkpoint_path_for_csv = ""
+                if save_eval_checkpoint_per_fid:
+                    save_best_checkpoint(state, eval_ckpt_dir)
+                    checkpoint_path_for_csv = eval_ckpt_dir
+
+                for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
                     log_for_0(
-                        "New best FID %.4f at step %d. Saving best checkpoint to %s.",
-                        best_fid,
+                        "Running metric evaluation at step %d with %d sampling steps.",
                         current_step,
-                        best_fid_ckpt_dir,
+                        metric_num_steps,
                     )
-                    save_best_checkpoint(state, best_fid_ckpt_dir)
+                    result = image_metric_evaluator(
+                        state,
+                        p_metric_sample_step,
+                        current_step - 1,
+                        metric_suffix=f"steps_{metric_num_steps}",
+                        **sample_kwargs,
+                    )
+                    fid = result["fid"]
+                    fd_dino = result.get("fd_dino", None)
+                    is_best_fid = fid < best_fid_by_steps[metric_num_steps]
+                    is_best_fd_dino = (
+                        fd_dino is not None
+                        and fd_dino < best_fd_dino_by_steps[metric_num_steps]
+                    )
+                    if is_best_fid:
+                        best_fid_by_steps[metric_num_steps] = fid
+                    if is_best_fd_dino:
+                        best_fd_dino_by_steps[metric_num_steps] = fd_dino
+
+                    row_checkpoint_path = checkpoint_path_for_csv
+                    if (
+                        metric_num_steps == int(config.sampling.num_steps)
+                        and is_best_fid
+                    ):
+                        log_for_0(
+                            "New best FID %.4f at step %d for %d sampling steps. "
+                            "Saving best checkpoint to %s.",
+                            fid,
+                            current_step,
+                            metric_num_steps,
+                            best_fid_ckpt_dir,
+                        )
+                        save_best_checkpoint(state, best_fid_ckpt_dir)
+                        row_checkpoint_path = best_fid_ckpt_dir
+
+                    _write_eval_metrics_csv(
+                        workdir,
+                        eval_phase="train",
+                        metric_mode=metric_mode,
+                        training_step=current_step,
+                        sampling_num_steps=metric_num_steps,
+                        omega=eval_sample_kwargs["omega"],
+                        t_min=eval_sample_kwargs["t_min"],
+                        t_max=eval_sample_kwargs["t_max"],
+                        fid=float(fid),
+                        inception_score=float(result["is"]),
+                        fd_dino="" if fd_dino is None else float(fd_dino),
+                        is_best_fid=int(is_best_fid),
+                        is_best_fd_dino=int(is_best_fd_dino),
+                        checkpoint_path=(
+                            os.path.abspath(row_checkpoint_path)
+                            if row_checkpoint_path
+                            else ""
+                        ),
+                    )
 
             if max_train_steps is not None and current_step >= max_train_steps:
                 should_stop = True
@@ -781,15 +935,14 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     ########### Initialize ###########
     writer = Writer(config, workdir)
 
-    if config.dataset.get("num_classes_from_data", False):
-        inferred_num_classes = infer_num_classes_from_latents(config.dataset.root)
-        config.dataset.num_classes = inferred_num_classes
-        config.model.num_classes = inferred_num_classes
-        log_for_0("Inferred dataset.num_classes from latent data: {}".format(inferred_num_classes))
+    _set_num_classes_from_data(config)
 
     image_size = config.dataset.image_size
-    device_bsz = config.fid.device_batch_size
+    sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
+    metric_mode = _primary_metric_mode(use_ema)
 
     ########### Create Model ###########
     model_config = config.model.to_dict()
@@ -802,23 +955,34 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
     ########### Create Latent Manager ###########
 
-    latent_manager = LatentManager(config.dataset.vae, device_bsz, image_size)
+    latent_manager = LatentManager(
+        config.dataset.vae,
+        sample_device_bsz,
+        image_size,
+        decode_num_local_devices=sample_local_device_count,
+    )
 
     ########### Create sample pmap ###########
 
-    p_sample_step = jax.pmap(
-        partial(
-            sample_step,
-            model=model,
-            rng_init=random.PRNGKey(99),
-            config=config,
-            device_batch_size=device_bsz,
-            num_steps=config.sampling.num_steps,
-        ),
-        axis_name="batch",
-    )
+    def build_p_sample_step(num_steps):
+        return jax.pmap(
+            partial(
+                sample_step,
+                model=model,
+                rng_init=random.PRNGKey(99),
+                config=config,
+                device_batch_size=sample_device_bsz,
+                num_steps=num_steps,
+            ),
+            axis_name="batch",
+            devices=sample_devices,
+        )
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
+    metric_num_steps = _get_metric_num_steps(config)
+    p_metric_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in metric_num_steps
+    }
 
     ############ Evaluate over CFG configs ###########
     best_fid = float("inf")
@@ -828,35 +992,83 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     best_fd_dino_config = None
     best_fd_dino_at_best_fid = None
     guidance_controllable = has_controllable_sampling_guidance(config.model)
-    for omega, t_min, t_max in _get_eval_sampling_configs(config):
-        kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
-        kwargs = jax_utils.replicate(kwargs)
-        result = image_metric_evaluator(
-            state, p_sample_step, step, not use_ema, **kwargs
-        )
-        fid = result["fid"]
-        is_score = result["is"]
-        fd_dino = result.get("fd_dino", None)
+    csv_rows = []
+    for metric_num_step, p_metric_sample_step in p_metric_sample_steps.items():
+        for omega, t_min, t_max in _get_eval_sampling_configs(config):
+            kwargs = {"omega": omega, "t_min": t_min, "t_max": t_max}
+            kwargs = jax_utils.replicate(kwargs, devices=sample_devices)
+            result = image_metric_evaluator(
+                state,
+                p_metric_sample_step,
+                step,
+                not use_ema,
+                metric_suffix=f"steps_{metric_num_step}",
+                **kwargs,
+            )
+            fid = result["fid"]
+            is_score = result["is"]
+            fd_dino = result.get("fd_dino", None)
 
-        if fid < best_fid:
-            best_fid, best_is, best_config = fid, is_score, (omega, t_min, t_max)
-            best_fd_dino_at_best_fid = fd_dino
-        if fd_dino is not None and fd_dino < best_fd_dino:
-            best_fd_dino = fd_dino
-            best_fd_dino_config = (omega, t_min, t_max)
+            row = {
+                "sampling_num_steps": metric_num_step,
+                "omega": omega,
+                "t_min": t_min,
+                "t_max": t_max,
+                "fid": fid,
+                "is": is_score,
+                "fd_dino": fd_dino,
+            }
+            csv_rows.append(row)
+
+            if fid < best_fid:
+                best_fid = fid
+                best_is = is_score
+                best_config = (metric_num_step, omega, t_min, t_max)
+                best_fd_dino_at_best_fid = fd_dino
+            if fd_dino is not None and fd_dino < best_fd_dino:
+                best_fd_dino = fd_dino
+                best_fd_dino_config = (metric_num_step, omega, t_min, t_max)
+
+    for row in csv_rows:
+        row_config = (
+            row["sampling_num_steps"],
+            row["omega"],
+            row["t_min"],
+            row["t_max"],
+        )
+        _write_eval_metrics_csv(
+            workdir,
+            eval_phase="eval_only",
+            metric_mode=metric_mode,
+            training_step=step,
+            sampling_num_steps=row["sampling_num_steps"],
+            omega=row["omega"],
+            t_min=row["t_min"],
+            t_max=row["t_max"],
+            fid=float(row["fid"]),
+            inception_score=float(row["is"]),
+            fd_dino="" if row["fd_dino"] is None else float(row["fd_dino"]),
+            is_best_fid=int(row_config == best_config),
+            is_best_fd_dino=int(
+                best_fd_dino_config is not None and row_config == best_fd_dino_config
+            ),
+            checkpoint_path=os.path.abspath(config.load_from),
+        )
 
     summary = {
         'best_fid': best_fid,
         'best_is': best_is,
     }
     if guidance_controllable:
-        summary['omega'] = best_config[0]
-        summary['t_min'] = best_config[1]
-        summary['t_max'] = best_config[2]
+        summary['sampling_num_steps'] = best_config[0]
+        summary['omega'] = best_config[1]
+        summary['t_min'] = best_config[2]
+        summary['t_max'] = best_config[3]
         log_message = (
             f"Best FID achieved: {best_fid:.2f}, \n"
             f"IS achieved: {best_is:.2f}, \n"
-            f"omega: {best_config[0]:.2f}, t_min: {best_config[1]:.2f}, t_max: {best_config[2]:.2f}"
+            f"steps: {best_config[0]}, omega: {best_config[1]:.2f}, "
+            f"t_min: {best_config[2]:.2f}, t_max: {best_config[3]:.2f}"
         )
     else:
         log_message = (
@@ -870,14 +1082,16 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
         log_message += f", \nFD-DINO at best FID config: {best_fd_dino_at_best_fid:.2f}"
     if best_fd_dino_config is not None and guidance_controllable:
         summary['best_fd_dino'] = best_fd_dino
-        summary['best_fd_dino_omega'] = best_fd_dino_config[0]
-        summary['best_fd_dino_t_min'] = best_fd_dino_config[1]
-        summary['best_fd_dino_t_max'] = best_fd_dino_config[2]
+        summary['best_fd_dino_sampling_num_steps'] = best_fd_dino_config[0]
+        summary['best_fd_dino_omega'] = best_fd_dino_config[1]
+        summary['best_fd_dino_t_min'] = best_fd_dino_config[2]
+        summary['best_fd_dino_t_max'] = best_fd_dino_config[3]
         log_message += (
             f", \nBest FD-DINO achieved: {best_fd_dino:.2f}, "
-            f"omega: {best_fd_dino_config[0]:.2f}, "
-            f"t_min: {best_fd_dino_config[1]:.2f}, "
-            f"t_max: {best_fd_dino_config[2]:.2f}"
+            f"steps: {best_fd_dino_config[0]}, "
+            f"omega: {best_fd_dino_config[1]:.2f}, "
+            f"t_min: {best_fd_dino_config[2]:.2f}, "
+            f"t_max: {best_fd_dino_config[3]:.2f}"
         )
     elif best_fd_dino_config is not None:
         summary['best_fd_dino'] = best_fd_dino

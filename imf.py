@@ -159,6 +159,9 @@ class iMeanFlow(nn.Module):
     def _uses_sit_cfg_channel_rule(self):
         return "SiT" in self.model_str
 
+    def _uses_imf_dit_backbone(self):
+        return "DiT" in self.model_str and "SiT" not in self.model_str
+
     def _uses_sit_guidance_context_conditioning(self):
         return (
             (not self._uses_auxiliary_v_head())
@@ -405,6 +408,27 @@ class iMeanFlow(nn.Module):
                 y,
             )
 
+        if self._uses_imf_dit_backbone():
+            u, _ = self.net(
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+            v_boundary, _ = self.net(
+                x,
+                t.reshape(bz),
+                jnp.zeros_like(t).reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+            return u, v_boundary
+
         r = t - h
         if self._uses_sit_guidance_context_conditioning():
             u = self.net(
@@ -553,6 +577,17 @@ class iMeanFlow(nn.Module):
                     t.reshape(bz),
                     y,
                     omega.reshape(bz),
+                )
+            elif self._uses_imf_dit_backbone():
+                v, _ = self.source_net.apply(
+                    {"params": source_params["net"]},
+                    x,
+                    t.reshape(bz),
+                    jnp.zeros_like(t).reshape(bz),
+                    omega.reshape(bz),
+                    jnp.zeros_like(t).reshape(bz),
+                    jnp.ones_like(t).reshape(bz),
+                    y,
                 )
             else:
                 del omega
@@ -854,4 +889,8 @@ class iMeanFlow(nn.Module):
         if self._uses_sit_adaln_guidance_scale_conditioning():
             ones = jnp.ones_like(t)
             return self.net(x, t, t, y, ones)  # initialization only
+        if self._uses_imf_dit_backbone():
+            ones = jnp.ones_like(t)
+            zeros = jnp.zeros_like(t)
+            return self.net(x, t, zeros, ones, zeros, ones, y)  # initialization only
         return self.net(x, t, t, y)  # initialization only

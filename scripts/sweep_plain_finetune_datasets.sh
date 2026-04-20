@@ -56,7 +56,33 @@ SUBMIT_SLURM="${SUBMIT_SLURM:-False}"
 NOW=$(date '+%Y%m%d_%H%M%S')
 REPO_ROOT="$(pwd)"
 
+<<<<<<< HEAD
 BACKBONES_LABEL="${BACKBONES// /_}"
+=======
+case "${BACKBONE,,}" in
+  sit)
+    TRAIN_SCRIPT="scripts/train_plain_sit_finetune.sh"
+    BACKBONE_LABEL="sit"
+    DEFAULT_WANDB_PROJECT="plain_sit_finetune"
+    DEFAULT_SLURM_TIME="60:00:00"
+    ;;
+  dit)
+    TRAIN_SCRIPT="scripts/train_plain_dit_finetune.sh"
+    BACKBONE_LABEL="dit"
+    DEFAULT_WANDB_PROJECT="plain_dit_finetune"
+    DEFAULT_SLURM_TIME="45:00:00"
+    ;;
+  imf)
+    TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
+    BACKBONE_LABEL="imf"
+    DEFAULT_WANDB_PROJECT="plain_imf_finetune"
+    ;;
+  *)
+    echo "ERROR: BACKBONE must be sit, dit, or imf, got '${BACKBONE}'." >&2
+    exit 2
+    ;;
+esac
+>>>>>>> b3fb1390dad8051fe72f432ed0215435fffa0a10
 
 SWEEP_LOG_DIR="${SWEEP_LOG_DIR:-files/logs/sweeps/plain_${BACKBONES_LABEL}_${SWEEP_LABEL}_${NOW}}"
 mkdir -p "$SWEEP_LOG_DIR"
