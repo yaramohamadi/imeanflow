@@ -45,7 +45,7 @@ training:
         # - 250
         #- 4
         #- 2
-        #- 1
+        - 1
     preview_guidance_scales:
         # - 1.0
         - 7.5
