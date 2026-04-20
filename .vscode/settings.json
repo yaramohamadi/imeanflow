@@ -1,0 +1,38 @@
+{
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/files/logs/**": true,
+    "**/files/weights/**": true,
+    "**/files/fid_stats/**": true,
+    "**/files/fdd_stats/**": true,
+    "**/checkpoint_*/**": true,
+    "**/best_fid/**": true,
+    "**/latest_eval/**": true,
+    "**/eval_best_fid_*steps/**": true
+  },
+  "search.exclude": {
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/files/logs/**": true,
+    "**/files/weights/**": true,
+    "**/files/fid_stats/**": true,
+    "**/files/fdd_stats/**": true,
+    "**/checkpoint_*/**": true,
+    "**/best_fid/**": true,
+    "**/latest_eval/**": true,
+    "**/eval_best_fid_*steps/**": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+}
