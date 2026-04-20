@@ -141,3 +141,61 @@ def create_latent_split(dataset_cfg, batch_size, split):
     )
     steps_per_epoch = len(it)
     return it, steps_per_epoch
+
+
+def create_image_split(dataset_cfg, batch_size, split):
+    """Creates a raw pixel-space ImageFolder split for JiT training.
+
+    Expected layout:
+      dataset_cfg.root/train/class_a/*.jpg
+      dataset_cfg.root/train/class_b/*.png
+    """
+    assert split == "train"
+    from torchvision import datasets, transforms
+
+    transform = transforms.Compose(
+        [
+            transforms.Lambda(
+                lambda pil_image: center_crop_arr(
+                    pil_image.convert("RGB"),
+                    int(dataset_cfg.image_size),
+                )
+            ),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.5, 0.5, 0.5],
+                std=[0.5, 0.5, 0.5],
+                inplace=True,
+            ),
+        ]
+    )
+    ds = datasets.ImageFolder(
+        os.path.join(dataset_cfg.root, split),
+        transform=transform,
+        loader=loader,
+    )
+    log_for_0(ds)
+
+    rank = jax.process_index()
+    sampler = DistributedSampler(
+        ds,
+        num_replicas=jax.process_count(),
+        rank=rank,
+        shuffle=True,
+    )
+    it = DataLoader(
+        ds,
+        batch_size=batch_size,
+        drop_last=True,
+        worker_init_fn=partial(worker_init_fn, rank=rank),
+        sampler=sampler,
+        num_workers=dataset_cfg.num_workers,
+        prefetch_factor=(
+            dataset_cfg.prefetch_factor if dataset_cfg.num_workers > 0 else None
+        ),
+        pin_memory=dataset_cfg.pin_memory,
+        persistent_workers=True if dataset_cfg.num_workers > 0 else False,
+    )
+    steps_per_epoch = len(it)
+    return it, steps_per_epoch

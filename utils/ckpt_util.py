@@ -141,19 +141,51 @@ def _convert_qkv(weight, bias):
     )
 
 
-def _load_torch_checkpoint_state_dict(workdir):
+def _load_torch_checkpoint_state_dict(workdir, prefer_ema=True):
     torch = _import_torch()
     try:
-        raw = torch.load(workdir, map_location="cpu", weights_only=True)
+        raw = torch.load(workdir, map_location="cpu", weights_only=True, mmap=True)
     except TypeError:
         raw = torch.load(workdir, map_location="cpu")
-    if isinstance(raw, dict) and "state_dict" in raw:
+    if (
+        isinstance(raw, dict)
+        and prefer_ema
+        and "model_ema2" in raw
+        and isinstance(raw["model_ema2"], dict)
+    ):
+        raw = raw["model_ema2"]
+    elif (
+        isinstance(raw, dict)
+        and prefer_ema
+        and "model_ema1" in raw
+        and isinstance(raw["model_ema1"], dict)
+    ):
+        raw = raw["model_ema1"]
+    elif isinstance(raw, dict) and "state_dict" in raw:
         raw = raw["state_dict"]
     elif isinstance(raw, dict) and "model" in raw and isinstance(raw["model"], dict):
         raw = raw["model"]
     if not isinstance(raw, dict):
         raise ValueError(f"Unsupported torch checkpoint format: {workdir}")
     return raw
+
+
+def _source_has_key(source_dict, key):
+    return key in source_dict or f"net.{key}" in source_dict
+
+
+def _source_get(source_dict, key):
+    if key in source_dict:
+        return source_dict[key]
+    net_key = f"net.{key}"
+    if net_key in source_dict:
+        return source_dict[net_key]
+    raise KeyError(key)
+
+
+def _source_keys_without_net_prefix(source_dict):
+    for key in source_dict.keys():
+        yield key[4:] if key.startswith("net.") else key
 
 
 def _convert_torch_sit_common_state(source_dict):
@@ -389,11 +421,207 @@ def _convert_torch_sit_state_dict_to_flax_dmf(
     return {"net": state}
 
 
+def _convert_torch_jit_state_dict_to_flax(source_dict):
+    """Convert a JiT PyTorch state_dict into the Flax JiT parameter tree."""
+    state = {}
+
+    if _source_has_key(source_dict, "pos_embed"):
+        _set_param(state, "pos_embed", _to_numpy(_source_get(source_dict, "pos_embed")))
+    if _source_has_key(source_dict, "in_context_posemb"):
+        _set_param(
+            state,
+            "in_context_posemb",
+            _to_numpy(_source_get(source_dict, "in_context_posemb")),
+        )
+
+    if _source_has_key(source_dict, "t_embedder.mlp.0.weight"):
+        _set_param(
+            state,
+            "t_embedder/mlp/layers_0/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, "t_embedder.mlp.0.weight")),
+        )
+        _set_param(
+            state,
+            "t_embedder/mlp/layers_0/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, "t_embedder.mlp.0.bias")),
+        )
+        _set_param(
+            state,
+            "t_embedder/mlp/layers_2/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, "t_embedder.mlp.2.weight")),
+        )
+        _set_param(
+            state,
+            "t_embedder/mlp/layers_2/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, "t_embedder.mlp.2.bias")),
+        )
+
+    if _source_has_key(source_dict, "y_embedder.embedding_table.weight"):
+        _set_param(
+            state,
+            "y_embedder/embedding_table/_flax_embedding/embedding",
+            _to_numpy(_source_get(source_dict, "y_embedder.embedding_table.weight")),
+        )
+
+    if _source_has_key(source_dict, "x_embedder.proj1.weight"):
+        _set_param(
+            state,
+            "x_embedder/proj1/kernel",
+            np.transpose(
+                _to_numpy(_source_get(source_dict, "x_embedder.proj1.weight")),
+                (2, 3, 1, 0),
+            ),
+        )
+    if _source_has_key(source_dict, "x_embedder.proj2.weight"):
+        _set_param(
+            state,
+            "x_embedder/proj2/kernel",
+            np.transpose(
+                _to_numpy(_source_get(source_dict, "x_embedder.proj2.weight")),
+                (2, 3, 1, 0),
+            ),
+        )
+        _set_param(
+            state,
+            "x_embedder/proj2/bias",
+            _to_numpy(_source_get(source_dict, "x_embedder.proj2.bias")),
+        )
+
+    block_indices = sorted(
+        {
+            int(key.split(".")[1])
+            for key in _source_keys_without_net_prefix(source_dict)
+            if key.startswith("blocks.")
+        }
+    )
+    for i in block_indices:
+        source_prefix = f"blocks.{i}"
+        flax_prefix = f"blocks_{i}"
+
+        _set_param(
+            state,
+            f"{flax_prefix}/norm1/kernel",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.norm1.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/q_norm/kernel",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.q_norm.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/k_norm/kernel",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.k_norm.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/qkv/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.qkv.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/qkv/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.qkv.bias")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/proj/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.proj.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/attn/proj/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.proj.bias")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/norm2/kernel",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.norm2.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/mlp/w12/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w12.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/mlp/w12/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w12.bias")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/mlp/w3/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w3.weight")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/mlp/w3/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w3.bias")),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/adaLN_modulation/_flax_linear/kernel",
+            _transpose_linear(
+                _source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.weight")
+            ),
+        )
+        _set_param(
+            state,
+            f"{flax_prefix}/adaLN_modulation/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.bias")),
+        )
+
+    if _source_has_key(source_dict, "final_layer.norm_final.weight"):
+        _set_param(
+            state,
+            "final_layer/norm_final/kernel",
+            _to_numpy(_source_get(source_dict, "final_layer.norm_final.weight")),
+        )
+        _set_param(
+            state,
+            "final_layer/linear/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, "final_layer.linear.weight")),
+        )
+        _set_param(
+            state,
+            "final_layer/linear/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, "final_layer.linear.bias")),
+        )
+        _set_param(
+            state,
+            "final_layer/adaLN_modulation/_flax_linear/kernel",
+            _transpose_linear(_source_get(source_dict, "final_layer.adaLN_modulation.1.weight")),
+        )
+        _set_param(
+            state,
+            "final_layer/adaLN_modulation/_flax_linear/bias",
+            _to_numpy(_source_get(source_dict, "final_layer.adaLN_modulation.1.bias")),
+        )
+
+    return {"net": state}
+
+
 def _target_uses_dmf_sit_layout(target_state):
     if not isinstance(target_state, dict):
         return False
     net_state = target_state.get("net")
     return isinstance(net_state, dict) and "encoder_blocks_0" in net_state
+
+
+def _target_uses_jit_layout(target_state):
+    if not isinstance(target_state, dict):
+        return False
+    net_state = target_state.get("net")
+    if not isinstance(net_state, dict):
+        return False
+    x_embedder = net_state.get("x_embedder")
+    final_layer = net_state.get("final_layer")
+    return (
+        isinstance(x_embedder, dict)
+        and "proj1" in x_embedder
+        and isinstance(final_layer, dict)
+        and "norm_final" in final_layer
+    )
 
 
 def _target_uses_exact_sit_layout(target_state):
@@ -428,8 +656,10 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None, target_m
     """
     workdir = os.path.abspath(workdir)
     if os.path.isfile(workdir) and workdir.endswith((".pt", ".pth", ".pth.tar")):
-        source_tree = _load_torch_checkpoint_state_dict(workdir)
+        source_tree = _load_torch_checkpoint_state_dict(workdir, prefer_ema=prefer_ema)
         log_for_0("Loaded PyTorch checkpoint from {}".format(workdir))
+        if _target_uses_jit_layout(target_state):
+            return _convert_torch_jit_state_dict_to_flax(source_tree)
         if _target_uses_exact_sit_layout(target_state):
             return _convert_torch_sit_state_dict_to_flax_exact(source_tree)
         if _target_uses_dmf_sit_layout(target_state):
