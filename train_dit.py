@@ -213,6 +213,10 @@ def _should_run_fid(current_step, training_config):
 
 
 def _get_metric_num_steps(config):
+    forced_steps = str(config.training.get("force_metric_num_steps", "") or "").strip()
+    if forced_steps:
+        return tuple(int(step) for step in forced_steps.replace(",", " ").split())
+
     configured_steps = config.training.get("metric_num_steps", ())
     if configured_steps:
         num_steps = [int(step) for step in configured_steps]

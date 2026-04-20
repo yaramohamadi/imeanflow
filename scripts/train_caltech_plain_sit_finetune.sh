@@ -12,12 +12,13 @@ This script:
   1) launches the dataset-agnostic plain-SiT finetuning config
   2) keeps the config-defined official transport settings
   3) lets you append extra `main_sit.py` config overrides if needed
-  4) by default, skips post-training eval; multi-step metrics run during training
+  4) by default, selects best_fid/ with 4-step FID during training
+  5) runs final best-checkpoint eval at 1, 2, and 250 steps after training
 
 Optional env vars:
-  RUN_FINAL_BEST_FID_EVAL=False      # run post-training best-checkpoint eval only if explicitly enabled
-  FINAL_EVAL_STEPS="1 2 4"           # override the final evaluation step list
-  FINAL_EVAL_USE_WANDB=False         # disable wandb for the final eval runs
+  RUN_FINAL_BEST_FID_EVAL=True       # run post-training best-checkpoint eval
+  FINAL_EVAL_STEPS="1 2 250"         # override the final evaluation step list
+  FINAL_EVAL_USE_WANDB=True          # defaults to USE_WANDB; set False to disable final eval wandb
   SAMPLE_DEVICE_BATCH_SIZE=16        # optional override for per-GPU sampling/decode batch size
   SAMPLE_LOG_EVERY=10                # optional override for sampling timing log frequency
   HALF_PRECISION=True                # optional override for training/model half precision
@@ -47,8 +48,8 @@ CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
-RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-False}"
-FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 4}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-${USE_WANDB}}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
 SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
@@ -61,11 +62,11 @@ case "${BACKBONE:-}" in
     ;;
   sit|SiT)
     MODEL_STR="${MODEL_STR:-flaxSiT_XL_2}"
-    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/SiT-XL-2-256.pt}"
+    LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/SiT-XL-2-256.pt}"
     ;;
   dit|DiT)
     MODEL_STR="${MODEL_STR:-flaxDiT_XL_2}"
-    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt}"
+    LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
     ;;
   *)
     echo "ERROR: unknown BACKBONE='$BACKBONE'. Known: sit, dit." >&2
@@ -81,37 +82,37 @@ DATASET_LABEL=""
 case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
-    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/caltech-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/caltech-101-fid_stats.npz}"
     if [[ ! -v FD_DINO_CACHE_REF ]]; then
-      FD_DINO_CACHE_REF="/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
+      FD_DINO_CACHE_REF="/scratch/ymbahram/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
     fi
     ;;
   artbench10|artbench-10)
     DATASET_LABEL="artbench10"
-    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/artbench-10_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/artbench-10_processed-fid_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/artbench-10_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/artbench-10_processed-fid_stats.npz}"
     if [[ ! -v FD_DINO_CACHE_REF ]]; then
-      FD_DINO_CACHE_REF="/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz"
+      FD_DINO_CACHE_REF="/scratch/ymbahram/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz"
     fi
     ;;
   cub200|cub-200|cub-200-2011)
     DATASET_LABEL="cub200"
-    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/cub-200-2011_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/cub-200-2011_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/cub-200-2011_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
     ;;
   food101|food-101)
     DATASET_LABEL="food101"
-    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/food-101_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/food-101_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/food-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/food-101_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
     ;;
   stanfordcars|stanford-cars|cars)
     DATASET_LABEL="stanfordcars"
-    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/stanford-cars_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/stanford-cars_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/stanford_cars_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
     ;;
   *)
     echo "ERROR: unknown DATASET_NAME='$DATASET_NAME'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
@@ -201,6 +202,43 @@ case "${SAMPLING_HALF_PRECISION_DTYPE:-}" in
     ;;
 esac
 
+ensure_dataset_root() {
+  if [[ -d "$DATASET_ROOT" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${DATASET_ROOT}.zip" ]]; then
+    echo "ERROR: DATASET_ROOT missing and no zip fallback found: $DATASET_ROOT" >&2
+    exit 7
+  fi
+
+  local extract_lock="${DATASET_ROOT}.extract.lock"
+  if mkdir "$extract_lock" 2>/dev/null; then
+    echo "Extracting ${DATASET_ROOT}.zip into $DATASET_ROOT"
+    local extract_tmp="${DATASET_ROOT}.extracting.$$"
+    mkdir -p "$extract_tmp"
+    unzip -q "${DATASET_ROOT}.zip" -d "$extract_tmp"
+    local extracted_root
+    extracted_root="$(find "$extract_tmp" -type d -name "$(basename "$DATASET_ROOT")" | head -n 1)"
+    if [[ -z "$extracted_root" ]]; then
+      echo "ERROR: could not find $(basename "$DATASET_ROOT") inside ${DATASET_ROOT}.zip" >&2
+      rmdir "$extract_lock" 2>/dev/null || true
+      exit 7
+    fi
+    mv "$extracted_root" "$DATASET_ROOT"
+    rmdir "$extract_lock" 2>/dev/null || true
+  else
+    echo "Waiting for another job to finish extracting $DATASET_ROOT"
+    while [[ ! -d "$DATASET_ROOT" && -d "$extract_lock" ]]; do
+      sleep 30
+    done
+  fi
+
+  if [[ ! -d "$DATASET_ROOT" ]]; then
+    echo "ERROR: DATASET_ROOT missing after extraction attempt: $DATASET_ROOT" >&2
+    exit 7
+  fi
+}
+
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
 JOB_PREFIX="${JOB_PREFIX:-plain_SiT_finetune}"
@@ -236,6 +274,8 @@ WANDB_NAME: $WANDB_NAME
 WANDB_PROJECT: $WANDB_PROJECT
 EOF
 
+ensure_dataset_root
+
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
   XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
   PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
@@ -255,7 +295,8 @@ case "${RUN_FINAL_BEST_FID_EVAL,,}" in
     CONFIG_MODE="$CONFIG_MODE" \
       PYTHON="$PYTHON" \
       USE_WANDB="$FINAL_EVAL_USE_WANDB" \
-      bash scripts/eval_best_fid_steps_plain_sit.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}"
+      WANDB_NAME_PREFIX="$WANDB_NAME" \
+      bash scripts/eval_best_fid_steps_plain_sit.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- "${CONFIG_OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}"
     ;;
   0|false|no|n)
     ;;

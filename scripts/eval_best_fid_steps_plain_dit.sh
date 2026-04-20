@@ -3,15 +3,15 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: CONFIG_MODE=plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh <best_fid_dir_or_run_dir> [num_steps...] [-- extra config overrides...]
+Usage: CONFIG_MODE=plain_dit_finetune bash scripts/eval_best_fid_steps_plain_dit.sh <best_fid_dir_or_run_dir> [num_steps...] [-- extra config overrides...]
 
 Example:
-  CONFIG_MODE=plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh \
-    files/logs/finetuning/plain_SiT_finetune_caltech101_baseline_20260418_123456_ab12cd 1 2 250
+  CONFIG_MODE=plain_dit_finetune bash scripts/eval_best_fid_steps_plain_dit.sh \
+    files/logs/finetuning/plain_DiT_finetune_caltech101_baseline_20260418_123456_ab12cd 1 2 250
 
 If the first argument points to the run directory, the script assumes the checkpoint is under <run_dir>/best_fid.
 If the first argument points to the best_fid directory itself, it uses that directly.
-Any args after -- are forwarded to main_sit.py before the eval-only load_from/num_steps overrides.
+Any args after -- are forwarded to main_dit.py before the eval-only load_from/num_steps overrides.
 EOF
   exit 1
 fi
@@ -39,7 +39,7 @@ if [[ ${#STEPS[@]} -eq 0 ]]; then
   STEPS=(1 2 250)
 fi
 
-CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
+CONFIG_MODE="${CONFIG_MODE:-plain_dit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-}"
@@ -94,8 +94,8 @@ for NUM_STEPS in "${STEPS[@]}"; do
     XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
     XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false} \
     PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
-    $PYTHON \
-      main_sit.py \
+    "$PYTHON" \
+      main_dit.py \
       --workdir="$EVAL_WORKDIR" \
       --config=configs/load_config.py:${CONFIG_MODE} \
       "${EXTRA_CONFIG_ARGS[@]}" \

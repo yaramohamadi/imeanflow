@@ -57,7 +57,7 @@ training:
 
 fid:
     device_batch_size: 8
-    num_samples: 50000
+    num_samples: 10000
     cache_ref: '/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
     num_images_to_log: 100
 
