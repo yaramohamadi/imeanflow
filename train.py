@@ -418,6 +418,16 @@ def _get_eval_sampling_configs(config):
 
 
 def _should_run_fid(current_step, training_config):
+    forced_fid_steps = str(training_config.get("force_fid_steps", "") or "").strip()
+    if forced_fid_steps:
+        return current_step in {
+            int(step) for step in forced_fid_steps.replace(",", " ").split()
+        }
+
+    forced_fid_per_step = int(training_config.get("force_fid_per_step", 0) or 0)
+    if forced_fid_per_step > 0:
+        return current_step % forced_fid_per_step == 0
+
     fid_schedule = training_config.get("fid_schedule", [])
     if fid_schedule:
         for schedule_item in fid_schedule:
@@ -437,6 +447,10 @@ def _should_run_fid(current_step, training_config):
 
 
 def _get_metric_num_steps(config):
+    forced_steps = str(config.training.get("force_metric_num_steps", "") or "").strip()
+    if forced_steps:
+        return tuple(int(step) for step in forced_steps.replace(",", " ").split())
+
     configured_steps = config.training.get("metric_num_steps", ())
     if configured_steps:
         num_steps = [int(step) for step in configured_steps]

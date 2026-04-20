@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: BACKBONES="sit dit" bash scripts/sweep_plain_finetune_datasets.sh <sweep_label> [extra config overrides...]
+Usage: BACKBONES="sit dit imf" bash scripts/sweep_plain_finetune_datasets.sh <sweep_label> [extra config overrides...]
 
 Examples:
   CUDA_VISIBLE_DEVICES=0,1 PYTHON=.venv/bin/python USE_WANDB=True \
@@ -13,17 +13,18 @@ Examples:
     BACKBONE=dit DATASETS="caltech101 food101" bash scripts/sweep_plain_finetune_datasets.sh ddpm_baseline \
     --config.training.max_train_steps=10000
 
-  SUBMIT_SLURM=True BACKBONES="sit dit" DATASETS="caltech101 food101" \
+  SUBMIT_SLURM=True BACKBONES="sit dit imf" DATASETS="caltech101 food101" \
     bash scripts/sweep_plain_finetune_datasets.sh baseline
 
 Env knobs:
-  BACKBONES="sit"                    # one or more: sit dit
+  BACKBONES="sit"                    # one or more: sit dit imf
   BACKBONE=sit                       # legacy alias used only when BACKBONES is unset
   DATASETS="caltech101 artbench10 cub200 food101 stanfordcars"
   SWEEP_LOG_DIR=files/logs/sweeps/... # default: files/logs/sweeps/plain_<backbones>_<label>_<time>
   WANDB_PROJECT=...                   # optional single project for all backbones
   WANDB_PROJECT_SIT=plain_sit_finetune
   WANDB_PROJECT_DIT=plain_dit_finetune
+  WANDB_PROJECT_IMF=plain_imf_finetune
   CONTINUE_ON_FAILURE=False           # set True to continue after a dataset fails
   ASSET_CHECK=True                    # verify dataset/stat/weight paths before running or submitting
   SUBMIT_SLURM=False                  # True submits; DryRun writes sbatch files without submitting; False runs locally
@@ -36,6 +37,7 @@ Env knobs:
   SLURM_TIME=...                     # optional single time for all jobs
   SLURM_TIME_SIT=11:00:00
   SLURM_TIME_DIT=08:00:00
+  SLURM_TIME_IMF=11:00:00
   PYTHON_MODULE=python/3.10.13
   CUDA_MODULE=cuda/12.2
 
@@ -56,33 +58,7 @@ SUBMIT_SLURM="${SUBMIT_SLURM:-False}"
 NOW=$(date '+%Y%m%d_%H%M%S')
 REPO_ROOT="$(pwd)"
 
-<<<<<<< HEAD
 BACKBONES_LABEL="${BACKBONES// /_}"
-=======
-case "${BACKBONE,,}" in
-  sit)
-    TRAIN_SCRIPT="scripts/train_plain_sit_finetune.sh"
-    BACKBONE_LABEL="sit"
-    DEFAULT_WANDB_PROJECT="plain_sit_finetune"
-    DEFAULT_SLURM_TIME="60:00:00"
-    ;;
-  dit)
-    TRAIN_SCRIPT="scripts/train_plain_dit_finetune.sh"
-    BACKBONE_LABEL="dit"
-    DEFAULT_WANDB_PROJECT="plain_dit_finetune"
-    DEFAULT_SLURM_TIME="45:00:00"
-    ;;
-  imf)
-    TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
-    BACKBONE_LABEL="imf"
-    DEFAULT_WANDB_PROJECT="plain_imf_finetune"
-    ;;
-  *)
-    echo "ERROR: BACKBONE must be sit, dit, or imf, got '${BACKBONE}'." >&2
-    exit 2
-    ;;
-esac
->>>>>>> b3fb1390dad8051fe72f432ed0215435fffa0a10
 
 SWEEP_LOG_DIR="${SWEEP_LOG_DIR:-files/logs/sweeps/plain_${BACKBONES_LABEL}_${SWEEP_LABEL}_${NOW}}"
 mkdir -p "$SWEEP_LOG_DIR"
@@ -125,8 +101,14 @@ set_backbone_defaults() {
       WANDB_PROJECT_FOR_JOB="${WANDB_PROJECT:-${WANDB_PROJECT_DIT:-plain_dit_finetune}}"
       SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_DIT:-08:00:00}}"
       ;;
+    imf)
+      TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
+      BACKBONE_LABEL="imf"
+      WANDB_PROJECT_FOR_JOB="${WANDB_PROJECT:-${WANDB_PROJECT_IMF:-plain_imf_finetune}}"
+      SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_IMF:-11:00:00}}"
+      ;;
     *)
-      echo "ERROR: BACKBONES entries must be sit or dit, got '${backbone}'." >&2
+      echo "ERROR: BACKBONES entries must be sit, dit, or imf, got '${backbone}'." >&2
       exit 2
       ;;
   esac
@@ -212,6 +194,9 @@ check_assets_for_job() {
     dit)
       LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
       ;;
+    imf)
+      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
+      ;;
   esac
   check_required_path "$backbone initial checkpoint" "$LOAD_FROM_FOR_CHECK" || missing=1
 
@@ -255,6 +240,9 @@ write_dataset_job() {
       ;;
     dit)
       LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
+      ;;
+    imf)
+      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
       ;;
   esac
 
@@ -327,8 +315,12 @@ write_dataset_job() {
     append_export_if_set SAMPLING_HALF_PRECISION_DTYPE
     append_export_if_set MODEL_STR
     append_export_if_set CONFIG_MODE
+    append_export_if_set FORCE_FID_STEPS
     append_export_if_set FORCE_FID_PER_STEP
     append_export_if_set METRIC_NUM_STEPS
+    append_export_if_set GUIDANCE_SCALE
+    append_export_if_set SAMPLING_T_MIN
+    append_export_if_set SAMPLING_T_MAX
     printf 'bash %q %q%s\n' "$TRAIN_SCRIPT" "$run_label" "$extra_args_quoted"
   } > "$job_script"
 

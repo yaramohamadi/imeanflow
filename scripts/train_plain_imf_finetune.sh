@@ -18,6 +18,12 @@ Optional env vars:
   SAMPLE_DEVICE_BATCH_SIZE=32
   SAMPLE_LOG_EVERY=1
   SAMPLE_FIRST_DEVICE_ONLY=False
+  RUN_FINAL_BEST_FID_EVAL=True       # run post-training best-checkpoint eval
+  FINAL_EVAL_STEPS="1 2 250"         # final best-checkpoint FID/FD-DINO/IS evals
+  FINAL_EVAL_USE_WANDB=True          # defaults to USE_WANDB
+  FORCE_FID_STEPS="5"                # optional: exact space-separated train steps for FID
+  FORCE_FID_PER_STEP=5               # optional: ignore config fid_schedule and run FID every N steps
+  METRIC_NUM_STEPS="4"               # optional: space-separated sampling step counts for FID
   GUIDANCE_SCALE=7.5
   SAMPLING_T_MIN=0.4
   SAMPLING_T_MAX=0.65
@@ -39,6 +45,9 @@ PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
 LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/iMF-XL-2-full}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
+FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-${USE_WANDB}}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-7.5}"
@@ -115,11 +124,57 @@ fi
 if [[ -n "${GRAD_ACCUM_STEPS:-}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.training.grad_accum_steps="${GRAD_ACCUM_STEPS}")
 fi
+if [[ -n "${FORCE_FID_STEPS:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.force_fid_steps="${FORCE_FID_STEPS}")
+fi
+if [[ -n "${FORCE_FID_PER_STEP:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.force_fid_per_step="${FORCE_FID_PER_STEP}")
+fi
+if [[ -n "${METRIC_NUM_STEPS:-}" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.training.force_metric_num_steps="${METRIC_NUM_STEPS}")
+fi
 case "${SAMPLE_FIRST_DEVICE_ONLY,,}" in
   1|true|yes|y|on) CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_first_device_only=True) ;;
   0|false|no|n|off) CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_first_device_only=False) ;;
   *) echo "ERROR: SAMPLE_FIRST_DEVICE_ONLY must be boolean-like, got '$SAMPLE_FIRST_DEVICE_ONLY'." >&2; exit 2 ;;
 esac
+
+ensure_dataset_root() {
+  if [[ -d "$DATASET_ROOT" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${DATASET_ROOT}.zip" ]]; then
+    echo "ERROR: DATASET_ROOT missing and no zip fallback found: $DATASET_ROOT" >&2
+    exit 7
+  fi
+
+  local extract_lock="${DATASET_ROOT}.extract.lock"
+  if mkdir "$extract_lock" 2>/dev/null; then
+    echo "Extracting ${DATASET_ROOT}.zip into $DATASET_ROOT"
+    local extract_tmp="${DATASET_ROOT}.extracting.$$"
+    mkdir -p "$extract_tmp"
+    unzip -q "${DATASET_ROOT}.zip" -d "$extract_tmp"
+    local extracted_root
+    extracted_root="$(find "$extract_tmp" -type d -name "$(basename "$DATASET_ROOT")" | head -n 1)"
+    if [[ -z "$extracted_root" ]]; then
+      echo "ERROR: could not find $(basename "$DATASET_ROOT") inside ${DATASET_ROOT}.zip" >&2
+      rmdir "$extract_lock" 2>/dev/null || true
+      exit 7
+    fi
+    mv "$extracted_root" "$DATASET_ROOT"
+    rmdir "$extract_lock" 2>/dev/null || true
+  else
+    echo "Waiting for another job to finish extracting $DATASET_ROOT"
+    while [[ ! -d "$DATASET_ROOT" && -d "$extract_lock" ]]; do
+      sleep 30
+    done
+  fi
+
+  if [[ ! -d "$DATASET_ROOT" ]]; then
+    echo "ERROR: DATASET_ROOT missing after extraction attempt: $DATASET_ROOT" >&2
+    exit 7
+  fi
+}
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
@@ -135,6 +190,9 @@ cat <<EOF
 iMF JAX training workdir: $WORKDIR
 CONFIG_MODE: $CONFIG_MODE
 USE_WANDB: $USE_WANDB
+RUN_FINAL_BEST_FID_EVAL: $RUN_FINAL_BEST_FID_EVAL
+FINAL_EVAL_STEPS: $FINAL_EVAL_STEPS
+FINAL_EVAL_USE_WANDB: $FINAL_EVAL_USE_WANDB
 DATASET_NAME: ${DATASET_NAME}
 DATASET_ROOT: ${DATASET_ROOT}
 LOAD_FROM: ${LOAD_FROM}
@@ -148,6 +206,8 @@ WANDB_NAME: $WANDB_NAME
 WANDB_PROJECT: $WANDB_PROJECT
 EOF
 
+ensure_dataset_root
+
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
   XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
   PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
@@ -159,3 +219,21 @@ TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
     "${CONFIG_OVERRIDE_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "$WORKDIR/output.log"
+
+case "${RUN_FINAL_BEST_FID_EVAL,,}" in
+  1|true|yes|y)
+    read -r -a FINAL_EVAL_STEP_ARRAY <<< "$FINAL_EVAL_STEPS"
+    echo "Training finished. Evaluating best-FID checkpoint at steps: ${FINAL_EVAL_STEP_ARRAY[*]}"
+    CONFIG_MODE="$CONFIG_MODE" \
+      PYTHON="$PYTHON" \
+      USE_WANDB="$FINAL_EVAL_USE_WANDB" \
+      WANDB_NAME_PREFIX="$WANDB_NAME" \
+      bash scripts/eval_best_fid_steps_plain_imf.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- "${CONFIG_OVERRIDE_ARGS[@]}" "${EXTRA_ARGS[@]}"
+    ;;
+  0|false|no|n)
+    ;;
+  *)
+    echo "ERROR: RUN_FINAL_BEST_FID_EVAL must be a boolean-like value, got '$RUN_FINAL_BEST_FID_EVAL'." >&2
+    exit 2
+    ;;
+esac

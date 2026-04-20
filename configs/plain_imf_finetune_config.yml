@@ -40,19 +40,18 @@ training:
           until_step: 20000
           every_steps: 5000
         - from_step: 20000
-          every_steps: 2000
+          every_steps: 2500
+    # During training, select best_fid/ using cheap 4-step FID only.
+    # Run expensive 1/2/250-step final metrics once from the wrapper.
     metric_num_steps:
-        # - 250
-        #- 4
-        #- 2
-        - 1
+        - 4
     preview_guidance_scales:
         # - 1.0
         - 7.5
     preview_num_steps:
-        - 1
+        #- 1
         #- 2
-        #- 4
+        - 4
         #- 250
     grad_accum_steps: 4
     save_best_fid_only: True
@@ -79,7 +78,8 @@ fd_dino:
     cache_ref: '/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz'
 
 sampling:
-    num_steps: 250
+    # This is the primary metric step count used to save best_fid/.
+    num_steps: 4
     method: euler
     half_precision: False
     half_precision_dtype: float16
