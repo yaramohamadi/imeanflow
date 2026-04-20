@@ -730,10 +730,12 @@ def restore_partial_checkpoint(state, workdir, prefer_ema=True, target_model_con
 
     merged_state = merge_state(target_state, source_state)
     merged_params = serialization.from_state_dict(state.params, merged_state)
-    ema_params = jax.tree_util.tree_map(
-        lambda x: jnp.array(x, copy=True),
-        merged_params,
-    )
+    ema_params = None
+    if getattr(state, "ema_params", None) is not None:
+        ema_params = jax.tree_util.tree_map(
+            lambda x: jnp.array(x, copy=True),
+            merged_params,
+        )
     new_state = state.replace(params=merged_params, ema_params=ema_params)
 
     log_for_0(

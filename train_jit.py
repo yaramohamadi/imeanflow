@@ -17,13 +17,27 @@ from utils.ckpt_util import (
     restore_checkpoint,
     restore_eval_checkpoint,
     restore_partial_checkpoint,
+    save_best_checkpoint,
     save_checkpoint,
 )
 from utils.ema_util import ema_schedules, update_ema
+from utils.eval_csv_util import append_eval_metrics_row
 from utils.logging_util import MetricsTracker, Timer, Writer, log_for_0
 from utils.lr_utils import lr_schedules
-from utils.preview_util import make_uint8_image_grid
-from utils.sample_util import get_sampling_param_dtype, get_training_param_dtype
+from utils.preview_util import (
+    format_preview_guidance_label,
+    generate_preview_samples_first_device,
+    make_side_by_side_preview_panel,
+    make_stacked_grid_panel,
+)
+from utils.sample_util import (
+    get_image_metric_evaluator,
+    get_sample_device_batch_size,
+    get_sample_devices,
+    get_sample_local_device_count,
+    get_sampling_param_dtype,
+    get_training_param_dtype,
+)
 from utils.sit_trainstate_util import EvalState, TrainState
 
 
@@ -44,6 +58,27 @@ def infer_num_classes_from_images(dataset_root):
     if not class_dirs:
         raise ValueError(f"No class folders found under: {train_root}")
     return len(class_dirs)
+
+
+class PixelImageManager:
+    """Decode helper for pixel-space JiT samples.
+
+    The shared metric/preview utilities expect a manager whose decode method
+    returns NCHW images in [-1, 1]. JiT sampling already produces BHWC pixels, so
+    decode is just a layout conversion.
+    """
+
+    def __init__(self, batch_size, decode_num_local_devices=None):
+        self.batch_size = int(batch_size)
+        self.decode_num_local_devices = (
+            jax.local_device_count()
+            if decode_num_local_devices is None
+            else int(decode_num_local_devices)
+        )
+
+    def decode(self, images_bhwc):
+        images_bhwc = jnp.clip(images_bhwc, -1.0, 1.0)
+        return jnp.transpose(images_bhwc, (0, 3, 1, 2))
 
 
 def initialized(key, config, model):
@@ -69,11 +104,17 @@ def create_jit_train_state(rng, config, model, lr_fn):
     rng, rng_init = random.split(rng)
     _, params = initialized(rng_init, config, model)
     use_ema = config.training.get("use_ema", True)
-    ema_params = deepcopy(params)
+    ema_params = None
     if use_ema:
+        ema_params = deepcopy(params)
         ema_params = update_ema(ema_params, params, 0)
 
-    grad_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
+    grad_accum_steps = int(config.training.get("grad_accum_steps", 1))
+    grad_accum = (
+        jax.tree_util.tree_map(jnp.zeros_like, params)
+        if grad_accum_steps > 1
+        else None
+    )
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
     tx = optax.adamw(
         learning_rate=lr_fn,
@@ -119,6 +160,15 @@ def train_step(state, batch, rng_init, ema_fn, lr_fn, use_ema, grad_accum_steps)
     lr_value = lr_fn(state.step)
     metrics = compute_metrics(aux[1])
     metrics["lr"] = lr_value
+
+    if grad_accum_steps <= 1:
+        new_state = state.apply_gradients(grads=grads)
+        if use_ema:
+            ema_value = ema_fn(state.step)
+            new_ema = update_ema(new_state.ema_params, new_state.params, ema_value)
+            new_state = new_state.replace(ema_params=new_ema)
+        metrics["did_update"] = jnp.array(1.0, dtype=jnp.float32)
+        return new_state, metrics
 
     new_grad_accum = jax.tree_util.tree_map(
         lambda acc, g: acc + g,
@@ -287,32 +337,53 @@ def _set_num_classes_from_data(config):
         log_for_0("Inferred dataset.num_classes from image data: %s", inferred_num_classes)
 
 
-def _samples_to_uint8(samples):
-    samples = jnp.clip(samples, -1.0, 1.0)
-    samples = 127.5 * samples + 128.0
-    return jnp.clip(samples, 0, 255).astype(jnp.uint8)
+def _should_run_fid(current_step, training_config):
+    fid_schedule = training_config.get("fid_schedule", [])
+    if fid_schedule:
+        for schedule_item in fid_schedule:
+            from_step = int(schedule_item.get("from_step", 0))
+            until_step = schedule_item.get("until_step", None)
+            every_steps = int(schedule_item["every_steps"])
+            if current_step < from_step:
+                continue
+            if until_step is not None and current_step >= int(until_step):
+                continue
+            if (current_step - from_step) % every_steps == 0:
+                return True
+        return False
+    fid_per_step = int(training_config.get("fid_per_step", 0))
+    return fid_per_step > 0 and current_step % fid_per_step == 0
 
 
-def _preview_samples(state, p_sample_step, config, model, use_ema, num_images):
-    grid_size = int(num_images ** 0.5)
-    num_images = grid_size ** 2
-    if num_images <= 0:
-        return None
-    sample_device_batch_size = int(config.fid.get("sample_device_batch_size", 1))
-    sample_idx = jnp.arange(jax.local_device_count(), dtype=jnp.int32)
-    params = state.ema_params if use_ema else state.params
-    variable = {"params": params}
-    kwargs = jax_utils.replicate(
-        {
-            "omega": float(config.sampling.get("omega", 1.0)),
-            "t_min": float(config.sampling.get("t_min", 0.0)),
-            "t_max": float(config.sampling.get("t_max", 1.0)),
-        }
-    )
-    samples = p_sample_step(variable, sample_idx=sample_idx, **kwargs)
-    samples = samples.reshape(-1, *samples.shape[2:])
-    samples = _samples_to_uint8(samples[:num_images])
-    return make_uint8_image_grid(jax.device_get(samples), grid_size)
+def _get_metric_num_steps(config):
+    configured_steps = config.training.get("metric_num_steps", ())
+    if configured_steps:
+        num_steps = [int(step) for step in configured_steps]
+    else:
+        num_steps = [int(config.sampling.num_steps)]
+
+    primary_steps = int(config.sampling.num_steps)
+    ordered_steps = []
+    for step in [primary_steps] + num_steps:
+        if step < 1:
+            raise ValueError("Metric sampling steps must be >= 1.")
+        if step not in ordered_steps:
+            ordered_steps.append(step)
+    return tuple(ordered_steps)
+
+
+def _primary_metric_mode(use_ema):
+    return "ema" if use_ema else "online"
+
+
+def _write_eval_metrics_csv(workdir, **row):
+    append_eval_metrics_row(workdir, row)
+
+
+def _metrics_enabled(training_config):
+    if training_config.get("fid_schedule", []):
+        return True
+    return int(training_config.get("fid_per_step", 0)) > 0
 
 
 def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
@@ -321,6 +392,9 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
     writer = Writer(config, workdir)
     _set_num_classes_from_data(config)
     use_ema = config.training.get("use_ema", True)
+    sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
     model = _build_plain_jit(config, eval_mode=True)
     state = _restore_eval_state(config, model, use_ema)
     step = int(state.step)
@@ -332,21 +406,56 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
             model=model,
             rng_init=random.PRNGKey(99),
             config=config,
-            device_batch_size=int(config.fid.get("sample_device_batch_size", 1)),
+            device_batch_size=sample_device_bsz,
             num_steps=int(config.sampling.num_steps),
         ),
         axis_name="batch",
+        devices=sample_devices,
     )
-    preview = _preview_samples(
+    pixel_manager = PixelImageManager(
+        sample_device_bsz,
+        decode_num_local_devices=sample_local_device_count,
+    )
+    preview = generate_preview_samples_first_device(
         state,
         p_sample_step,
-        config,
-        model,
+        pixel_manager,
         use_ema,
-        int(config.fid.get("num_images_to_log", 16)),
+        num_samples=int(config.fid.get("num_images_to_log", 16)),
+        param_dtype=get_sampling_param_dtype(config),
+        sample_local_device_count=sample_local_device_count,
+        omega=float(config.sampling.get("omega", 1.0)),
+        t_min=float(config.sampling.get("t_min", 0.0)),
+        t_max=float(config.sampling.get("t_max", 1.0)),
     )
-    if preview is not None:
-        writer.write_images(step, {"image_grid": preview})
+    writer.write_images(step, {"image_grid": preview})
+
+    evaluator = get_image_metric_evaluator(config, writer, pixel_manager)
+    kwargs = jax_utils.replicate(
+        {
+            "omega": float(config.sampling.get("omega", 1.0)),
+            "t_min": float(config.sampling.get("t_min", 0.0)),
+            "t_max": float(config.sampling.get("t_max", 1.0)),
+        },
+        devices=sample_devices,
+    )
+    result = evaluator(state, p_sample_step, step, not use_ema, **kwargs)
+    _write_eval_metrics_csv(
+        workdir,
+        eval_phase="eval_only",
+        metric_mode=_primary_metric_mode(use_ema),
+        training_step=step,
+        sampling_num_steps=int(config.sampling.num_steps),
+        omega=float(config.sampling.get("omega", 1.0)),
+        t_min=float(config.sampling.get("t_min", 0.0)),
+        t_max=float(config.sampling.get("t_max", 1.0)),
+        fid=float(result["fid"]),
+        inception_score=float(result["is"]),
+        fd_dino="" if result.get("fd_dino") is None else float(result["fd_dino"]),
+        is_best_fid=1,
+        is_best_fd_dino=1 if result.get("fd_dino") is not None else 0,
+        checkpoint_path=os.path.abspath(config.load_from),
+    )
     return state
 
 
@@ -360,11 +469,16 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     use_ema = config.training.get("use_ema", True)
     max_train_steps = config.training.get("max_train_steps", None)
     grad_accum_steps = int(config.training.get("grad_accum_steps", 1))
+    sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
 
     log_for_0("config.training.batch_size: %s", config.training.batch_size)
     log_for_0("config.training.use_ema: %s", use_ema)
     log_for_0("config.training.max_train_steps: %s", max_train_steps)
     log_for_0("config.training.grad_accum_steps: %s", grad_accum_steps)
+    log_for_0("config.fid.sample_device_batch_size: %s", sample_device_bsz)
+    log_for_0("sampling local device count: %s", sample_local_device_count)
 
     local_batch_size = int(config.training.batch_size) // jax.process_count()
     train_loader, steps_per_epoch = input_pipeline.create_image_split(
@@ -404,16 +518,124 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             model=sample_model,
             rng_init=random.PRNGKey(99),
             config=config,
-            device_batch_size=int(config.fid.get("sample_device_batch_size", 1)),
+            device_batch_size=sample_device_bsz,
             num_steps=int(config.sampling.num_steps),
         ),
         axis_name="batch",
+        devices=sample_devices,
     )
+
+    def build_p_sample_step(num_steps):
+        return jax.pmap(
+            partial(
+                sample_step,
+                model=sample_model,
+                rng_init=random.PRNGKey(99),
+                config=config,
+                device_batch_size=sample_device_bsz,
+                num_steps=num_steps,
+            ),
+            axis_name="batch",
+            devices=sample_devices,
+        )
+
+    pixel_manager = PixelImageManager(
+        sample_device_bsz,
+        decode_num_local_devices=sample_local_device_count,
+    )
+    metric_num_steps = _get_metric_num_steps(config)
+    p_metric_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in metric_num_steps
+    }
+    log_for_0("Metric evaluation sampling steps: %s", metric_num_steps)
+
+    preview_num_steps = config.training.get("preview_num_steps", (int(config.sampling.num_steps),))
+    preview_num_steps = tuple(int(num) for num in preview_num_steps) if preview_num_steps else (int(config.sampling.num_steps),)
+    p_preview_sample_steps = {
+        num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
+    }
+    preview_guidance_scales = config.training.get("preview_guidance_scales", [])
+    preview_guidance_scales = (
+        [float(omega) for omega in preview_guidance_scales]
+        if preview_guidance_scales
+        else [float(config.sampling.get("omega", 1.0))]
+    )
+
+    def log_preview_samples(state_for_logging, step_for_logging):
+        num_images = int(config.fid.num_images_to_log)
+        grid_size = int(num_images ** 0.5)
+        num_images = grid_size ** 2
+        if num_images <= 0:
+            return
+        preview_image_groups = {}
+        for cfg_scale in preview_guidance_scales:
+            preview_kwargs = jax_utils.replicate(
+                {
+                    "omega": cfg_scale,
+                    "t_min": float(config.sampling.get("t_min", 0.0)),
+                    "t_max": float(config.sampling.get("t_max", 1.0)),
+                },
+                devices=sample_devices,
+            )
+            preview_images = {}
+            for num_steps, p_preview_step in p_preview_sample_steps.items():
+                preview_images[num_steps] = generate_preview_samples_first_device(
+                    state_for_logging,
+                    p_preview_step,
+                    pixel_manager,
+                    use_ema,
+                    num_samples=num_images,
+                    param_dtype=get_sampling_param_dtype(config),
+                    sample_local_device_count=sample_local_device_count,
+                    **preview_kwargs,
+                )
+            preview_panel = make_side_by_side_preview_panel(preview_images, grid_size)
+            preview_image_groups[
+                format_preview_guidance_label(
+                    cfg_scale,
+                    float(config.sampling.get("t_min", 0.0)),
+                    float(config.sampling.get("t_max", 1.0)),
+                )
+            ] = [preview_panel]
+        writer.write_images(
+            step_for_logging,
+            {"image_grid": make_stacked_grid_panel(preview_image_groups, 1)},
+        )
+
+    image_metric_evaluator = (
+        get_image_metric_evaluator(config, writer, pixel_manager)
+        if _metrics_enabled(config.training)
+        else None
+    )
+    best_fid_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
+    best_fd_dino_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
+    best_fid_ckpt_dir = os.path.join(
+        workdir,
+        config.training.get("best_fid_checkpoint_dir", "best_fid"),
+    )
+    eval_ckpt_dir = os.path.join(
+        workdir,
+        config.training.get("eval_checkpoint_dir", "latest_eval"),
+    )
+    metric_mode = _primary_metric_mode(use_ema)
 
     metrics_tracker = MetricsTracker()
     timer = Timer()
     should_stop = False
     log_for_0("Initial compilation, this might take some minutes...")
+
+    initial_step = int(jax.device_get(state.step)[0])
+    if initial_step == 0 and config.training.sample_per_step > 0:
+        log_preview_samples(state, 0)
+
+    sample_kwargs = jax_utils.replicate(
+        {
+            "omega": float(config.sampling.get("omega", 1.0)),
+            "t_min": float(config.sampling.get("t_min", 0.0)),
+            "t_max": float(config.sampling.get("t_max", 1.0)),
+        },
+        devices=sample_devices,
+    )
 
     for epoch in range(epoch_offset, config.training.num_epochs):
         if jax.process_count() > 1:
@@ -447,16 +669,72 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 and current_step > 0
                 and current_step % config.training.sample_per_step == 0
             ):
-                preview = _preview_samples(
-                    state,
-                    p_sample_step,
-                    config,
-                    sample_model,
-                    use_ema,
-                    int(config.fid.get("num_images_to_log", 16)),
-                )
-                if preview is not None:
-                    writer.write_images(current_step, {"image_grid": preview})
+                log_preview_samples(state, current_step)
+
+            if (
+                image_metric_evaluator is not None
+                and did_update
+                and current_step > 0
+                and _should_run_fid(current_step, config.training)
+            ):
+                checkpoint_path_for_csv = ""
+                if config.training.get("save_eval_checkpoint_per_fid", False):
+                    save_best_checkpoint(state, eval_ckpt_dir)
+                    checkpoint_path_for_csv = eval_ckpt_dir
+
+                for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
+                    log_for_0(
+                        "Running metric evaluation at step %d with %d sampling steps.",
+                        current_step,
+                        metric_num_steps,
+                    )
+                    result = image_metric_evaluator(
+                        state,
+                        p_metric_sample_step,
+                        current_step - 1,
+                        metric_suffix=f"steps_{metric_num_steps}",
+                        **sample_kwargs,
+                    )
+                    fid = result["fid"]
+                    fd_dino = result.get("fd_dino", None)
+                    is_best_fid = fid < best_fid_by_steps[metric_num_steps]
+                    is_best_fd_dino = (
+                        fd_dino is not None
+                        and fd_dino < best_fd_dino_by_steps[metric_num_steps]
+                    )
+                    if is_best_fid:
+                        best_fid_by_steps[metric_num_steps] = fid
+                    if is_best_fd_dino:
+                        best_fd_dino_by_steps[metric_num_steps] = fd_dino
+
+                    row_checkpoint_path = checkpoint_path_for_csv
+                    if (
+                        metric_num_steps == int(config.sampling.num_steps)
+                        and is_best_fid
+                    ):
+                        save_best_checkpoint(state, best_fid_ckpt_dir)
+                        row_checkpoint_path = best_fid_ckpt_dir
+
+                    _write_eval_metrics_csv(
+                        workdir,
+                        eval_phase="train",
+                        metric_mode=metric_mode,
+                        training_step=current_step,
+                        sampling_num_steps=metric_num_steps,
+                        omega=float(config.sampling.get("omega", 1.0)),
+                        t_min=float(config.sampling.get("t_min", 0.0)),
+                        t_max=float(config.sampling.get("t_max", 1.0)),
+                        fid=float(fid),
+                        inception_score=float(result["is"]),
+                        fd_dino="" if fd_dino is None else float(fd_dino),
+                        is_best_fid=int(is_best_fid),
+                        is_best_fd_dino=int(is_best_fd_dino),
+                        checkpoint_path=(
+                            os.path.abspath(row_checkpoint_path)
+                            if row_checkpoint_path
+                            else ""
+                        ),
+                    )
 
             if max_train_steps is not None and current_step >= max_train_steps:
                 should_stop = True

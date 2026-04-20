@@ -27,8 +27,8 @@ training:
     checkpoint_per_epoch: 1000000
 
     num_epochs: 200
-    max_train_steps: 30000
-    batch_size: 16
+    max_train_steps: 200 #30000
+    batch_size: 32
     use_ema: False
     learning_rate: 0.00001
     warmup_epochs: 5
@@ -37,28 +37,40 @@ training:
     ema_type: const
     ema_val: 0.9999
 
-    sample_per_step: 0
+    sample_per_step: 100 # 5000
     fid_per_step: 0
+    fid_schedule:
+        - from_step: 0
+          until_step: 20000
+          every_steps: 100 # 5000
+        - from_step: 20000
+          every_steps: 2500
     metric_num_steps:
-        - 250
+        - 4
     preview_guidance_scales:
         - 1.0
-        - 2.2
+        - 1.5
+        - 4.0
     preview_num_steps:
-        - 250
+        - 1
+        - 2
+        - 4
     grad_accum_steps: 1
-    save_best_fid_only: False
+    save_best_fid_only: True
+    best_fid_checkpoint_dir: best_fid
+    save_eval_checkpoint_per_fid: True
+    eval_checkpoint_dir: latest_eval
     half_precision: False
     half_precision_dtype: float16
 
     seed: 42
 
 fid:
-    device_batch_size: 8
-    sample_device_batch_size: 1
+    device_batch_size: 16
+    sample_device_batch_size: 32
     sample_log_every: 1
     sample_first_device_only: True
-    num_samples: 10000
+    num_samples: 100 # 10000
     cache_ref: /home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz
     num_images_to_log: 16
 
@@ -68,7 +80,7 @@ fd_dino:
     cache_ref: /home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
 
 sampling:
-    num_steps: 250
+    num_steps: 4
     method: euler
     half_precision: False
     half_precision_dtype: float16
