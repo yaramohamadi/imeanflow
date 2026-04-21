@@ -37,7 +37,7 @@ Env knobs:
   SLURM_TIME=...                     # optional single time for all jobs
   SLURM_TIME_SIT=11:00:00
   SLURM_TIME_DIT=08:00:00
-  SLURM_TIME_IMF=11:00:00
+  SLURM_TIME_IMF=14:00:00
   PYTHON_MODULE=python/3.10.13
   CUDA_MODULE=cuda/12.2
 
@@ -105,7 +105,7 @@ set_backbone_defaults() {
       TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
       BACKBONE_LABEL="imf"
       WANDB_PROJECT_FOR_JOB="${WANDB_PROJECT:-${WANDB_PROJECT_IMF:-plain_imf_finetune}}"
-      SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_IMF:-11:00:00}}"
+      SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_IMF:-14:00:00}}"
       ;;
     *)
       echo "ERROR: BACKBONES entries must be sit, dit, or imf, got '${backbone}'." >&2
