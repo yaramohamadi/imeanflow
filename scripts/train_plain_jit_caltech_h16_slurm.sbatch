@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=14:00:00
+#SBATCH --time=16:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=files/logs/plain_jit_caltech_h16_%j.out
 #SBATCH --error=files/logs/plain_jit_caltech_h16_%j.err
@@ -20,16 +20,18 @@ source .venv/bin/activate
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/$USER-matplotlib}"
 export PYTHON="${PYTHON:-.venv/bin/python}"
 
-export DATASET_NAME=caltech101
-export DATASET_ROOT=/home/ymbahram/scratch/datasets/caltech-101_images
-export FID_CACHE_REF=/home/ymbahram/scratch/fid_stats/caltech-101-fid_stats.npz
-export FD_DINO_CACHE_REF=/home/ymbahram/scratch/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
-export LOAD_FROM=/home/ymbahram/scratch/weights/JiT-H-16-256.pth
+export DATASET_NAME="${DATASET_NAME:-caltech101}"
+export DATASET_ROOT="${DATASET_ROOT:-/home/ymbahram/scratch/datasets/caltech-101_images}"
+export FID_CACHE_REF="${FID_CACHE_REF:-/home/ymbahram/scratch/fid_stats/caltech-101-fid_stats.npz}"
+export FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ymbahram/scratch/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+export LOAD_FROM="${LOAD_FROM:-/home/ymbahram/scratch/weights/JiT-H-16-256.pth}"
 
 export USE_WANDB="${USE_WANDB:-True}"
 export WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
 export RUN_LABEL="${RUN_LABEL:-caltech_h16}"
 export WANDB_NAME="${WANDB_NAME:-caltech101_plain_jit_${RUN_LABEL}}"
+export RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+export FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 50}"
 
 export HALF_PRECISION="${HALF_PRECISION:-True}"
 export HALF_PRECISION_DTYPE="${HALF_PRECISION_DTYPE:-float16}"

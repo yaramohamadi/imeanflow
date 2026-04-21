@@ -28,7 +28,7 @@ export SAMPLING_HALF_PRECISION_DTYPE="${SAMPLING_HALF_PRECISION_DTYPE:-float16}"
 export OPTIMIZER="${OPTIMIZER:-adamw}"
 export OPTIMIZER_MU_DTYPE="${OPTIMIZER_MU_DTYPE:-float16}"
 export RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
-export FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-50}"
+export FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 50}"
 export FINAL_EVAL_EXTRA_ARGS="${FINAL_EVAL_EXTRA_ARGS:---config.training.force_metric_num_steps=}"
 
 if [[ "${REQUIRE_GPU:-True}" =~ ^([Tt]rue|1|[Yy]es|[Yy]|[Oo]n)$ ]]; then

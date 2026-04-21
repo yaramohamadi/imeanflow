@@ -51,7 +51,7 @@ training:
         - from_step: 20000
           every_steps: 2500
     metric_num_steps:
-        - 50
+        - 4
     preview_guidance_scales:
         - 1
         - 2
