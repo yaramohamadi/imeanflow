@@ -30,14 +30,14 @@ Env knobs:
   SUBMIT_SLURM=False                  # True submits; DryRun writes sbatch files without submitting; False runs locally
   SLURM_ACCOUNT=def-hadi87
   SLURM_GRES=gpu:h100:1               # override if your cluster uses a different H100 GRES name
-  SLURM_MEM=48G
+  SLURM_MEM=64G
   SLURM_CPUS_PER_TASK=8
   SLURM_MAIL_USER=yara.mohammadi-bahram@livia.etsmtl.ca
   SLURM_MAIL_TYPE=BEGIN,END,FAIL
   SLURM_TIME=...                     # optional single time for all jobs
   SLURM_TIME_SIT=11:00:00
   SLURM_TIME_DIT=08:00:00
-  SLURM_TIME_IMF=14:00:00
+  SLURM_TIME_IMF=20:00:00
   PYTHON_MODULE=python/3.10.13
   CUDA_MODULE=cuda/12.2
 
@@ -68,7 +68,7 @@ printf "dataset\tbackbone\trun_label\twandb_project\twandb_name\tslurm_time\tsta
 
 SLURM_ACCOUNT="${SLURM_ACCOUNT:-def-hadi87}"
 SLURM_GRES="${SLURM_GRES:-gpu:h100:1}"
-SLURM_MEM="${SLURM_MEM:-48G}"
+SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-8}"
 SLURM_MAIL_USER="${SLURM_MAIL_USER:-yara.mohammadi-bahram@livia.etsmtl.ca}"
 SLURM_MAIL_TYPE="${SLURM_MAIL_TYPE:-BEGIN,END,FAIL}"
@@ -105,7 +105,7 @@ set_backbone_defaults() {
       TRAIN_SCRIPT="scripts/train_plain_imf_finetune.sh"
       BACKBONE_LABEL="imf"
       WANDB_PROJECT_FOR_JOB="${WANDB_PROJECT:-${WANDB_PROJECT_IMF:-plain_imf_finetune}}"
-      SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_IMF:-14:00:00}}"
+      SLURM_TIME_FOR_JOB="${SLURM_TIME:-${SLURM_TIME_IMF:-20:00:00}}"
       ;;
     *)
       echo "ERROR: BACKBONES entries must be sit, dit, or imf, got '${backbone}'." >&2

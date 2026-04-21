@@ -16,7 +16,7 @@ model:
     class_dropout_prob: 0.1
     P_mean: -0.8
     P_std: 0.8
-    t_eps: 0.00001
+    t_eps: 0.05
     noise_scale: 1.0
     attn_drop: 0.0
     proj_drop: 0.0
@@ -51,15 +51,11 @@ training:
         - from_step: 20000
           every_steps: 2500
     metric_num_steps:
-        - 4
+        - 50
     preview_guidance_scales:
-        - 1.0
-        - 1.5
-        - 4.0
+        - 2.2
     preview_num_steps:
-        - 1
-        - 2
-        - 4
+        - 50
     preview_at_step0: False
     grad_accum_steps: 1
     save_best_fid_only: True
@@ -86,8 +82,8 @@ fd_dino:
     cache_ref: /home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
 
 sampling:
-    num_steps: 4
-    method: euler
+    num_steps: 50
+    method: heun
     half_precision: False
     half_precision_dtype: float16
     omega: 2.2

@@ -287,7 +287,7 @@ def sample_step(
         t = jnp.full((current.shape[0],), t_steps[i], dtype=model.dtype)
         t_next = jnp.full((current.shape[0],), t_steps[i + 1], dtype=model.dtype)
         if method == "heun":
-            return model.apply(
+            next_sample = model.apply(
                 variable,
                 current,
                 t,
@@ -298,7 +298,8 @@ def sample_step(
                 t_max,
                 method=model.heun_step,
             )
-        return model.apply(
+            return next_sample.astype(current.dtype)
+        next_sample = model.apply(
             variable,
             current,
             t,
@@ -309,6 +310,7 @@ def sample_step(
             t_max,
             method=model.euler_step,
         )
+        return next_sample.astype(current.dtype)
 
     return jax.lax.fori_loop(0, int(num_steps), body_fn, z)
 
@@ -382,6 +384,10 @@ def _set_num_classes_from_data(config):
 
 
 def _should_run_fid(current_step, training_config):
+    force_fid_per_step = int(training_config.get("force_fid_per_step", 0) or 0)
+    if force_fid_per_step > 0:
+        return current_step % force_fid_per_step == 0
+
     fid_schedule = training_config.get("fid_schedule", [])
     if fid_schedule:
         for schedule_item in fid_schedule:
@@ -399,10 +405,24 @@ def _should_run_fid(current_step, training_config):
     return fid_per_step > 0 and current_step % fid_per_step == 0
 
 
+def _parse_int_steps(value, *, fallback=()):
+    if value is None or value == "":
+        return tuple(fallback)
+    if isinstance(value, str):
+        return tuple(int(step) for step in value.replace(",", " ").split())
+    if isinstance(value, (int, float)):
+        return (int(value),)
+    return tuple(int(step) for step in value)
+
+
 def _get_metric_num_steps(config):
+    forced_steps = str(config.training.get("force_metric_num_steps", "") or "").strip()
+    if forced_steps:
+        return _parse_int_steps(forced_steps)
+
     configured_steps = config.training.get("metric_num_steps", ())
     if configured_steps:
-        num_steps = [int(step) for step in configured_steps]
+        num_steps = list(_parse_int_steps(configured_steps))
     else:
         num_steps = [int(config.sampling.num_steps)]
 
@@ -460,6 +480,14 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         sample_device_bsz,
         decode_num_local_devices=sample_local_device_count,
     )
+    sample_kwargs = jax_utils.replicate(
+        {
+            "omega": float(config.sampling.get("omega", 1.0)),
+            "t_min": float(config.sampling.get("t_min", 0.0)),
+            "t_max": float(config.sampling.get("t_max", 1.0)),
+        },
+        devices=sample_devices,
+    )
     preview = generate_preview_samples_first_device(
         state,
         p_sample_step,
@@ -468,22 +496,12 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         num_samples=int(config.fid.get("num_images_to_log", 16)),
         param_dtype=get_sampling_param_dtype(config),
         sample_local_device_count=sample_local_device_count,
-        omega=float(config.sampling.get("omega", 1.0)),
-        t_min=float(config.sampling.get("t_min", 0.0)),
-        t_max=float(config.sampling.get("t_max", 1.0)),
+        **sample_kwargs,
     )
     writer.write_images(step, {"image_grid": preview})
 
     evaluator = get_image_metric_evaluator(config, writer, pixel_manager)
-    kwargs = jax_utils.replicate(
-        {
-            "omega": float(config.sampling.get("omega", 1.0)),
-            "t_min": float(config.sampling.get("t_min", 0.0)),
-            "t_max": float(config.sampling.get("t_max", 1.0)),
-        },
-        devices=sample_devices,
-    )
-    result = evaluator(state, p_sample_step, step, not use_ema, **kwargs)
+    result = evaluator(state, p_sample_step, step, not use_ema, **sample_kwargs)
     _write_eval_metrics_csv(
         workdir,
         eval_phase="eval_only",
@@ -608,8 +626,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     }
     log_for_0("Metric evaluation sampling steps: %s", metric_num_steps)
 
-    preview_num_steps = config.training.get("preview_num_steps", (int(config.sampling.num_steps),))
-    preview_num_steps = tuple(int(num) for num in preview_num_steps) if preview_num_steps else (int(config.sampling.num_steps),)
+    preview_num_steps = _parse_int_steps(
+        config.training.get("preview_num_steps", ()),
+        fallback=(int(config.sampling.num_steps),),
+    )
     p_preview_sample_steps = {
         num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
     }
