@@ -48,7 +48,7 @@ bash scripts/train_plain_jit_finetune.sh "$RUN_LABEL" \
   --config.training.fid_per_step=10 \
   --config.training.force_fid_per_step=10 \
   --config.training.force_metric_num_steps=4 \
-  --config.training.preview_num_steps=4 \
+  --config.training.preview_num_steps='(4,)' \
   --config.sampling.num_steps=4 \
   --config.fid.num_samples=100 \
   --config.fid.num_images_to_log=16 \
