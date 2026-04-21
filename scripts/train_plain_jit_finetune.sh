@@ -23,7 +23,7 @@ Optional env vars:
   SAMPLING_HALF_PRECISION=True
   SAMPLING_HALF_PRECISION_DTYPE=float16
   GUIDANCE_SCALE=2.2
-  OPTIMIZER=lion                # lion is lower-memory; adamw is available by override
+  OPTIMIZER=adamw               # official JiT default; lion is available by override
   OPTIMIZER_MU_DTYPE=float16
   RUN_FINAL_BEST_FID_EVAL=True
   FINAL_EVAL_STEPS="50 2 1"
@@ -51,7 +51,7 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.2}"
-OPTIMIZER="${OPTIMIZER:-lion}"
+OPTIMIZER="${OPTIMIZER:-adamw}"
 OPTIMIZER_MU_DTYPE="${OPTIMIZER_MU_DTYPE:-float16}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-50 2 1}"

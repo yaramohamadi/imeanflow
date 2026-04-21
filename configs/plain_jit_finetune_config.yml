@@ -19,7 +19,7 @@ model:
     t_eps: 0.05
     noise_scale: 1.0
     attn_drop: 0.0
-    proj_drop: 0.0
+    proj_drop: 0.2
     uses_classifier_free_guidance: True
 
 training:
@@ -30,11 +30,11 @@ training:
     max_train_steps: 30000
     batch_size: 32
     use_ema: False
-    learning_rate: 0.00001
+    learning_rate: 0.00000625
     warmup_epochs: 5
 
     adam_b2: 0.95
-    optimizer: lion
+    optimizer: adamw
     optimizer_mu_dtype: float16
     weight_decay: 0.0
     lion_b2: 0.99
@@ -56,7 +56,7 @@ training:
         - 2.2
     preview_num_steps:
         - 50
-    preview_at_step0: False
+    preview_at_step0: True
     grad_accum_steps: 1
     save_best_fid_only: True
     best_fid_checkpoint_dir: best_fid
