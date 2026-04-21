@@ -188,6 +188,7 @@ def create_jit_eval_state(rng, config, model):
 def train_step(state, batch, rng_init, ema_fn, lr_fn, use_ema, grad_accum_steps):
     rng_step = random.fold_in(rng_init, state.step)
     rng_base = random.fold_in(rng_step, lax.axis_index(axis_name="batch"))
+    rng_gen, rng_dropout = random.split(rng_base)
     images = batch["image"]
     labels = batch["label"]
 
@@ -196,7 +197,7 @@ def train_step(state, batch, rng_init, ema_fn, lr_fn, use_ema, grad_accum_steps)
             {"params": params},
             images=images,
             labels=labels,
-            rngs=dict(gen=rng_base),
+            rngs=dict(gen=rng_gen, dropout=rng_dropout),
         )
 
     aux, grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)

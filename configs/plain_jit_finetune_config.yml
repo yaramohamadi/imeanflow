@@ -53,8 +53,12 @@ training:
     metric_num_steps:
         - 50
     preview_guidance_scales:
-        - 2.2
+        - 1
+        - 2
+        - 4
     preview_num_steps:
+        - 1
+        - 4
         - 50
     preview_at_step0: True
     grad_accum_steps: 1
