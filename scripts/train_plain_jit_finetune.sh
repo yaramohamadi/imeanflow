@@ -14,16 +14,19 @@ Optional env vars:
   DATASET_ROOT=/path/to/root         # pixel ImageFolder root with train/<class>
   FID_CACHE_REF=/path/to/ref.npz
   FD_DINO_CACHE_REF=/path/to/ref.npz
-  LOAD_FROM=/path/to/JiT-H-16-256.pth
-  SAMPLE_DEVICE_BATCH_SIZE=1
-  SAMPLE_FIRST_DEVICE_ONLY=True
+  LOAD_FROM=/path/to/JiT-L-16-256.pth
+  SAMPLE_DEVICE_BATCH_SIZE=8       # optional; unset keeps config.fid.sample_device_batch_size
+  SAMPLE_FIRST_DEVICE_ONLY=False
+  TRAIN_BATCH_SIZE=16              # optional; unset keeps config.training.batch_size
   HALF_PRECISION=True
   HALF_PRECISION_DTYPE=float16
   SAMPLING_HALF_PRECISION=True
   SAMPLING_HALF_PRECISION_DTYPE=float16
   GUIDANCE_SCALE=2.2
+  OPTIMIZER=lion                # lion is lower-memory; adamw is available by override
+  OPTIMIZER_MU_DTYPE=float16
   RUN_FINAL_BEST_FID_EVAL=True
-  FINAL_EVAL_STEPS="250 2 1"
+  FINAL_EVAL_STEPS="50 2 1"
   FINAL_EVAL_USE_WANDB=True
   WANDB_PROJECT=plain_jit_finetune
   WANDB_NAME=caltech101_plain_jit_base
@@ -39,16 +42,19 @@ CONFIG_MODE="${CONFIG_MODE:-plain_jit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
-LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/JiT-H-16-256.pth}"
+LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/JiT-L-16-256.pth}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
 SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
-SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-True}"
-SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-1}"
+SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
+SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.2}"
+OPTIMIZER="${OPTIMIZER:-lion}"
+OPTIMIZER_MU_DTYPE="${OPTIMIZER_MU_DTYPE:-float16}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
-FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-250 2 1}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-50 2 1}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-$USE_WANDB}"
 CONFIG_OVERRIDE_ARGS=()
 
@@ -99,7 +105,19 @@ CONFIG_OVERRIDE_ARGS+=(--config.dataset.root="${DATASET_ROOT}")
 CONFIG_OVERRIDE_ARGS+=(--config.fid.cache_ref="${FID_CACHE_REF}")
 CONFIG_OVERRIDE_ARGS+=(--config.fd_dino.cache_ref="${FD_DINO_CACHE_REF}")
 CONFIG_OVERRIDE_ARGS+=(--config.load_from="${LOAD_FROM}")
-CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_device_batch_size="${SAMPLE_DEVICE_BATCH_SIZE}")
+if [[ -n "$SAMPLE_DEVICE_BATCH_SIZE" ]]; then
+  CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_device_batch_size="${SAMPLE_DEVICE_BATCH_SIZE}")
+fi
+if [[ -n "$TRAIN_BATCH_SIZE" ]]; then
+  if [[ "$TRAIN_BATCH_SIZE" = "auto" ]]; then
+    TRAIN_BATCH_SIZE="$("$PYTHON" - <<'PY'
+import jax
+print(jax.local_device_count())
+PY
+)"
+  fi
+  CONFIG_OVERRIDE_ARGS+=(--config.training.batch_size="${TRAIN_BATCH_SIZE}")
+fi
 
 case "${SAMPLE_FIRST_DEVICE_ONLY,,}" in
   1|true|yes|y|on) CONFIG_OVERRIDE_ARGS+=(--config.fid.sample_first_device_only=True) ;;
@@ -124,6 +142,8 @@ if [[ -n "${SAMPLING_HALF_PRECISION_DTYPE:-}" ]]; then
 fi
 CONFIG_OVERRIDE_ARGS+=(--config.sampling.omega="${GUIDANCE_SCALE}")
 CONFIG_OVERRIDE_ARGS+=(--config.sampling.cfg_scale="${GUIDANCE_SCALE}")
+CONFIG_OVERRIDE_ARGS+=(--config.training.optimizer="${OPTIMIZER}")
+CONFIG_OVERRIDE_ARGS+=(--config.training.optimizer_mu_dtype="${OPTIMIZER_MU_DTYPE}")
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
@@ -142,11 +162,14 @@ FINAL_EVAL_USE_WANDB: $FINAL_EVAL_USE_WANDB
 DATASET_NAME: ${DATASET_NAME}
 DATASET_ROOT override: ${DATASET_ROOT}
 LOAD_FROM override: ${LOAD_FROM}
-SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE}
+SAMPLE_DEVICE_BATCH_SIZE override: ${SAMPLE_DEVICE_BATCH_SIZE:-<config default>}
 SAMPLE_FIRST_DEVICE_ONLY override: ${SAMPLE_FIRST_DEVICE_ONLY}
+TRAIN_BATCH_SIZE override: ${TRAIN_BATCH_SIZE:-<config default>}
 HALF_PRECISION override: ${HALF_PRECISION}
 SAMPLING_HALF_PRECISION override: ${SAMPLING_HALF_PRECISION}
 GUIDANCE_SCALE override: ${GUIDANCE_SCALE}
+OPTIMIZER override: ${OPTIMIZER}
+OPTIMIZER_MU_DTYPE override: ${OPTIMIZER_MU_DTYPE}
 WANDB_NAME: $WANDB_NAME
 WANDB_PROJECT: $WANDB_PROJECT
 EOF

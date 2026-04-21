@@ -116,11 +116,7 @@ def create_jit_train_state(rng, config, model, lr_fn):
         else None
     )
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
-    tx = optax.adamw(
-        learning_rate=lr_fn,
-        weight_decay=0,
-        b2=config.training.adam_b2,
-    )
+    tx = _create_optimizer(config, lr_fn)
     return TrainState.create(
         apply_fn=partial(model.apply, method=model.forward),
         params=params,
@@ -129,6 +125,54 @@ def create_jit_train_state(rng, config, model, lr_fn):
         grad_accum_step=grad_accum_step,
         tx=tx,
     )
+
+
+def _optional_optimizer_dtype(dtype_name):
+    if dtype_name is None or dtype_name == "":
+        return None
+    dtype_name = str(dtype_name).lower()
+    if dtype_name in ("fp16", "float16"):
+        return jnp.float16
+    if dtype_name in ("bf16", "bfloat16"):
+        return jnp.bfloat16
+    if dtype_name in ("fp32", "float32"):
+        return jnp.float32
+    raise ValueError(
+        "optimizer state dtype must be one of float16/fp16, bfloat16/bf16, "
+        f"float32/fp32, or empty. Got {dtype_name!r}."
+    )
+
+
+def _create_optimizer(config, lr_fn):
+    optimizer = str(config.training.get("optimizer", "adamw")).lower()
+    weight_decay = float(config.training.get("weight_decay", 0.0))
+    mu_dtype = _optional_optimizer_dtype(
+        config.training.get("optimizer_mu_dtype", None)
+    )
+    if optimizer == "adamw":
+        return optax.adamw(
+            learning_rate=lr_fn,
+            weight_decay=weight_decay,
+            b2=config.training.adam_b2,
+            mu_dtype=mu_dtype,
+        )
+    if optimizer == "lion":
+        return optax.lion(
+            learning_rate=lr_fn,
+            weight_decay=weight_decay,
+            b2=float(config.training.get("lion_b2", 0.99)),
+            mu_dtype=mu_dtype,
+        )
+    if optimizer == "sgd":
+        momentum = config.training.get("sgd_momentum", None)
+        if momentum is not None:
+            momentum = float(momentum)
+        return optax.sgd(
+            learning_rate=lr_fn,
+            momentum=momentum,
+            accumulator_dtype=mu_dtype,
+        )
+    raise ValueError(f"Unsupported JiT optimizer: {optimizer!r}")
 
 
 def create_jit_eval_state(rng, config, model):
@@ -481,6 +525,21 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     log_for_0("sampling local device count: %s", sample_local_device_count)
 
     local_batch_size = int(config.training.batch_size) // jax.process_count()
+    if local_batch_size < jax.local_device_count():
+        raise ValueError(
+            "config.training.batch_size is too small for pmap: "
+            f"global batch {config.training.batch_size}, process_count "
+            f"{jax.process_count()}, local batch {local_batch_size}, local devices "
+            f"{jax.local_device_count()}. Use at least one sample per local GPU "
+            "or run scripts/train_plain_jit_finetune.sh with TRAIN_BATCH_SIZE=auto."
+        )
+    if local_batch_size % jax.local_device_count() != 0:
+        raise ValueError(
+            "config.training.batch_size must make the per-host batch divisible by "
+            f"local devices: global batch {config.training.batch_size}, "
+            f"process_count {jax.process_count()}, local batch {local_batch_size}, "
+            f"local devices {jax.local_device_count()}."
+        )
     train_loader, steps_per_epoch = input_pipeline.create_image_split(
         config.dataset,
         local_batch_size,
@@ -625,7 +684,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     log_for_0("Initial compilation, this might take some minutes...")
 
     initial_step = int(jax.device_get(state.step)[0])
-    if initial_step == 0 and config.training.sample_per_step > 0:
+    if (
+        initial_step == 0
+        and config.training.sample_per_step > 0
+        and config.training.get("preview_at_step0", False)
+    ):
         log_preview_samples(state, 0)
 
     sample_kwargs = jax_utils.replicate(
@@ -643,7 +706,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         log_for_0("epoch %s...", epoch)
         timer.reset()
         for n_batch, batch in enumerate(train_loader):
-            batch = input_pipeline.prepare_batch_data(batch)
+            batch = input_pipeline.prepare_batch_data(batch, batch_size=local_batch_size)
             state, metrics = p_train_step(state, batch)
             current_step = int(jax.device_get(state.step)[0])
             did_update = bool(jax.device_get(metrics["did_update"])[0])

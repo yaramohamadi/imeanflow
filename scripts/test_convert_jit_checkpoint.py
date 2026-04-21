@@ -57,7 +57,12 @@ def main():
     parser.add_argument(
         "--check-target-shapes",
         action="store_true",
-        help="Also initialize flaxJiT_H_16 and verify every converted leaf shape.",
+        help="Also initialize the requested Flax JiT model and verify converted leaf shapes.",
+    )
+    parser.add_argument(
+        "--model-str",
+        default="flaxJiT_H_16",
+        help="Flax JiT model factory to use for --check-target-shapes.",
     )
     args = parser.parse_args()
 
@@ -97,7 +102,7 @@ def main():
         from plain_jit import PlainJiT
 
         model = PlainJiT(
-            model_str="flaxJiT_H_16",
+            model_str=args.model_str,
             input_size=256,
             in_channels=3,
             num_classes=1000,

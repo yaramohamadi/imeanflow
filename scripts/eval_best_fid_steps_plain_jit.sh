@@ -7,7 +7,7 @@ Usage: CONFIG_MODE=plain_jit_finetune bash scripts/eval_best_fid_steps_plain_jit
 
 Example:
   CONFIG_MODE=plain_jit_finetune bash scripts/eval_best_fid_steps_plain_jit.sh \
-    files/logs/finetuning/plain_JiT_finetune_caltech101_baseline_20260420_ab12cd 250 2 1
+    files/logs/finetuning/plain_JiT_finetune_caltech101_baseline_20260420_ab12cd 50 2 1
 
 If the first argument points to the run directory, the script assumes the checkpoint is under <run_dir>/best_fid.
 If the first argument points to the best_fid directory itself, it uses that directly.
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#STEPS[@]} -eq 0 ]]; then
-  STEPS=(250 2 1)
+  STEPS=(50 2 1)
 fi
 
 CONFIG_MODE="${CONFIG_MODE:-plain_jit_finetune}"

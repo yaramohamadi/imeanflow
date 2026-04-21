@@ -85,6 +85,13 @@ def prepare_batch_data(batch, batch_size=None):
     # reshape (host_batch_size, 3, height, width) to
     # (local_devices, device_batch_size, height, width, 3)
     local_device_count = jax.local_device_count()
+    if image.shape[0] % local_device_count != 0:
+        raise ValueError(
+            "Batch size on this host must be divisible by jax.local_device_count(): "
+            f"got host batch {image.shape[0]} and {local_device_count} local devices. "
+            "For pmap training, set training.batch_size to at least one sample per "
+            "local GPU, e.g. use TRAIN_BATCH_SIZE=auto in train_plain_jit_finetune.sh."
+        )
     image = image.permute(0, 2, 3, 1)
     image = image.reshape((local_device_count, -1) + image.shape[1:])
     label = label.reshape(local_device_count, -1)
