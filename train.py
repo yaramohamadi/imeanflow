@@ -11,7 +11,6 @@ import torch
 from flax import jax_utils
 from jax import lax, random
 from functools import partial
-from optax._src.alias import *
 from PIL import Image, ImageDraw
 
 from imf import iMeanFlow, generate
@@ -724,8 +723,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         log_for_0("epoch {}...".format(epoch))
         timer.reset()
         for n_batch, batch in enumerate(train_loader):
-            micro_step = epoch * steps_per_epoch + n_batch
-
             batch = input_pipeline.prepare_batch_data(batch)
             state, metrics = p_train_step(state, batch)
             current_step = int(jax.device_get(state.step)[0])

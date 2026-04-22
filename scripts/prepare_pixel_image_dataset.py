@@ -10,7 +10,6 @@ one-folder archive wrappers are flattened.
 """
 
 import argparse
-import os
 import shutil
 import tempfile
 import zipfile

@@ -590,18 +590,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     )
 
     sample_model = _build_plain_jit(config, eval_mode=True)
-    p_sample_step = jax.pmap(
-        partial(
-            sample_step,
-            model=sample_model,
-            rng_init=random.PRNGKey(99),
-            config=config,
-            device_batch_size=sample_device_bsz,
-            num_steps=int(config.sampling.num_steps),
-        ),
-        axis_name="batch",
-        devices=sample_devices,
-    )
 
     def build_p_sample_step(num_steps):
         return jax.pmap(

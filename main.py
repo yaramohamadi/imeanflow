@@ -45,10 +45,13 @@ def main(argv):
     log_for_0("JAX local devices: %r", jax.local_devices())
     log_for_0("FLAGS.config: \n{}".format(FLAGS.config))
 
-    if FLAGS.config.eval_only:
-        train.just_evaluate(FLAGS.config, FLAGS.workdir)
-    else:
-        train.train_and_evaluate(FLAGS.config, FLAGS.workdir)
+    try:
+        if FLAGS.config.eval_only:
+            train.just_evaluate(FLAGS.config, FLAGS.workdir)
+        else:
+            train.train_and_evaluate(FLAGS.config, FLAGS.workdir)
+    finally:
+        logging_util.close_wandb()
 
 
 if __name__ == "__main__":

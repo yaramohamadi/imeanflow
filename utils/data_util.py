@@ -129,7 +129,6 @@ def compute_latent_dataset(
     imagenet_root, output_dir, vae_type, batch_size, image_size, overwrite=False
 ):
     """Compute and save latent dataset from ImageNet."""
-    from torchvision import datasets
     from tqdm import tqdm
 
     from utils.logging_util import log_for_0

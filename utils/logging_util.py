@@ -1,6 +1,7 @@
 import logging as _logging
 import time, os
 import shutil
+from collections import deque
 
 import jax
 from absl import logging
@@ -119,24 +120,160 @@ class Writer:
         if jax.process_index() != 0:
             return
         self.workdir = workdir
-        kwargs = {}
+        self._wandb_requested = bool(config.logging.use_wandb)
+        self.use_wandb = False
+        self._wandb_config = config.to_dict()
+        self._wandb_init_kwargs = {
+            "name": config.logging.wandb_name if config.logging.wandb_name else None,
+            "project": config.logging.wandb_project,
+            "entity": config.logging.wandb_entity if config.logging.wandb_entity else None,
+            "notes": config.logging.wandb_notes if config.logging.wandb_notes else None,
+            "tags": config.logging.wandb_tags if config.logging.wandb_tags else None,
+            "dir": "/tmp",  # avoid writing to workdir
+            "settings": wandb.Settings(_service_wait=60),
+        }
+        self._wandb_run_id = None
+        self._wandb_retry_count = 0
+        self._wandb_max_retries = int(
+            config.logging.get("wandb_max_retries", 3)
+        )
+        self._wandb_retry_cooldown_seconds = float(
+            config.logging.get("wandb_retry_cooldown_seconds", 300)
+        )
+        self._wandb_retry_after = 0.0
+        self._pending_eval_wandb_logs = deque(
+            maxlen=int(config.logging.get("wandb_eval_replay_buffer_size", 100))
+        )
 
-        self.use_wandb = config.logging.use_wandb
-
-        if self.use_wandb:
-            wandb.init(
-                name=config.logging.wandb_name if config.logging.wandb_name else None,
-                project=config.logging.wandb_project,
-                entity=config.logging.wandb_entity if config.logging.wandb_entity else None,
-                notes=config.logging.wandb_notes if config.logging.wandb_notes else None,
-                tags=config.logging.wandb_tags if config.logging.wandb_tags else None,
-                dir="/tmp",  # avoid writing to workdir
-                settings=wandb.Settings(_service_wait=60),
-                **kwargs,
-            )
-            wandb.config.update(config.to_dict(), allow_val_change=True)
+        if self._wandb_requested:
+            self._init_wandb(resume=False)
         else:
             log_for_0("Wandb logging is disabled. Images will be saved to disk.")
+
+    def _init_wandb(self, resume):
+        kwargs = dict(self._wandb_init_kwargs)
+        if resume and self._wandb_run_id:
+            kwargs["id"] = self._wandb_run_id
+            kwargs["resume"] = "allow"
+
+        try:
+            run = wandb.init(**kwargs)
+            self._wandb_run_id = getattr(run, "id", None) or getattr(
+                wandb.run, "id", None
+            )
+            wandb.config.update(self._wandb_config, allow_val_change=True)
+        except Exception as exc:
+            self._pause_wandb_after_error(exc)
+            return False
+
+        self.use_wandb = True
+        return True
+
+    def _pause_wandb_after_error(self, exc):
+        self.use_wandb = False
+        self._wandb_retry_count += 1
+        self._wandb_retry_after = time.time() + self._wandb_retry_cooldown_seconds
+        logging.warning(
+            "Pausing W&B logging after error: %s: %s. Retry %d/%d after %.0f seconds.",
+            type(exc).__name__,
+            exc,
+            self._wandb_retry_count,
+            self._wandb_max_retries,
+            self._wandb_retry_cooldown_seconds,
+        )
+
+    def _maybe_resume_wandb(self):
+        if self.use_wandb:
+            return True
+        if not self._wandb_requested:
+            return False
+        if self._wandb_retry_count >= self._wandb_max_retries:
+            return False
+        if time.time() < self._wandb_retry_after:
+            return False
+
+        logging.info(
+            "Attempting to resume W&B logging for run id %s.",
+            self._wandb_run_id,
+        )
+        try:
+            wandb.finish()
+        except Exception:
+            pass
+        return self._init_wandb(resume=True)
+
+    def _safe_wandb_log(self, payload, step):
+        if not self._maybe_resume_wandb():
+            return False
+        try:
+            wandb.log(payload, step=step)
+        except Exception as exc:
+            self._pause_wandb_after_error(exc)
+            return False
+        return True
+
+    @staticmethod
+    def _is_eval_metric_payload(payload):
+        if not isinstance(payload, dict):
+            return False
+        eval_key_fragments = (
+            "fid",
+            "fd_dino",
+            "inception",
+            "sampling_num_steps",
+            "best_is",
+        )
+        return any(
+            any(fragment in str(key).lower() for fragment in eval_key_fragments)
+            for key in payload
+        )
+
+    def _buffer_eval_wandb_log(self, payload, step):
+        if not self._wandb_requested or self._pending_eval_wandb_logs.maxlen == 0:
+            return
+        self._pending_eval_wandb_logs.append((step, dict(payload)))
+        logging.warning(
+            "Buffered eval metric payload for W&B replay at step %s. Pending eval logs: %d.",
+            step,
+            len(self._pending_eval_wandb_logs),
+        )
+
+    def _flush_pending_eval_wandb_logs(self):
+        if not self._pending_eval_wandb_logs:
+            return True
+        if not self._maybe_resume_wandb():
+            return False
+
+        while self._pending_eval_wandb_logs:
+            step, payload = self._pending_eval_wandb_logs.popleft()
+            try:
+                wandb.log(payload, step=step)
+            except Exception as exc:
+                self._pending_eval_wandb_logs.appendleft((step, payload))
+                self._pause_wandb_after_error(exc)
+                return False
+        return True
+
+    def _safe_wandb_log_with_replay(self, payload, step):
+        buffer_on_failure = self._wandb_requested and self._is_eval_metric_payload(payload)
+        if not self._maybe_resume_wandb():
+            if buffer_on_failure:
+                self._buffer_eval_wandb_log(payload, step)
+            return False
+
+        if not self._flush_pending_eval_wandb_logs():
+            if buffer_on_failure:
+                self._buffer_eval_wandb_log(payload, step)
+            return False
+
+        try:
+            wandb.log(payload, step=step)
+        except Exception as exc:
+            self._pause_wandb_after_error(exc)
+            if buffer_on_failure:
+                self._buffer_eval_wandb_log(payload, step)
+            return False
+        return True
 
     @staticmethod
     def _to_pil_image(v):
@@ -160,17 +297,16 @@ class Writer:
             log_str += f" {k}={v:.5g}," if isinstance(v, float) else f" {k}={v},"
         log_str = log_str.strip(",")
         logging.info(log_str)
-        if self.use_wandb:
-            wandb.log(scalar_dict, step=step)
+        self._safe_wandb_log_with_replay(scalar_dict, step=step)
 
     def write_images(self, step, image_dict):
         if jax.process_index() != 0:
             return
 
-        if self.use_wandb:
-            wandb.log(
+        if self._maybe_resume_wandb():
+            self._safe_wandb_log(
                 {k: wandb.Image(self._to_pil_image(v)) for k, v in image_dict.items()},
-                step=step,
+                step,
             )
         else:
             if not os.path.exists(f"{self.workdir}/images/"):
@@ -193,16 +329,42 @@ class Writer:
             y = (i // grid_size) * images[0].height
             grid_image.paste(img, (x, y))
 
-        if self.use_wandb:
-            wandb.log({key: wandb.Image(grid_image)}, step=step)
+        if self._maybe_resume_wandb():
+            self._safe_wandb_log({key: wandb.Image(grid_image)}, step)
         else:
             if not os.path.exists(f"{self.workdir}/image_grids/"):
                 os.makedirs(f"{self.workdir}/image_grids/")
             grid_image.save(f"{self.workdir}/image_grids/{key}_{step}.png")
 
-    def __del__(self):
+    def close(self):
         if jax.process_index() != 0:
             return
         if self.use_wandb:
-            wandb.finish()
-            shutil.rmtree("/tmp/wandb", ignore_errors=True)
+            try:
+                wandb.finish()
+            except Exception as exc:
+                logging.warning(
+                    "Ignoring W&B finish error: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            finally:
+                self.use_wandb = False
+        shutil.rmtree("/tmp/wandb", ignore_errors=True)
+
+    def __del__(self):
+        return
+
+
+def close_wandb():
+    if jax.process_index() != 0:
+        return
+    try:
+        wandb.finish()
+    except Exception as exc:
+        logging.warning(
+            "Ignoring W&B finish error: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+    shutil.rmtree("/tmp/wandb", ignore_errors=True)

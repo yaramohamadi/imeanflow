@@ -120,7 +120,6 @@ def create_latent_split(dataset_cfg, batch_size, split):
     """
     # copied from our FM repo
     assert split == "train"
-    name = dataset_cfg.name.upper()
     ds = LatentDataset(
         root=os.path.join(dataset_cfg.root, split),
         use_flip=True,

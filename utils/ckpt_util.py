@@ -128,7 +128,6 @@ def _slice_patchwise_output_channels(weight, bias, *, patch_size, target_out_cha
 def _convert_qkv(weight, bias):
     w = _to_numpy(weight)
     b = _to_numpy(bias)
-    hidden = w.shape[1]
     q, k, v = np.split(w, 3, axis=0)
     qb, kb, vb = np.split(b, 3, axis=0)
     return (

@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DATASETS="${DATASETS:-caltech101 artbench10 cub200 food101 stanfordcars}"
+EXTRA_ARGS=("$@")
 SLURM_SCRIPT="${SLURM_SCRIPT:-scripts/train_plain_jit_caltech_h16_slurm.sbatch}"
 WEIGHTS="${WEIGHTS:-/home/ymbahram/scratch/weights/JiT-H-16-256.pth}"
 USE_WANDB="${USE_WANDB:-True}"
@@ -90,6 +91,22 @@ for dataset in $DATASETS; do
     "RUN_FINAL_BEST_FID_EVAL=$RUN_FINAL_BEST_FID_EVAL"
     "FINAL_EVAL_STEPS=$FINAL_EVAL_STEPS"
   )
+  for optional_var in \
+    FINAL_EVAL_USE_WANDB \
+    HALF_PRECISION \
+    HALF_PRECISION_DTYPE \
+    SAMPLING_HALF_PRECISION \
+    SAMPLING_HALF_PRECISION_DTYPE \
+    SAMPLE_DEVICE_BATCH_SIZE \
+    SAMPLE_FIRST_DEVICE_ONLY \
+    TRAIN_BATCH_SIZE \
+    OPTIMIZER \
+    OPTIMIZER_MU_DTYPE
+  do
+    if [[ -v "$optional_var" ]]; then
+      export_args+=("${optional_var}=${!optional_var}")
+    fi
+  done
   export_arg=$(IFS=,; echo "${export_args[*]}")
 
   cmd=(
@@ -99,6 +116,7 @@ for dataset in $DATASETS; do
     --error="$ERR_LOG"
     --export="$export_arg"
     "$SLURM_SCRIPT"
+    "${EXTRA_ARGS[@]}"
   )
 
   if [[ "${DRY_RUN,,}" =~ ^(1|true|yes|y|on)$ ]]; then

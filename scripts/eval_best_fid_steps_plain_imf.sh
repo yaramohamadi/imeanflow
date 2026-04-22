@@ -41,7 +41,7 @@ fi
 
 CONFIG_MODE="${CONFIG_MODE:-plain_imf_finetune}"
 PYTHON="${PYTHON:-python3}"
-USE_WANDB="${USE_WANDB:-True}"
+USE_WANDB="${USE_WANDB:-False}"
 WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-}"
 
 if [[ -d "$BEST_FID_ROOT" && $(basename "$BEST_FID_ROOT") != "best_fid" ]]; then

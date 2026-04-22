@@ -20,7 +20,7 @@ Optional env vars:
   SAMPLE_FIRST_DEVICE_ONLY=False
   RUN_FINAL_BEST_FID_EVAL=True       # run post-training best-checkpoint eval
   FINAL_EVAL_STEPS="1 2 250"         # final best-checkpoint FID/FD-DINO/IS evals
-  FINAL_EVAL_USE_WANDB=True          # defaults to USE_WANDB
+  FINAL_EVAL_USE_WANDB=False         # final eval defaults to local CSV only
   FORCE_FID_STEPS="5"                # optional: exact space-separated train steps for FID
   FORCE_FID_PER_STEP=5               # optional: ignore config fid_schedule and run FID every N steps
   METRIC_NUM_STEPS="4"               # optional: space-separated sampling step counts for FID
@@ -47,7 +47,7 @@ LOG_DIR="${LOG_DIR:-files/logs}"
 LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
-FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-${USE_WANDB}}"
+FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-False}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-7.5}"
