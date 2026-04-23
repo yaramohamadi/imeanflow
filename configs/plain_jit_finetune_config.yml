@@ -30,7 +30,7 @@ training:
     max_train_steps: 30000
     batch_size: 32
     use_ema: False
-    learning_rate: 0.00000625
+    learning_rate: 0.00005
     warmup_epochs: 5
 
     adam_b2: 0.95
@@ -86,7 +86,7 @@ fd_dino:
     cache_ref: /home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
 
 sampling:
-    num_steps: 50
+    num_steps: 4
     method: heun
     half_precision: False
     half_precision_dtype: float16
