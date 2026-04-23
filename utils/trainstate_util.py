@@ -76,6 +76,7 @@ def create_train_state(
     needs_source_params = (
         config.model.get("use_dogfit", False)
         or config.training.get("capture_source_from_load", False)
+        or config.model.get("training_mode", "imf_jvp") == "imf_jvp_free_src_reg"
     )
     if needs_source_params:
         source_params = deepcopy(params)

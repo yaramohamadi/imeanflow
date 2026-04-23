@@ -11,10 +11,10 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/$USER-matplotlib}"
 export PYTHON="${PYTHON:-.venv/bin/python}"
 
 export DATASET_NAME=caltech101
-export DATASET_ROOT=/home/ymbahram/scratch/datasets/caltech-101_images
-export FID_CACHE_REF=/home/ymbahram/scratch/fid_stats/caltech-101-fid_stats.npz
-export FD_DINO_CACHE_REF=/home/ymbahram/scratch/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
-export LOAD_FROM=/home/ymbahram/scratch/weights/JiT-H-16-256.pth
+export DATASET_ROOT=/home/ens/AT74470/datasets/caltech-101_images
+export FID_CACHE_REF=/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz
+export FD_DINO_CACHE_REF=/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
+export LOAD_FROM=/home/ens/AT74470/imeanflow/files/weights/JiT-H-16-256.pth
 
 export USE_WANDB="${USE_WANDB:-True}"
 export WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"

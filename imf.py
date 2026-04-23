@@ -70,6 +70,7 @@ class iMeanFlow(nn.Module):
     data_proportion: float = 0.5
     cfg_beta: float = 1.0
     class_dropout_prob: float = 0.1
+    training_mode: str = "imf_jvp"
     use_dogfit: bool = False
     target_use_null_class: bool = True
     source_prediction_space: str = "v"
@@ -122,11 +123,17 @@ class iMeanFlow(nn.Module):
             )
             net_kwargs["time_conditioning_mode"] = self.time_conditioning_mode
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
-        if self.use_dogfit:
+        if self.use_dogfit or self._uses_src_reg_training_mode():
+            source_num_classes = (
+                self.source_num_classes
+                if self.use_dogfit
+                else self.num_classes
+            )
+            source_use_null_class = True if self.use_dogfit else self.target_use_null_class
             source_net_kwargs = dict(
                 name="source_net",
-                num_classes=self.source_num_classes,
-                use_null_class=True,
+                num_classes=source_num_classes,
+                use_null_class=source_use_null_class,
                 eval=False,
             )
             if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
@@ -149,6 +156,9 @@ class iMeanFlow(nn.Module):
                     self.time_conditioning_mode
                 )
             self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
+
+    def _uses_src_reg_training_mode(self):
+        return self.training_mode == "imf_jvp_free_src_reg"
 
     def _uses_auxiliary_v_head(self):
         return self.use_auxiliary_v_head
@@ -526,6 +536,74 @@ class iMeanFlow(nn.Module):
 
         return v_c, v_u
 
+    def source_u_fn(self, source_params, x, t, h, omega, t_min, t_max, y):
+        """
+        Compute frozen-source average velocity for source regularization.
+        """
+        if source_params is None:
+            raise ValueError(
+                "source_params must be provided when training_mode="
+                "imf_jvp_free_src_reg."
+            )
+
+        bz = x.shape[0]
+        if self._uses_auxiliary_v_head():
+            u, _ = self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+            return u
+
+        if self._uses_imf_dit_backbone():
+            u, _ = self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+            return u
+
+        r = t - h
+        if self._uses_sit_guidance_context_conditioning():
+            return self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                r.reshape(bz),
+                y,
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+            )
+        if self._uses_sit_adaln_guidance_scale_conditioning():
+            return self.source_net.apply(
+                {"params": source_params["net"]},
+                x,
+                t.reshape(bz),
+                r.reshape(bz),
+                y,
+                omega.reshape(bz),
+            )
+
+        del omega, t_min, t_max
+        return self.source_net.apply(
+            {"params": source_params["net"]},
+            x,
+            t.reshape(bz),
+            r.reshape(bz),
+            y,
+        )
+
     def source_v_cond_fn(self, source_params, x, t, omega, y):
         """
         Compute a source-model velocity prediction from a frozen source model.
@@ -715,6 +793,26 @@ class iMeanFlow(nn.Module):
             loss: Scalar loss value.
             dict_losses: Dictionary of individual loss components.
         """
+        if self.training_mode == "imf_jvp":
+            return self.forward_imf_jvp(
+                images,
+                labels,
+                source_params=source_params,
+                current_step=current_step,
+            )
+        if self.training_mode == "imf_jvp_free_src_reg":
+            return self.forward_imf_jvp_free_src_reg(
+                images,
+                labels,
+                source_params=source_params,
+                current_step=current_step,
+            )
+        raise ValueError(f"Unsupported training_mode: {self.training_mode}")
+
+    def forward_imf_jvp(self, images, labels, source_params=None, current_step=None):
+        """
+        Forward process of improved MeanFlow and compute loss.
+        """
         x = images.astype(self.dtype)
         bz = images.shape[0]
 
@@ -792,6 +890,107 @@ class iMeanFlow(nn.Module):
             "loss": loss,
             "loss_u": jnp.mean((V - v_g) ** 2),
             "loss_v": jnp.mean((v - v_g) ** 2),
+        }
+
+        return loss, dict_losses
+
+    def forward_imf_jvp_free_src_reg(
+        self,
+        images,
+        labels,
+        source_params=None,
+        current_step=None,
+    ):
+        """
+        JVP-free fine-tuning with diagonal instant-velocity supervision and
+        off-diagonal frozen-source regularization.
+        """
+        x = images.astype(self.dtype)
+        bz = images.shape[0]
+
+        t, r, fm_mask = self.sample_tr(bz)
+
+        e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
+        if self._uses_sit_dmf_time_convention():
+            z_t = (1 - t) * e + t * x
+            v_t = x - e
+        else:
+            z_t = (1 - t) * x + t * e
+            v_t = e - x
+
+        t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
+        omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
+
+        v_g, _ = self.guidance_fn(
+            v_t,
+            z_t,
+            t,
+            r,
+            labels,
+            fm_mask,
+            omega,
+            t_min,
+            t_max,
+            source_params=source_params,
+            current_step=current_step,
+        )
+        labels, v_g = self.cond_drop(v_t, v_g, labels)
+
+        student_u, student_v = self.u_fn(
+            z_t,
+            t,
+            t - r,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        source_u = self.source_u_fn(
+            source_params,
+            z_t,
+            t,
+            t - r,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        source_u = jax.lax.stop_gradient(source_u)
+        v_g = jax.lax.stop_gradient(v_g)
+
+        diag_mask = fm_mask.astype(self.dtype)
+        src_mask = 1.0 - diag_mask
+
+        def masked_mean(values, mask):
+            denom = jnp.maximum(jnp.sum(mask), 1.0)
+            return jnp.sum(values * mask.reshape((bz,))) / denom
+
+        inst_per_example = jnp.mean((student_v - v_g) ** 2, axis=(1, 2, 3))
+        src_per_example = jnp.mean((student_u - source_u) ** 2, axis=(1, 2, 3))
+
+        loss_inst = masked_mean(inst_per_example, diag_mask)
+        loss_src = masked_mean(src_per_example, src_mask)
+        loss = jnp.mean(
+            jnp.where(
+                fm_mask.reshape((bz,)),
+                inst_per_example,
+                src_per_example,
+            )
+        )
+
+        dict_losses = {
+            "loss": loss,
+            "loss_inst": loss_inst,
+            "loss_src": loss_src,
+            "t_mean": jnp.mean(t),
+            "r_mean": jnp.mean(r),
         }
 
         return loss, dict_losses
