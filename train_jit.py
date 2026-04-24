@@ -27,6 +27,7 @@ from utils.lr_utils import lr_schedules
 from utils.preview_util import (
     format_preview_guidance_label,
     generate_preview_samples_first_device,
+    make_uint8_image_grid,
     make_side_by_side_preview_panel,
     make_stacked_grid_panel,
 )
@@ -489,17 +490,23 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         },
         devices=sample_devices,
     )
+    num_preview_images = int(config.fid.get("num_images_to_log", 16))
+    preview_grid_size = int(num_preview_images**0.5)
+    num_preview_images = preview_grid_size**2
     preview = generate_preview_samples_first_device(
         state,
         p_sample_step,
         pixel_manager,
         use_ema,
-        num_samples=int(config.fid.get("num_images_to_log", 16)),
+        num_samples=num_preview_images,
         param_dtype=get_sampling_param_dtype(config),
         sample_local_device_count=sample_local_device_count,
         **sample_kwargs,
     )
-    writer.write_images(step, {"image_grid": preview})
+    writer.write_images(
+        step,
+        {"image_grid": make_uint8_image_grid(preview, preview_grid_size)},
+    )
 
     evaluator = get_image_metric_evaluator(config, writer, pixel_manager)
     result = evaluator(state, p_sample_step, step, not use_ema, **sample_kwargs)

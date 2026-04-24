@@ -90,6 +90,7 @@ for NUM_STEPS in "${STEPS[@]}"; do
     WANDB_NAME_ARGS=(--config.logging.wandb_name="${WANDB_NAME_PREFIX}_final_${NUM_STEPS}steps")
   fi
 
+  set +e
   TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
     XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
     XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false} \
@@ -106,6 +107,16 @@ for NUM_STEPS in "${STEPS[@]}"; do
       --config.logging.use_wandb="${USE_WANDB}" \
       "${WANDB_NAME_ARGS[@]}" \
       2>&1 | tee -a "$EVAL_WORKDIR/output.log"
+  EVAL_STATUS=${PIPESTATUS[0]}
+  set -e
+
+  if [[ "$EVAL_STATUS" -ne 0 ]]; then
+    if grep -q "Appended evaluation metrics row" "$EVAL_WORKDIR/output.log"; then
+      echo "Eval metrics were written, but Python exited nonzero during shutdown; continuing."
+    else
+      exit "$EVAL_STATUS"
+    fi
+  fi
 
   if [[ -f "$EVAL_WORKDIR/eval_metrics.csv" ]]; then
     if [[ ! -f "$FINAL_SUMMARY_CSV" ]]; then
