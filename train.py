@@ -10,6 +10,7 @@ import os
 import torch
 from flax import jax_utils
 from jax import lax, random
+from copy import deepcopy
 from functools import partial
 from PIL import Image, ImageDraw
 
@@ -544,7 +545,13 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             )
         else:
             state = restore_checkpoint(state, config.load_from)
-        if config.training.get("capture_source_from_load", False):
+        if config.model.get("training_mode", "imf_jvp") == "imf_jvp_free_src_reg":
+            state = state.replace(source_params=deepcopy(state.params))
+            log_for_0(
+                "Captured frozen source_params from restored initial model for "
+                "imf_jvp_free_src_reg."
+            )
+        elif config.training.get("capture_source_from_load", False):
             source_ckpt_path = config.load_from
             source_params = load_checkpoint_params(source_ckpt_path, prefer_ema=True)
             state = state.replace(source_params=source_params)

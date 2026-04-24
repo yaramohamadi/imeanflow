@@ -80,6 +80,7 @@ def get_config():
     model.data_proportion = 0.5
     model.cfg_beta = 1.0
     model.class_dropout_prob = 0.1
+    model.training_mode = "imf_jvp"
     model.use_dogfit = False
     model.target_use_null_class = True
     model.source_prediction_space = "v"

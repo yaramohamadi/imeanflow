@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 DATASETS="${DATASETS:-caltech101 artbench10 cub200 food101 stanfordcars}"
 EXTRA_ARGS=("$@")
 SLURM_SCRIPT="${SLURM_SCRIPT:-scripts/train_plain_jit_caltech_h16_slurm.sbatch}"
-WEIGHTS="${WEIGHTS:-/home/ymbahram/scratch/weights/JiT-H-16-256.pth}"
+WEIGHTS="${WEIGHTS:-/home/ens/AT74470/imeanflow/files/weights/JiT-H-16-256.pth}"
 USE_WANDB="${USE_WANDB:-True}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
 RUN_LABEL_SUFFIX="${RUN_LABEL_SUFFIX:-h16}"
@@ -19,33 +19,33 @@ dataset_assets() {
   case "$dataset" in
     caltech101|caltech-101)
       DATASET_NAME_OUT="caltech101"
-      DATASET_ROOT_OUT="/home/ymbahram/scratch/datasets/caltech-101_images"
-      FID_CACHE_REF_OUT="/home/ymbahram/scratch/fid_stats/caltech-101-fid_stats.npz"
-      FD_DINO_CACHE_REF_OUT="/home/ymbahram/scratch/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
+      DATASET_ROOT_OUT="/home/ens/AT74470/datasets/caltech-101_images"
+      FID_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz"
+      FD_DINO_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
       ;;
     artbench10|artbench-10)
       DATASET_NAME_OUT="artbench10"
-      DATASET_ROOT_OUT="/home/ymbahram/scratch/datasets/artbench-10_images"
-      FID_CACHE_REF_OUT="/home/ymbahram/scratch/fid_stats/artbench-10_processed-fid_stats.npz"
-      FD_DINO_CACHE_REF_OUT="/home/ymbahram/scratch/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz"
+      DATASET_ROOT_OUT="/home/ens/AT74470/datasets/artbench-10_images"
+      FID_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fid_stats/artbench-10_processed-fid_stats.npz"
+      FD_DINO_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz"
       ;;
     cub200|cub-200|cub-200-2011)
       DATASET_NAME_OUT="cub200"
-      DATASET_ROOT_OUT="/home/ymbahram/scratch/datasets/cub-200-2011_images"
-      FID_CACHE_REF_OUT="/home/ymbahram/scratch/fid_stats/cub-200-2011_processed-fid_stats.npz"
-      FD_DINO_CACHE_REF_OUT="/home/ymbahram/scratch/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz"
+      DATASET_ROOT_OUT="/home/ens/AT74470/datasets/cub-200-2011_images"
+      FID_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz"
+      FD_DINO_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz"
       ;;
     food101|food-101)
       DATASET_NAME_OUT="food101"
-      DATASET_ROOT_OUT="/home/ymbahram/scratch/datasets/food-101_images"
-      FID_CACHE_REF_OUT="/home/ymbahram/scratch/fid_stats/food-101_processed-fid_stats.npz"
-      FD_DINO_CACHE_REF_OUT="/home/ymbahram/scratch/fdd_stats/food-101-fd_dino-vitb14_stats.npz"
+      DATASET_ROOT_OUT="/home/ens/AT74470/datasets/food-101_images"
+      FID_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fid_stats/food-101_processed-fid_stats.npz"
+      FD_DINO_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz"
       ;;
     stanfordcars|stanford-cars|cars)
       DATASET_NAME_OUT="stanfordcars"
-      DATASET_ROOT_OUT="/home/ymbahram/scratch/datasets/stanford-cars_images"
-      FID_CACHE_REF_OUT="/home/ymbahram/scratch/fid_stats/stanford_cars_processed-fid_stats.npz"
-      FD_DINO_CACHE_REF_OUT="/home/ymbahram/scratch/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz"
+      DATASET_ROOT_OUT="/home/ens/AT74470/datasets/stanford-cars_images"
+      FID_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fid_stats/stanford_cars_processed-fid_stats.npz"
+      FD_DINO_CACHE_REF_OUT="/home/ens/AT74470/imeanflow/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz"
       ;;
     *)
       echo "ERROR: unknown dataset '$dataset'." >&2
