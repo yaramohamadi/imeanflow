@@ -12,7 +12,7 @@ FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-True}" \
 BACKBONES=imf \
 DATASETS="${DATASETS:-caltech101 cub200}" \
 SLURM_MEM="${SLURM_MEM:-64G}" \
-SLURM_TIME_IMF="${SLURM_TIME_IMF:-36:00:00}" \
+SLURM_TIME_IMF="${SLURM_TIME_IMF:-24:00:00}" \
 bash scripts/sweep_plain_finetune_datasets.sh "$SWEEP_LABEL" \
   --config.logging.wandb_max_retries="${WANDB_MAX_RETRIES:-5}" \
   --config.logging.wandb_retry_cooldown_seconds="${WANDB_RETRY_COOLDOWN_SECONDS:-600}" \

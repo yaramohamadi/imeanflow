@@ -161,6 +161,9 @@ def get_config():
     logging.wandb_entity = ""
     logging.wandb_notes = ""
     logging.wandb_tags = []
+    logging.wandb_max_retries = 3
+    logging.wandb_retry_cooldown_seconds = 300
+    logging.wandb_eval_replay_buffer_size = 100
 
     # others
     config.load_from = ""
