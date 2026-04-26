@@ -77,6 +77,13 @@ def create_train_state(
         config.model.get("use_dogfit", False)
         or config.training.get("capture_source_from_load", False)
         or config.model.get("training_mode", "imf_jvp") == "imf_jvp_free_src_reg"
+        or (
+            config.model.get("training_mode", "imf_jvp") == "imf_split_consistency"
+            and (
+                config.model.get("split_consistency_source_first_prob", 0.0) > 0.0
+                or config.model.get("split_consistency_source_second_prob", 0.0) > 0.0
+            )
+        )
     )
     if needs_source_params:
         source_params = deepcopy(params)

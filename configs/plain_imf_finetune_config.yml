@@ -7,6 +7,7 @@ dataset:
 model:
     model_str: imfDiT_XL_2
     num_classes: 101
+    training_mode: imf_jvp
     cfg_beta: 1.0
     class_dropout_prob: 0.1
     use_dogfit: False
@@ -15,6 +16,10 @@ model:
     guidance_scale_strategy: sampled
     max_sampled_guidance_scale: 8.0
     fixed_guidance_scale: 7.5
+    split_consistency_midpoint_strategy: uniform
+    split_consistency_midpoint_eps: 0.001
+    split_consistency_source_first_prob: 0.0
+    split_consistency_source_second_prob: 0.0
 
 training:
     log_per_step: 250

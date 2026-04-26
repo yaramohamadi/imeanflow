@@ -27,6 +27,11 @@ Optional env vars:
   GUIDANCE_SCALE=7.5
   SAMPLING_T_MIN=0.4
   SAMPLING_T_MAX=0.65
+  TRAINING_MODE=imf_jvp              # set imf_split_consistency for SplitMeanFlow
+  SPLIT_MIDPOINT_STRATEGY=uniform    # uniform or midpoint
+  SPLIT_MIDPOINT_EPS=0.001
+  SPLIT_SOURCE_FIRST_PROB=0.0
+  SPLIT_SOURCE_SECOND_PROB=0.0
   FID_NUM_SAMPLES=50000
   TRAIN_BATCH_SIZE=4
   GRAD_ACCUM_STEPS=8
@@ -53,6 +58,11 @@ SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-7.5}"
 SAMPLING_T_MIN="${SAMPLING_T_MIN:-0.4}"
 SAMPLING_T_MAX="${SAMPLING_T_MAX:-0.65}"
+TRAINING_MODE="${TRAINING_MODE:-imf_jvp}"
+SPLIT_MIDPOINT_STRATEGY="${SPLIT_MIDPOINT_STRATEGY:-uniform}"
+SPLIT_MIDPOINT_EPS="${SPLIT_MIDPOINT_EPS:-0.001}"
+SPLIT_SOURCE_FIRST_PROB="${SPLIT_SOURCE_FIRST_PROB:-0.0}"
+SPLIT_SOURCE_SECOND_PROB="${SPLIT_SOURCE_SECOND_PROB:-0.0}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_imf_finetune}"
 CONFIG_OVERRIDE_ARGS=()
 
@@ -105,6 +115,11 @@ CONFIG_OVERRIDE_ARGS+=(--config.load_from="${LOAD_FROM}")
 CONFIG_OVERRIDE_ARGS+=(--config.sampling.omega="${GUIDANCE_SCALE}")
 CONFIG_OVERRIDE_ARGS+=(--config.sampling.t_min="${SAMPLING_T_MIN}")
 CONFIG_OVERRIDE_ARGS+=(--config.sampling.t_max="${SAMPLING_T_MAX}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.training_mode="${TRAINING_MODE}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_midpoint_strategy="${SPLIT_MIDPOINT_STRATEGY}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_midpoint_eps="${SPLIT_MIDPOINT_EPS}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_source_first_prob="${SPLIT_SOURCE_FIRST_PROB}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_source_second_prob="${SPLIT_SOURCE_SECOND_PROB}")
 
 if [[ -n "${FD_DINO_CACHE_REF+x}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.fd_dino.cache_ref="${FD_DINO_CACHE_REF}")

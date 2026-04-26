@@ -92,6 +92,10 @@ class iMeanFlow(nn.Module):
     fixed_guidance_scale: float = 7.5
     baked_guidance_blend: float = 0.5
     use_positive_sit_dmf_mf_target: bool = False
+    split_consistency_midpoint_strategy: str = "uniform"
+    split_consistency_midpoint_eps: float = 1e-3
+    split_consistency_source_first_prob: float = 0.0
+    split_consistency_source_second_prob: float = 0.0
 
     # Training dynamics
     norm_p: float = 1.0
@@ -123,7 +127,11 @@ class iMeanFlow(nn.Module):
             )
             net_kwargs["time_conditioning_mode"] = self.time_conditioning_mode
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
-        if self.use_dogfit or self._uses_src_reg_training_mode():
+        if (
+            self.use_dogfit
+            or self._uses_src_reg_training_mode()
+            or self._uses_split_consistency_source_ablation()
+        ):
             source_num_classes = (
                 self.source_num_classes
                 if self.use_dogfit
@@ -159,6 +167,15 @@ class iMeanFlow(nn.Module):
 
     def _uses_src_reg_training_mode(self):
         return self.training_mode == "imf_jvp_free_src_reg"
+
+    def _uses_split_consistency_training_mode(self):
+        return self.training_mode == "imf_split_consistency"
+
+    def _uses_split_consistency_source_ablation(self):
+        return self._uses_split_consistency_training_mode() and (
+            self.split_consistency_source_first_prob > 0.0
+            or self.split_consistency_source_second_prob > 0.0
+        )
 
     def _uses_auxiliary_v_head(self):
         return self.use_auxiliary_v_head
@@ -334,6 +351,19 @@ class iMeanFlow(nn.Module):
 
         return t, r, fm_mask
 
+    def sample_split_tr(self, bz):
+        """
+        Sample strictly off-diagonal intervals for SplitMeanFlow consistency.
+        """
+        t = self.logit_normal_dist(bz)
+        r = self.logit_normal_dist(bz)
+        if self._uses_sit_dmf_time_convention():
+            t, r = jnp.minimum(t, r), jnp.maximum(t, r)
+        else:
+            t, r = jnp.maximum(t, r), jnp.minimum(t, r)
+        fm_mask = jnp.zeros((bz, 1, 1, 1), dtype=bool)
+        return t, r, fm_mask
+
     def sample_cfg_scale(self, bz, s_max=7.0):
         """
         Sample CFG scale omega from power distribution.
@@ -383,6 +413,48 @@ class iMeanFlow(nn.Module):
         t_max = jnp.where(fm_mask, 1.0, t_max)
 
         return t_min, t_max
+
+    def sample_split_midpoint_ratio(self, bz):
+        """
+        Sample lambda in m = t + lambda * (r - t), so m lies strictly inside
+        the interval between t and r when using the default uniform strategy.
+        """
+        strategy = self.split_consistency_midpoint_strategy
+        if strategy == "midpoint":
+            return jnp.full((bz, 1, 1, 1), 0.5, dtype=self.dtype)
+        if strategy != "uniform":
+            raise ValueError(
+                "Unsupported split_consistency_midpoint_strategy: "
+                f"{strategy}"
+            )
+
+        eps = jnp.asarray(self.split_consistency_midpoint_eps, dtype=self.dtype)
+        if not (0.0 <= float(self.split_consistency_midpoint_eps) < 0.5):
+            raise ValueError(
+                "split_consistency_midpoint_eps must be in [0, 0.5)."
+            )
+        return jax.random.uniform(
+            self.make_rng("gen"),
+            (bz, 1, 1, 1),
+            minval=eps,
+            maxval=1.0 - eps,
+            dtype=self.dtype,
+        )
+
+    def sample_split_source_mask(self, bz, prob):
+        if not (0.0 <= prob <= 1.0):
+            raise ValueError("split consistency source probabilities must be in [0, 1].")
+        if prob == 0.0:
+            return jnp.zeros((bz, 1, 1, 1), dtype=bool)
+        if prob == 1.0:
+            return jnp.ones((bz, 1, 1, 1), dtype=bool)
+        return jax.random.uniform(
+            self.make_rng("gen"),
+            (bz, 1, 1, 1),
+            minval=0.0,
+            maxval=1.0,
+            dtype=jnp.float32,
+        ) < prob
 
     #######################################################
     #               Training Utils & Guidance             #
@@ -807,6 +879,13 @@ class iMeanFlow(nn.Module):
                 source_params=source_params,
                 current_step=current_step,
             )
+        if self.training_mode == "imf_split_consistency":
+            return self.forward_imf_split_consistency(
+                images,
+                labels,
+                source_params=source_params,
+                current_step=current_step,
+            )
         raise ValueError(f"Unsupported training_mode: {self.training_mode}")
 
     def forward_imf_jvp(self, images, labels, source_params=None, current_step=None):
@@ -991,6 +1070,171 @@ class iMeanFlow(nn.Module):
             "loss_src": loss_src,
             "t_mean": jnp.mean(t),
             "r_mean": jnp.mean(r),
+        }
+
+        return loss, dict_losses
+
+    def forward_imf_split_consistency(
+        self,
+        images,
+        labels,
+        source_params=None,
+        current_step=None,
+    ):
+        """
+        JVP-free SplitMeanFlow training: regress the long-interval average
+        velocity toward the detached convex combination of the two sub-interval
+        average velocities.
+        """
+        x = images.astype(self.dtype)
+        bz = images.shape[0]
+
+        t, r, fm_mask = self.sample_tr(bz)
+
+        e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
+        if self._uses_sit_dmf_time_convention():
+            z_t = (1 - t) * e + t * x
+            v_t = x - e
+        else:
+            z_t = (1 - t) * x + t * e
+            v_t = e - x
+
+        t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
+        omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
+
+        v_g, _ = self.guidance_fn(
+            v_t,
+            z_t,
+            t,
+            r,
+            labels,
+            fm_mask,
+            omega,
+            t_min,
+            t_max,
+            source_params=source_params,
+            current_step=current_step,
+        )
+        labels, v_g = self.cond_drop(v_t, v_g, labels)
+
+        lam = self.sample_split_midpoint_ratio(bz)
+        m = t + lam * (r - t)
+        use_source_first = self.sample_split_source_mask(
+            bz, self.split_consistency_source_first_prob
+        )
+        use_source_second = self.sample_split_source_mask(
+            bz, self.split_consistency_source_second_prob
+        )
+
+        u_long, v = self.u_fn(
+            z_t,
+            t,
+            t - r,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        u_first_student, _ = self.u_fn(
+            z_t,
+            t,
+            t - m,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        if self._uses_split_consistency_source_ablation():
+            u_first_source = self.source_u_fn(
+                source_params,
+                z_t,
+                t,
+                t - m,
+                model_omega,
+                t_min,
+                t_max,
+                y=labels,
+            )
+            u_first_target = jnp.where(use_source_first, u_first_source, u_first_student)
+        else:
+            u_first_target = u_first_student
+
+        z_m = z_t + (m - t) * jax.lax.stop_gradient(u_first_target)
+        u_second_student, _ = self.u_fn(
+            z_m,
+            m,
+            m - r,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        if self._uses_split_consistency_source_ablation():
+            u_second_source = self.source_u_fn(
+                source_params,
+                z_m,
+                m,
+                m - r,
+                model_omega,
+                t_min,
+                t_max,
+                y=labels,
+            )
+            u_second_target = jnp.where(
+                use_source_second,
+                u_second_source,
+                u_second_student,
+            )
+        else:
+            u_second_target = u_second_student
+
+        split_target = jax.lax.stop_gradient(
+            lam * u_first_target + (1.0 - lam) * u_second_target
+        )
+        v_g = jax.lax.stop_gradient(v_g)
+
+        def adp_wt_fn(loss):
+            adp_wt = (loss + self.norm_eps) ** self.norm_p
+            return loss / jax.lax.stop_gradient(adp_wt)
+
+        boundary_per_example = jnp.sum((u_long - v_g) ** 2, axis=(1, 2, 3))
+        split_per_example = jnp.sum((u_long - split_target) ** 2, axis=(1, 2, 3))
+        loss_u = jnp.where(
+            fm_mask.reshape((bz,)),
+            boundary_per_example,
+            split_per_example,
+        )
+        loss_u = adp_wt_fn(loss_u)
+
+        loss_v = jnp.sum((v - v_g) ** 2, axis=(1, 2, 3))
+        loss_v = adp_wt_fn(loss_v)
+
+        loss = (loss_u + loss_v).mean()
+
+        dict_losses = {
+            "loss": loss,
+            "loss_u": jnp.mean(
+                jnp.where(
+                    fm_mask,
+                    (u_long - v_g) ** 2,
+                    (u_long - split_target) ** 2,
+                )
+            ),
+            "loss_u_boundary": jnp.mean((u_long - v_g) ** 2),
+            "loss_u_split": jnp.mean((u_long - split_target) ** 2),
+            "loss_v": jnp.mean((v - v_g) ** 2),
+            "m_mean": jnp.mean(m),
+            "split_lambda_mean": jnp.mean(lam),
+            "diag_fraction": jnp.mean(fm_mask.astype(self.dtype)),
+            "source_first_fraction": jnp.mean(use_source_first.astype(self.dtype)),
+            "source_second_fraction": jnp.mean(use_source_second.astype(self.dtype)),
         }
 
         return loss, dict_losses

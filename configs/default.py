@@ -102,6 +102,10 @@ def get_config():
     model.fixed_guidance_scale = 7.5
     model.baked_guidance_blend = 0.5
     model.use_positive_sit_dmf_mf_target = False
+    model.split_consistency_midpoint_strategy = "uniform"
+    model.split_consistency_midpoint_eps = 1e-3
+    model.split_consistency_source_first_prob = 0.0
+    model.split_consistency_source_second_prob = 0.0
 
     # Training Dynamics
     model.norm_p = 1.0

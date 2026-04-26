@@ -551,6 +551,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 "Captured frozen source_params from restored initial model for "
                 "imf_jvp_free_src_reg."
             )
+        elif (
+            config.model.get("training_mode", "imf_jvp") == "imf_split_consistency"
+            and (
+                config.model.get("split_consistency_source_first_prob", 0.0) > 0.0
+                or config.model.get("split_consistency_source_second_prob", 0.0) > 0.0
+            )
+        ):
+            state = state.replace(source_params=deepcopy(state.params))
+            log_for_0(
+                "Captured frozen source_params from restored initial model for "
+                "imf_split_consistency source ablations."
+            )
         elif config.training.get("capture_source_from_load", False):
             source_ckpt_path = config.load_from
             source_params = load_checkpoint_params(source_ckpt_path, prefer_ema=True)
