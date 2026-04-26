@@ -96,6 +96,10 @@ class iMeanFlow(nn.Module):
     split_consistency_midpoint_eps: float = 1e-3
     split_consistency_source_first_prob: float = 0.0
     split_consistency_source_second_prob: float = 0.0
+    split_consistency_boundary_mode: str = "exact"
+    split_consistency_boundary_epsilon_distribution: str = "half_normal"
+    split_consistency_boundary_epsilon: float = 1e-3
+    split_consistency_boundary_epsilon_min: float = 1e-6
 
     # Training dynamics
     norm_p: float = 1.0
@@ -455,6 +459,55 @@ class iMeanFlow(nn.Module):
             maxval=1.0,
             dtype=jnp.float32,
         ) < prob
+
+    def sample_split_boundary_r(self, t):
+        mode = self.split_consistency_boundary_mode
+        if mode == "exact":
+            return t
+        if mode != "near_boundary":
+            raise ValueError(
+                f"Unsupported split_consistency_boundary_mode: {mode}"
+            )
+
+        dist = self.split_consistency_boundary_epsilon_distribution
+        if dist != "half_normal":
+            raise ValueError(
+                "Unsupported split_consistency_boundary_epsilon_distribution: "
+                f"{dist}"
+            )
+
+        eps = jnp.asarray(self.split_consistency_boundary_epsilon, dtype=self.dtype)
+        eps_min = jnp.asarray(
+            self.split_consistency_boundary_epsilon_min, dtype=self.dtype
+        )
+        delta = jnp.abs(
+            jax.random.normal(self.make_rng("gen"), t.shape, dtype=self.dtype) * eps
+        )
+
+        if self._uses_sit_dmf_time_convention():
+            max_delta = 1.0 - t
+            delta = jnp.minimum(delta, max_delta)
+            delta = jnp.where(max_delta > 0.0, jnp.maximum(delta, eps_min), 0.0)
+            return t + delta
+
+        max_delta = t
+        delta = jnp.minimum(delta, max_delta)
+        delta = jnp.where(max_delta > 0.0, jnp.maximum(delta, eps_min), 0.0)
+        return t - delta
+
+    def sample_split_consistency_tr(self, bz):
+        """
+        Sample intervals for SplitMeanFlow. The `data_proportion` subset keeps
+        the old boundary-vs-split mixture, but boundary samples can use either
+        exact diagonal intervals (`r=t`) or near-boundary intervals according to
+        `split_consistency_boundary_mode`.
+        """
+        t, r, fm_mask = self.sample_tr(bz)
+        if self.split_consistency_boundary_mode == "exact":
+            return t, r, fm_mask
+        r_boundary = self.sample_split_boundary_r(t)
+        r = jnp.where(fm_mask, r_boundary, r)
+        return t, r, fm_mask
 
     #######################################################
     #               Training Utils & Guidance             #
@@ -933,7 +986,7 @@ class iMeanFlow(nn.Module):
         )
 
         # Cond dropout (dropout class labels)
-        labels, v_g = self.cond_drop(v_t, v_g, labels)
+        labels, _ = self.cond_drop(v_t, v_g, labels)
 
         # Warped u-function for jvp computation
         def u_fn(z_t, t, r):
@@ -948,7 +1001,7 @@ class iMeanFlow(nn.Module):
         # Our compound function V = u + (t - r) * du/dt
         V = u + self._mf_target_interval_coeff(t, r) * jax.lax.stop_gradient(du_dt)
 
-        v_g = jax.lax.stop_gradient(v_g)
+        v_t = jax.lax.stop_gradient(v_t)
 
         def adp_wt_fn(loss):
             adp_wt = (loss + self.norm_eps) ** self.norm_p
@@ -1020,7 +1073,7 @@ class iMeanFlow(nn.Module):
             source_params=source_params,
             current_step=current_step,
         )
-        labels, v_g = self.cond_drop(v_t, v_g, labels)
+        labels, _ = self.cond_drop(v_t, v_g, labels)
 
         student_u, student_v = self.u_fn(
             z_t,
@@ -1042,7 +1095,7 @@ class iMeanFlow(nn.Module):
             y=labels,
         )
         source_u = jax.lax.stop_gradient(source_u)
-        v_g = jax.lax.stop_gradient(v_g)
+        v_t = jax.lax.stop_gradient(v_t)
 
         diag_mask = fm_mask.astype(self.dtype)
         src_mask = 1.0 - diag_mask
@@ -1089,7 +1142,7 @@ class iMeanFlow(nn.Module):
         x = images.astype(self.dtype)
         bz = images.shape[0]
 
-        t, r, fm_mask = self.sample_tr(bz)
+        t, r, fm_mask = self.sample_split_consistency_tr(bz)
 
         e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
         if self._uses_sit_dmf_time_convention():
@@ -1122,7 +1175,7 @@ class iMeanFlow(nn.Module):
             source_params=source_params,
             current_step=current_step,
         )
-        labels, v_g = self.cond_drop(v_t, v_g, labels)
+        labels, _ = self.cond_drop(v_t, v_g, labels)
 
         lam = self.sample_split_midpoint_ratio(bz)
         m = t + lam * (r - t)
@@ -1198,13 +1251,13 @@ class iMeanFlow(nn.Module):
         split_target = jax.lax.stop_gradient(
             lam * u_first_target + (1.0 - lam) * u_second_target
         )
-        v_g = jax.lax.stop_gradient(v_g)
+        v_t = jax.lax.stop_gradient(v_t)
 
         def adp_wt_fn(loss):
             adp_wt = (loss + self.norm_eps) ** self.norm_p
             return loss / jax.lax.stop_gradient(adp_wt)
 
-        boundary_per_example = jnp.sum((u_long - v_g) ** 2, axis=(1, 2, 3))
+        boundary_per_example = jnp.sum((u_long - v_t) ** 2, axis=(1, 2, 3))
         split_per_example = jnp.sum((u_long - split_target) ** 2, axis=(1, 2, 3))
         loss_u = jnp.where(
             fm_mask.reshape((bz,)),
@@ -1213,7 +1266,7 @@ class iMeanFlow(nn.Module):
         )
         loss_u = adp_wt_fn(loss_u)
 
-        loss_v = jnp.sum((v - v_g) ** 2, axis=(1, 2, 3))
+        loss_v = jnp.sum((v - v_t) ** 2, axis=(1, 2, 3))
         loss_v = adp_wt_fn(loss_v)
 
         loss = (loss_u + loss_v).mean()
@@ -1223,14 +1276,17 @@ class iMeanFlow(nn.Module):
             "loss_u": jnp.mean(
                 jnp.where(
                     fm_mask,
-                    (u_long - v_g) ** 2,
+                    (u_long - v_t) ** 2,
                     (u_long - split_target) ** 2,
                 )
             ),
-            "loss_u_boundary": jnp.mean((u_long - v_g) ** 2),
+            "loss_u_boundary": jnp.mean((u_long - v_t) ** 2),
             "loss_u_split": jnp.mean((u_long - split_target) ** 2),
-            "loss_v": jnp.mean((v - v_g) ** 2),
+            "loss_v": jnp.mean((v - v_t) ** 2),
             "m_mean": jnp.mean(m),
+            "boundary_dt_mean": jnp.sum(
+                jnp.abs(r - t) * fm_mask.astype(self.dtype)
+            ) / jnp.maximum(jnp.sum(fm_mask.astype(self.dtype)), 1.0),
             "split_lambda_mean": jnp.mean(lam),
             "diag_fraction": jnp.mean(fm_mask.astype(self.dtype)),
             "source_first_fraction": jnp.mean(use_source_first.astype(self.dtype)),

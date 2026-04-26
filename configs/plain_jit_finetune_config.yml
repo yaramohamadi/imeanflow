@@ -27,10 +27,10 @@ training:
     checkpoint_per_epoch: 1000000
 
     num_epochs: 200
-    max_train_steps: 30000
+    max_train_steps: 40000
     batch_size: 32
     use_ema: False
-    learning_rate: 0.0000015
+    learning_rate: 0.00000125
     warmup_epochs: 5
 
     adam_b2: 0.95
@@ -46,9 +46,6 @@ training:
     fid_per_step: 0
     fid_schedule:
         - from_step: 0
-          until_step: 20000
-          every_steps: 5000
-        - from_step: 20000
           every_steps: 2500
     metric_num_steps:
         - 4

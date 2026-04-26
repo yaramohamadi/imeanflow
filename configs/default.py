@@ -106,6 +106,10 @@ def get_config():
     model.split_consistency_midpoint_eps = 1e-3
     model.split_consistency_source_first_prob = 0.0
     model.split_consistency_source_second_prob = 0.0
+    model.split_consistency_boundary_mode = "exact"
+    model.split_consistency_boundary_epsilon_distribution = "half_normal"
+    model.split_consistency_boundary_epsilon = 1e-3
+    model.split_consistency_boundary_epsilon_min = 1e-6
 
     # Training Dynamics
     model.norm_p = 1.0

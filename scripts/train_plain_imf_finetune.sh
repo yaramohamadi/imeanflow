@@ -32,6 +32,10 @@ Optional env vars:
   SPLIT_MIDPOINT_EPS=0.001
   SPLIT_SOURCE_FIRST_PROB=0.0
   SPLIT_SOURCE_SECOND_PROB=0.0
+  SPLIT_BOUNDARY_MODE=exact          # exact or near_boundary
+  SPLIT_BOUNDARY_EPS_DIST=half_normal
+  SPLIT_BOUNDARY_EPS=0.001
+  SPLIT_BOUNDARY_EPS_MIN=0.000001
   FID_NUM_SAMPLES=50000
   TRAIN_BATCH_SIZE=4
   GRAD_ACCUM_STEPS=8
@@ -63,6 +67,10 @@ SPLIT_MIDPOINT_STRATEGY="${SPLIT_MIDPOINT_STRATEGY:-uniform}"
 SPLIT_MIDPOINT_EPS="${SPLIT_MIDPOINT_EPS:-0.001}"
 SPLIT_SOURCE_FIRST_PROB="${SPLIT_SOURCE_FIRST_PROB:-0.0}"
 SPLIT_SOURCE_SECOND_PROB="${SPLIT_SOURCE_SECOND_PROB:-0.0}"
+SPLIT_BOUNDARY_MODE="${SPLIT_BOUNDARY_MODE:-exact}"
+SPLIT_BOUNDARY_EPS_DIST="${SPLIT_BOUNDARY_EPS_DIST:-half_normal}"
+SPLIT_BOUNDARY_EPS="${SPLIT_BOUNDARY_EPS:-0.001}"
+SPLIT_BOUNDARY_EPS_MIN="${SPLIT_BOUNDARY_EPS_MIN:-0.000001}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_imf_finetune}"
 CONFIG_OVERRIDE_ARGS=()
 
@@ -120,6 +128,10 @@ CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_midpoint_strategy="${SPL
 CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_midpoint_eps="${SPLIT_MIDPOINT_EPS}")
 CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_source_first_prob="${SPLIT_SOURCE_FIRST_PROB}")
 CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_source_second_prob="${SPLIT_SOURCE_SECOND_PROB}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_boundary_mode="${SPLIT_BOUNDARY_MODE}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_boundary_epsilon_distribution="${SPLIT_BOUNDARY_EPS_DIST}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_boundary_epsilon="${SPLIT_BOUNDARY_EPS}")
+CONFIG_OVERRIDE_ARGS+=(--config.model.split_consistency_boundary_epsilon_min="${SPLIT_BOUNDARY_EPS_MIN}")
 
 if [[ -n "${FD_DINO_CACHE_REF+x}" ]]; then
   CONFIG_OVERRIDE_ARGS+=(--config.fd_dino.cache_ref="${FD_DINO_CACHE_REF}")

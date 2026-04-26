@@ -20,6 +20,10 @@ model:
     split_consistency_midpoint_eps: 0.001
     split_consistency_source_first_prob: 0.0
     split_consistency_source_second_prob: 0.0
+    split_consistency_boundary_mode: exact
+    split_consistency_boundary_epsilon_distribution: half_normal
+    split_consistency_boundary_epsilon: 0.001
+    split_consistency_boundary_epsilon_min: 0.000001
 
 training:
     log_per_step: 250

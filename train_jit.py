@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import ml_collections
 import optax
 from flax import jax_utils
+from flax import traverse_util
 from jax import lax, random
 
 from plain_jit import PlainJiT
@@ -117,7 +118,7 @@ def create_jit_train_state(rng, config, model, lr_fn):
         else None
     )
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
-    tx = _create_optimizer(config, lr_fn)
+    tx = _create_optimizer(config, lr_fn, params)
     return TrainState.create(
         apply_fn=partial(model.apply, method=model.forward),
         params=params,
@@ -144,7 +145,17 @@ def _optional_optimizer_dtype(dtype_name):
     )
 
 
-def _create_optimizer(config, lr_fn):
+def _adamw_decay_mask(params):
+    """Apply AdamW decay to matrix-like weights, but not bias or 1D params."""
+    flat_params = traverse_util.flatten_dict(params)
+    flat_mask = {}
+    for path, value in flat_params.items():
+        last_key = str(path[-1]) if path else ""
+        flat_mask[path] = value.ndim > 1 and last_key != "bias"
+    return traverse_util.unflatten_dict(flat_mask)
+
+
+def _create_optimizer(config, lr_fn, params):
     optimizer = str(config.training.get("optimizer", "adamw")).lower()
     weight_decay = float(config.training.get("weight_decay", 0.0))
     mu_dtype = _optional_optimizer_dtype(
@@ -154,6 +165,7 @@ def _create_optimizer(config, lr_fn):
         return optax.adamw(
             learning_rate=lr_fn,
             weight_decay=weight_decay,
+            mask=_adamw_decay_mask(params),
             b2=config.training.adam_b2,
             mu_dtype=mu_dtype,
         )
@@ -281,14 +293,16 @@ def sample_step(
     rng = random.fold_in(rng_init, lax.axis_index(axis_name="batch"))
     rng = random.fold_in(rng, sample_idx)
     z = random.normal(rng, sample_shape, dtype=model.dtype)
-    t_steps = jnp.linspace(0.0, 1.0, int(num_steps) + 1, dtype=model.dtype)
+    z = z * float(config.model.get("noise_scale", 1.0))
+    num_steps = int(num_steps)
+    t_steps = jnp.linspace(0.0, 1.0, num_steps + 1, dtype=model.dtype)
 
     method = config.sampling.get("method", "euler")
 
     def body_fn(i, current):
         t = jnp.full((current.shape[0],), t_steps[i], dtype=model.dtype)
         t_next = jnp.full((current.shape[0],), t_steps[i + 1], dtype=model.dtype)
-        if method == "heun":
+        def euler_step(_):
             next_sample = model.apply(
                 variable,
                 current,
@@ -298,23 +312,30 @@ def sample_step(
                 omega,
                 t_min,
                 t_max,
-                method=model.heun_step,
+                method=model.euler_step,
             )
             return next_sample.astype(current.dtype)
-        next_sample = model.apply(
-            variable,
-            current,
-            t,
-            t_next,
-            labels,
-            omega,
-            t_min,
-            t_max,
-            method=model.euler_step,
-        )
-        return next_sample.astype(current.dtype)
 
-    return jax.lax.fori_loop(0, int(num_steps), body_fn, z)
+        if method == "heun":
+            def heun_step(_):
+                next_sample = model.apply(
+                    variable,
+                    current,
+                    t,
+                    t_next,
+                    labels,
+                    omega,
+                    t_min,
+                    t_max,
+                    method=model.heun_step,
+                )
+                return next_sample.astype(current.dtype)
+
+            return jax.lax.cond(i < num_steps - 1, heun_step, euler_step, operand=None)
+
+        return euler_step(None)
+
+    return jax.lax.fori_loop(0, num_steps, body_fn, z)
 
 
 def _build_plain_jit(config, *, eval_mode=False):
