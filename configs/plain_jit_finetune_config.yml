@@ -29,7 +29,7 @@ training:
     num_epochs: 200
     max_train_steps: 40000
     batch_size: 32
-    use_ema: False
+    use_ema: True
     learning_rate: 0.00000125
     warmup_epochs: 5
 
@@ -40,9 +40,9 @@ training:
     lion_b2: 0.99
     sgd_momentum: null
     ema_type: const
-    ema_val: 0.9999
+    ema_val: 0.9995
 
-    sample_per_step: 5000
+    sample_per_step: 2500
     fid_per_step: 0
     fid_schedule:
         - from_step: 0

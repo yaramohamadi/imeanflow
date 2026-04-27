@@ -68,6 +68,40 @@ def _guided_velocity(model, variable, x, t_model, labels, cfg_scale):
     )
 
 
+def _guided_meanflow(model, variable, x, t_model, r_model, labels, cfg_scale):
+    num_samples = x.shape[0]
+
+    def conditional_meanflow(_):
+        return model.apply(variable, x, t_model, labels, r=r_model)
+
+    def classifier_free_guided_meanflow(_):
+        null_labels = jnp.full((num_samples,), model.num_classes, dtype=jnp.int32)
+
+        x_cat = jnp.concatenate([x, x], axis=0)
+        t_cat = jnp.concatenate([t_model, t_model], axis=0)
+        r_cat = jnp.concatenate([r_model, r_model], axis=0)
+        y_cat = jnp.concatenate([labels, null_labels], axis=0)
+
+        out = model.apply(variable, x_cat, t_cat, y_cat, r=r_cat)
+        cond, uncond = jnp.split(out, 2, axis=0)
+
+        guided_first_three = uncond[..., :3] + cfg_scale * (
+            cond[..., :3] - uncond[..., :3]
+        )
+        return jnp.concatenate([guided_first_three, cond[..., 3:]], axis=-1)
+
+    return jax.lax.cond(
+        jnp.equal(cfg_scale, 1.0),
+        conditional_meanflow,
+        classifier_free_guided_meanflow,
+        operand=None,
+    )
+
+
+def _use_interval_meanflow_sampling(config):
+    return str(config.transport.get("objective", "sit")) == "power_meanflow"
+
+
 def generate(
     variable,
     model,
@@ -154,6 +188,33 @@ def generate(
         velocity_next = _guided_velocity(model, variable, x_pred, t_next, labels, cfg_scale)
         return (x_cur + 0.5 * dt * (velocity + velocity_next)).astype(sample_dtype)
 
+    def meanflow_step(i, x_cur):
+        tau_cur = times[i]
+        tau_next = times[i + 1]
+        t_cur = jnp.full(
+            (n_sample,),
+            1.0 - tau_cur if flip_time else tau_cur,
+            dtype=sample_dtype,
+        )
+        r_next = jnp.full(
+            (n_sample,),
+            1.0 - tau_next if flip_time else tau_next,
+            dtype=sample_dtype,
+        )
+        meanflow = _guided_meanflow(
+            model,
+            variable,
+            x_cur,
+            t_cur,
+            r_next,
+            labels,
+            cfg_scale,
+        )
+        delta_t = (r_next - t_cur).reshape((n_sample, 1, 1, 1))
+        return (x_cur + delta_t * meanflow).astype(sample_dtype)
+
+    if _use_interval_meanflow_sampling(config):
+        return jax.lax.fori_loop(0, num_steps, meanflow_step, x)
     if method == "euler":
         return jax.lax.fori_loop(0, num_steps, euler_step, x)
     if method == "heun":

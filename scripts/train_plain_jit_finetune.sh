@@ -97,10 +97,10 @@ case "${DATASET_NAME}" in
     ;;
 esac
 
-WANDB_NAME="${WANDB_NAME:-${DATASET_LABEL}_plain_jit_${RUN_LABEL}}"
+WANDB_NAME="${WANDB_NAME:-${DATASET_LABEL}_plain_jit_${RUN_LABEL}_EMA}"
 CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_name="${WANDB_NAME}")
 CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_project="${WANDB_PROJECT}")
-CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_notes="Dataset ${DATASET_LABEL} plain JiT fine-tuning run ${RUN_LABEL}")
+CONFIG_OVERRIDE_ARGS+=(--config.logging.wandb_notes="Dataset ${DATASET_LABEL} plain JiT fine-tuning run ${RUN_LABEL} with EMA")
 
 CONFIG_OVERRIDE_ARGS+=(--config.dataset.root="${DATASET_ROOT}")
 CONFIG_OVERRIDE_ARGS+=(--config.fid.cache_ref="${FID_CACHE_REF}")

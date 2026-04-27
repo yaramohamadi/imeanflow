@@ -77,6 +77,15 @@ def train_step_with_vae(
     metrics = compute_metrics(dict_losses)
     metrics["lr"] = lr_value
 
+    if grad_accum_steps == 1:
+        new_state = state.apply_gradients(grads=grads)
+        if use_ema:
+            ema_value = ema_fn(state.step)
+            new_ema = update_ema(new_state.ema_params, new_state.params, ema_value)
+            new_state = new_state.replace(ema_params=new_ema)
+        metrics["did_update"] = jnp.array(1.0, dtype=jnp.float32)
+        return new_state, metrics
+
     new_grad_accum = jax.tree_util.tree_map(
         lambda acc, g: acc + g, state.grad_accum, grads
     )
@@ -179,8 +188,19 @@ def _build_plain_sit(config, *, eval_mode=False):
         loss_weight=config.transport.loss_weight,
         train_eps=config.transport.train_eps,
         sample_eps=config.transport.sample_eps,
+        objective=str(config.transport.get("objective", "sit")),
+        path_power_k=float(config.transport.get("path_power_k", 1.0)),
+        P_mean=float(config.model.get("P_mean", -0.4)),
+        P_std=float(config.model.get("P_std", 1.0)),
+        data_proportion=float(config.model.get("data_proportion", 0.5)),
         eval=eval_mode,
     )
+
+
+def _get_sit_sample_mode(config):
+    if str(config.transport.get("objective", "sit")) == "power_meanflow":
+        return "interval_meanflow"
+    return "instantaneous"
 
 
 def _load_initial_state(state, config):
@@ -312,6 +332,7 @@ def _write_eval_metrics_csv(
     checkpoint_path,
     is_best_fid,
     is_best_fd_dino,
+    sample_mode,
 ):
     append_eval_metrics_row(
         workdir,
@@ -329,6 +350,7 @@ def _write_eval_metrics_csv(
             "is_best_fid": int(bool(is_best_fid)),
             "is_best_fd_dino": int(bool(is_best_fd_dino)),
             "checkpoint_path": checkpoint_path,
+            "sample_mode": str(sample_mode),
         },
     )
 
@@ -355,6 +377,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
     sample_local_device_count = get_sample_local_device_count(config)
     sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
+    sample_mode = _get_sit_sample_mode(config)
     log_for_0("config.fid.device_batch_size: %s", metric_device_bsz)
     log_for_0("config.fid.sample_device_batch_size: %s", sample_device_bsz)
     log_for_0("sampling local device count: %s", sample_local_device_count)
@@ -385,13 +408,15 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
 
     image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
 
-    best_fid = float("inf")
-    best_is = float("-inf")
-    best_fd_dino = float("inf")
-    best_config = None
-    best_fd_dino_config = None
-    best_fd_dino_at_best_fid = None
-    csv_rows = []
+    best_results = {
+        "best_fid": float("inf"),
+        "best_is": float("-inf"),
+        "best_fd_dino": float("inf"),
+        "best_config": None,
+        "best_fd_dino_config": None,
+        "best_fd_dino_at_best_fid": None,
+        "rows": [],
+    }
     metric_mode = _primary_metric_mode(use_ema)
 
     for omega, t_min, t_max in _get_eval_sampling_configs(config):
@@ -410,13 +435,15 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         is_score = result["is"]
         fd_dino = result.get("fd_dino", None)
 
-        if fid < best_fid:
-            best_fid, best_is, best_config = fid, is_score, (omega, t_min, t_max)
-            best_fd_dino_at_best_fid = fd_dino
-        if fd_dino is not None and fd_dino < best_fd_dino:
-            best_fd_dino = fd_dino
-            best_fd_dino_config = (omega, t_min, t_max)
-        csv_rows.append(
+        if fid < best_results["best_fid"]:
+            best_results["best_fid"] = fid
+            best_results["best_is"] = is_score
+            best_results["best_config"] = (omega, t_min, t_max)
+            best_results["best_fd_dino_at_best_fid"] = fd_dino
+        if fd_dino is not None and fd_dino < best_results["best_fd_dino"]:
+            best_results["best_fd_dino"] = fd_dino
+            best_results["best_fd_dino_config"] = (omega, t_min, t_max)
+        best_results["rows"].append(
             {
                 "omega": omega,
                 "t_min": t_min,
@@ -427,7 +454,9 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
             }
         )
 
-    for row in csv_rows:
+    summary = {}
+    best_config = best_results["best_config"]
+    for row in best_results["rows"]:
         row_config = (row["omega"], row["t_min"], row["t_max"])
         _write_eval_metrics_csv(
             workdir,
@@ -444,35 +473,40 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
             checkpoint_path=os.path.abspath(config.load_from),
             is_best_fid=(row_config == best_config),
             is_best_fd_dino=(
-                best_fd_dino_config is not None and row_config == best_fd_dino_config
+                best_results["best_fd_dino_config"] is not None
+                and row_config == best_results["best_fd_dino_config"]
             ),
+            sample_mode=sample_mode,
         )
 
-    summary = {
-        "best_fid": best_fid,
-        "best_is": best_is,
-        "omega": best_config[0],
-        "t_min": best_config[1],
-        "t_max": best_config[2],
-    }
+    summary["best_fid"] = best_results["best_fid"]
+    summary["best_is"] = best_results["best_is"]
+    if best_config is not None:
+        summary["omega"] = best_config[0]
+        summary["t_min"] = best_config[1]
+        summary["t_max"] = best_config[2]
+    if best_results["best_fd_dino_at_best_fid"] is not None:
+        summary["best_fd_dino_at_best_fid"] = best_results["best_fd_dino_at_best_fid"]
+    if best_results["best_fd_dino_config"] is not None:
+        summary["best_fd_dino"] = best_results["best_fd_dino"]
+        summary["best_fd_dino_omega"] = best_results["best_fd_dino_config"][0]
+        summary["best_fd_dino_t_min"] = best_results["best_fd_dino_config"][1]
+        summary["best_fd_dino_t_max"] = best_results["best_fd_dino_config"][2]
     log_message = (
-        f"Best FID achieved: {best_fid:.2f}, \n"
-        f"IS achieved: {best_is:.2f}, \n"
-        f"omega: {best_config[0]:.2f}, t_min: {best_config[1]:.2f}, t_max: {best_config[2]:.2f}"
+        f"{sample_mode}: best FID {best_results['best_fid']:.2f}, "
+        f"IS {best_results['best_is']:.2f}"
     )
-    if best_fd_dino_at_best_fid is not None:
-        summary["best_fd_dino_at_best_fid"] = best_fd_dino_at_best_fid
-        log_message += f", \nFD-DINO at best FID config: {best_fd_dino_at_best_fid:.2f}"
-    if best_fd_dino_config is not None:
-        summary["best_fd_dino"] = best_fd_dino
-        summary["best_fd_dino_omega"] = best_fd_dino_config[0]
-        summary["best_fd_dino_t_min"] = best_fd_dino_config[1]
-        summary["best_fd_dino_t_max"] = best_fd_dino_config[2]
+    if best_config is not None:
         log_message += (
-            f", \nBest FD-DINO achieved: {best_fd_dino:.2f}, "
-            f"omega: {best_fd_dino_config[0]:.2f}, "
-            f"t_min: {best_fd_dino_config[1]:.2f}, "
-            f"t_max: {best_fd_dino_config[2]:.2f}"
+            f", omega {best_config[0]:.2f}, "
+            f"t_min {best_config[1]:.2f}, t_max {best_config[2]:.2f}"
+        )
+    if best_results["best_fd_dino_config"] is not None:
+        log_message += (
+            f"\n{sample_mode}: best FD-DINO {best_results['best_fd_dino']:.2f}, "
+            f"omega {best_results['best_fd_dino_config'][0]:.2f}, "
+            f"t_min {best_results['best_fd_dino_config'][1]:.2f}, "
+            f"t_max {best_results['best_fd_dino_config'][2]:.2f}"
         )
     log_for_0(log_message)
     writer.write_scalars(step, summary)
@@ -507,6 +541,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     sample_local_device_count = get_sample_local_device_count(config)
     sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
+    sample_mode = _get_sit_sample_mode(config)
     max_train_steps = config.training.get("max_train_steps", None)
     grad_accum_steps = config.training.get("grad_accum_steps", 1)
 
@@ -663,7 +698,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             ] = [preview_panel]
 
         stacked_preview_panel = make_stacked_grid_panel(preview_image_groups, 1)
-        writer.write_images(step_for_logging, {"image_grid": stacked_preview_panel})
+        writer.write_images(
+            step_for_logging,
+            {f"image_grid_{sample_mode}": stacked_preview_panel},
+        )
 
     image_metric_evaluator = get_image_metric_evaluator(
         config,
@@ -738,7 +776,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
                 for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
                     log_for_0(
-                        "Running metric evaluation at step %d with %d sampling steps.",
+                        "Running %s metric evaluation at step %d with %d sampling steps.",
+                        sample_mode,
                         current_step,
                         metric_num_steps,
                     )
@@ -767,7 +806,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         and is_best_fid
                     ):
                         log_for_0(
-                            "New best %d-step FID %.4f at step %d. Saving best checkpoint to %s.",
+                            "New best %s %d-step FID %.4f at step %d. Saving best checkpoint to %s.",
+                            sample_mode,
                             metric_num_steps,
                             fid,
                             current_step,
@@ -795,6 +835,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         ),
                         is_best_fid=is_best_fid,
                         is_best_fd_dino=is_best_fd_dino,
+                        sample_mode=sample_mode,
                     )
 
                 if save_eval_checkpoint_per_fid:

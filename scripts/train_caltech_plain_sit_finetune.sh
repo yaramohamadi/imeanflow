@@ -62,11 +62,11 @@ case "${BACKBONE:-}" in
     ;;
   sit|SiT)
     MODEL_STR="${MODEL_STR:-flaxSiT_XL_2}"
-    LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/SiT-XL-2-256.pt}"
+    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/SiT-XL-2-256.pt}"
     ;;
   dit|DiT)
     MODEL_STR="${MODEL_STR:-flaxDiT_XL_2}"
-    LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
+    LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt}"
     ;;
   *)
     echo "ERROR: unknown BACKBONE='$BACKBONE'. Known: sit, dit." >&2
@@ -82,10 +82,10 @@ DATASET_LABEL=""
 case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/caltech-101_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/caltech-101-fid_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz}"
     if [[ ! -v FD_DINO_CACHE_REF ]]; then
-      FD_DINO_CACHE_REF="/scratch/ymbahram/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
+      FD_DINO_CACHE_REF="/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz"
     fi
     ;;
   artbench10|artbench-10)

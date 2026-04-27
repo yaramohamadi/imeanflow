@@ -22,6 +22,7 @@ EVAL_METRIC_FIELDNAMES = (
     "is_best_fid",
     "is_best_fd_dino",
     "checkpoint_path",
+    "sample_mode",
 )
 
 

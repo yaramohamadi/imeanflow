@@ -123,6 +123,7 @@ def get_config():
     sampling.meanflow_reverse_time = False
     sampling.method = "euler"
     sampling.flip_time = False
+    sampling.eval_modes = ()
     sampling.half_precision = False
     sampling.half_precision_dtype = "float16"
 
@@ -134,6 +135,8 @@ def get_config():
     transport.loss_weight = None
     transport.train_eps = None
     transport.sample_eps = None
+    transport.objective = "sit"
+    transport.path_power_k = 1.0
 
     # ------------------------------------------------------------
     # Original DiT diffusion

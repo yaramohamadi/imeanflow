@@ -333,13 +333,18 @@ def _convert_torch_sit_state_dict_to_flax_mf(source_dict):
     return {"net": state}
 
 
-def _convert_torch_sit_state_dict_to_flax_exact(source_dict):
+def _convert_torch_sit_state_dict_to_flax_exact(source_dict, target_state=None):
     """Convert a SiT PyTorch state_dict into the exact Flax SiT tree."""
     state = _convert_torch_sit_common_state(source_dict)
 
     time_params = _extract_sit_time_embedder_params(source_dict)
     if time_params is not None:
         _set_sit_time_embedder(state, "t_embedder", time_params)
+        target_net_state = (
+            target_state.get("net", {}) if isinstance(target_state, dict) else {}
+        )
+        if isinstance(target_net_state, dict) and "r_embedder" in target_net_state:
+            _set_sit_time_embedder(state, "r_embedder", time_params)
 
     blocks = [key for key in source_dict.keys() if key.startswith("blocks.")]
     block_indices = sorted({int(k.split(".")[1]) for k in blocks})
@@ -660,7 +665,10 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None, target_m
         if _target_uses_jit_layout(target_state):
             return _convert_torch_jit_state_dict_to_flax(source_tree)
         if _target_uses_exact_sit_layout(target_state):
-            return _convert_torch_sit_state_dict_to_flax_exact(source_tree)
+            return _convert_torch_sit_state_dict_to_flax_exact(
+                source_tree,
+                target_state=target_state,
+            )
         if _target_uses_dmf_sit_layout(target_state):
             encoder_depth = _infer_dmf_encoder_depth(target_state)
             return _convert_torch_sit_state_dict_to_flax_dmf(

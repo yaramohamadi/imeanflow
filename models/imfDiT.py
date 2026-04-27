@@ -732,6 +732,7 @@ class FlaxSiT(nn.Module):
     use_null_class: bool = True
     learn_sigma: bool = True
     return_learned_sigma: bool = False
+    use_r_conditioning: bool = False
     eval: bool = False
     weight_init: str = "scaled_variance"
     weight_init_constant: float = 1.0
@@ -751,6 +752,12 @@ class FlaxSiT(nn.Module):
             weight_init=self.weight_init,
             init_constant=self.weight_init_constant,
         )
+        if self.use_r_conditioning:
+            self.r_embedder = SiTTimeEmbedder(
+                self.hidden_size,
+                weight_init=self.weight_init,
+                init_constant=self.weight_init_constant,
+            )
         self.y_embedder = LabelEmbedder(
             self.num_classes,
             self.hidden_size,
@@ -795,13 +802,18 @@ class FlaxSiT(nn.Module):
         x = jnp.einsum("nhwpqc->nhpwqc", x)
         return x.reshape((x.shape[0], h * p, w * p, c))
 
-    def __call__(self, x, t, y):
+    def __call__(self, x, t, y, r=None):
         x = self.x_embedder(x) + self.pos_embed
 
         if y is None:
             y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
 
-        c = self.t_embedder(t).astype(x.dtype) + self.y_embedder(y).astype(x.dtype)
+        c = self.t_embedder(t).astype(x.dtype)
+        if self.use_r_conditioning:
+            if r is None:
+                r = t
+            c = c + self.r_embedder(r).astype(x.dtype)
+        c = c + self.y_embedder(y).astype(x.dtype)
         for block in self.blocks:
             x = block(x, c)
 
