@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+DATASETS="${DATASETS:-caltech101 artbench10 cub200 food101 stanfordcars}"
+SBATCH_SCRIPT="${SBATCH_SCRIPT:-scripts/train_plain_jit_compute_canada.sbatch}"
+USE_WANDB="${USE_WANDB:-True}"
+WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
+LEARNING_RATE="${LEARNING_RATE:-1.5e-6}"
+MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-50000}"
+FID_EVERY_STEPS="${FID_EVERY_STEPS:-2500}"
+PREVIEW_EVERY_STEPS="${PREVIEW_EVERY_STEPS:-2500}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 50}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
+SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-16}"
+TIME_LIMIT="${TIME_LIMIT:-20:00:00}"
+MEMORY="${MEMORY:-64G}"
+ACCOUNT="${ACCOUNT:-def-hadi87}"
+GPU_REQUEST="${GPU_REQUEST:-gpu:h100:1}"
+RUN_LABEL_SUFFIX="${RUN_LABEL_SUFFIX:-jit_h16_lr1p5e6_50k}"
+DRY_RUN="${DRY_RUN:-False}"
+
+for dataset in $DATASETS; do
+  run_label="${dataset}_${RUN_LABEL_SUFFIX}"
+  job_name="plain_jit_${dataset}"
+  export_arg=$(
+    IFS=,
+    echo "ALL,DATASET_NAME=$dataset,RUN_LABEL=$run_label,USE_WANDB=$USE_WANDB,WANDB_PROJECT=$WANDB_PROJECT,LEARNING_RATE=$LEARNING_RATE,MAX_TRAIN_STEPS=$MAX_TRAIN_STEPS,FID_EVERY_STEPS=$FID_EVERY_STEPS,PREVIEW_EVERY_STEPS=$PREVIEW_EVERY_STEPS,FINAL_EVAL_STEPS=$FINAL_EVAL_STEPS,RUN_FINAL_BEST_FID_EVAL=$RUN_FINAL_BEST_FID_EVAL,TRAIN_BATCH_SIZE=$TRAIN_BATCH_SIZE,SAMPLE_DEVICE_BATCH_SIZE=$SAMPLE_DEVICE_BATCH_SIZE"
+  )
+
+  cmd=(
+    sbatch
+    --job-name="$job_name"
+    --account="$ACCOUNT"
+    --mem="$MEMORY"
+    --time="$TIME_LIMIT"
+    --gres="$GPU_REQUEST"
+    --export="$export_arg"
+    "$SBATCH_SCRIPT"
+  )
+
+  if [[ "${DRY_RUN,,}" =~ ^(1|true|yes|y|on)$ ]]; then
+    printf '%q ' "${cmd[@]}"
+    printf '\n'
+  else
+    "${cmd[@]}"
+  fi
+done

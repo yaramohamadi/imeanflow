@@ -42,7 +42,7 @@ CONFIG_MODE="${CONFIG_MODE:-plain_jit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
-LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/JiT-H-16-256.pth}"
+LOAD_FROM="${LOAD_FROM:-/home/ens/AT74470/imeanflow/files/weights/JiT-H-16-256.pth}"
 HALF_PRECISION="${HALF_PRECISION:-False}"
 SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
 SAMPLE_FIRST_DEVICE_ONLY="${SAMPLE_FIRST_DEVICE_ONLY:-False}"
@@ -63,33 +63,33 @@ DATASET_LABEL=""
 case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/caltech-101_images}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/caltech-101-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/caltech-101_images}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
     ;;
   artbench10|artbench-10)
     DATASET_LABEL="artbench10"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/artbench-10_images}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/artbench-10_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/artbench-10_images}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/artbench-10_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
     ;;
   cub200|cub-200|cub-200-2011)
     DATASET_LABEL="cub200"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/cub-200-2011_images}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/cub-200-2011_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/cub-200-2011_images}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
     ;;
   food101|food-101)
     DATASET_LABEL="food101"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/food-101_images}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/food-101_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/food-101_images}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/food-101_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
     ;;
   stanfordcars|stanford-cars|cars)
     DATASET_LABEL="stanfordcars"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/stanford-cars_images}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/stanford_cars_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/home/ens/AT74470/datasets/stanford-cars_images}"
+    FID_CACHE_REF="${FID_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/home/ens/AT74470/imeanflow/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
     ;;
   *)
     echo "ERROR: unknown DATASET_NAME='$DATASET_NAME'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
@@ -150,7 +150,7 @@ NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
 JOB_PREFIX="${JOB_PREFIX:-plain_JiT_finetune}_${DATASET_LABEL}"
 JOBNAME="${JOB_PREFIX}_${RUN_LABEL}_${NOW}_${SALT}"
-WORKDIR="$LOG_DIR/finetuning/$JOBNAME"
+WORKDIR="${WORKDIR:-$LOG_DIR/finetuning/$JOBNAME}"
 mkdir -p "$WORKDIR"
 
 cat <<EOF

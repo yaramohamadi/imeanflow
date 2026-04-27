@@ -149,17 +149,17 @@ def _load_torch_checkpoint_state_dict(workdir, prefer_ema=True):
     if (
         isinstance(raw, dict)
         and prefer_ema
-        and "model_ema2" in raw
-        and isinstance(raw["model_ema2"], dict)
-    ):
-        raw = raw["model_ema2"]
-    elif (
-        isinstance(raw, dict)
-        and prefer_ema
         and "model_ema1" in raw
         and isinstance(raw["model_ema1"], dict)
     ):
         raw = raw["model_ema1"]
+    elif (
+        isinstance(raw, dict)
+        and prefer_ema
+        and "model_ema2" in raw
+        and isinstance(raw["model_ema2"], dict)
+    ):
+        raw = raw["model_ema2"]
     elif isinstance(raw, dict) and "state_dict" in raw:
         raw = raw["state_dict"]
     elif isinstance(raw, dict) and "model" in raw and isinstance(raw["model"], dict):

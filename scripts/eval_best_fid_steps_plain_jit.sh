@@ -35,6 +35,51 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+filter_eval_override_args() {
+  local -a filtered_args=()
+  local skip_next=0
+  local arg=""
+  for arg in "$@"; do
+    if [[ "$skip_next" -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    case "$arg" in
+      --workdir|--config|--config.eval_only|--config.partial_load|--config.load_from|--config.sampling.num_steps|--config.logging.use_wandb)
+        skip_next=1
+        ;;
+      --workdir=*|--config=*|--config.eval_only=*|--config.partial_load=*|--config.load_from=*|--config.sampling.num_steps=*|--config.logging.use_wandb=*)
+        ;;
+      *)
+        filtered_args+=("$arg")
+        ;;
+    esac
+  done
+  if [[ ${#filtered_args[@]} -gt 0 ]]; then
+    printf '%s\n' "${filtered_args[@]}"
+  fi
+}
+
+validate_eval_override_args() {
+  local arg=""
+  for arg in "$@"; do
+    case "$arg" in
+      --config.dataset.root=...|--config.dataset.root=.../*)
+        echo "ERROR: --config.dataset.root uses the literal placeholder '...'. Pass a real dataset root or omit this override." >&2
+        exit 6
+        ;;
+      --config.fid.cache_ref=...|--config.fid.cache_ref=.../*)
+        echo "ERROR: --config.fid.cache_ref uses the literal placeholder '...'. Pass a real cache path or omit this override." >&2
+        exit 6
+        ;;
+      --config.fd_dino.cache_ref=...|--config.fd_dino.cache_ref=.../*)
+        echo "ERROR: --config.fd_dino.cache_ref uses the literal placeholder '...'. Pass a real cache path or omit this override." >&2
+        exit 6
+        ;;
+    esac
+  done
+}
+
 if [[ ${#STEPS[@]} -eq 0 ]]; then
   STEPS=(1 2 50)
 fi
@@ -43,6 +88,8 @@ CONFIG_MODE="${CONFIG_MODE:-plain_jit_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-}"
+mapfile -t FILTERED_EXTRA_CONFIG_ARGS < <(filter_eval_override_args "${EXTRA_CONFIG_ARGS[@]}")
+validate_eval_override_args "${FILTERED_EXTRA_CONFIG_ARGS[@]}"
 
 if [[ -d "$BEST_FID_ROOT" && $(basename "$BEST_FID_ROOT") != "best_fid" ]]; then
   BEST_FID_DIR="$BEST_FID_ROOT/best_fid"
@@ -99,7 +146,7 @@ for NUM_STEPS in "${STEPS[@]}"; do
       main_jit.py \
       --workdir="$EVAL_WORKDIR" \
       --config=configs/load_config.py:"${CONFIG_MODE}" \
-      "${EXTRA_CONFIG_ARGS[@]}" \
+      "${FILTERED_EXTRA_CONFIG_ARGS[@]}" \
       --config.eval_only=True \
       --config.partial_load=False \
       --config.load_from="$CHECKPOINT_DIR" \
