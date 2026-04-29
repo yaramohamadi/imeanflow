@@ -10,7 +10,7 @@ model:
     num_classes: 101
     cfg_beta: 1.0
     use_dogfit: True
-    target_use_null_class: True
+    target_use_null_class: False
     class_dropout_prob: 0.0
     source_prediction_space: 'v'
     source_num_classes: 1000

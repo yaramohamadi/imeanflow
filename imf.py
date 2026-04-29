@@ -1408,3 +1408,28 @@ class iMeanFlow(nn.Module):
             zeros = jnp.zeros_like(t)
             return self.net(x, t, zeros, ones, zeros, ones, y)  # initialization only
         return self.net(x, t, t, y)  # initialization only
+
+    def init_source(self, x, t, y):
+        if not (
+            self.use_dogfit
+            or self._uses_src_reg_training_mode()
+            or self._uses_split_consistency_source_ablation()
+        ):
+            return y
+
+        if self._uses_auxiliary_v_head():
+            zeros = jnp.zeros_like(t)
+            ones = jnp.ones_like(t)
+            return self.source_net(x, t, zeros, ones, zeros, ones, y)
+        if self._uses_sit_guidance_context_conditioning():
+            ones = jnp.ones_like(t)
+            zeros = jnp.zeros_like(t)
+            return self.source_net(x, t, t, y, ones, zeros, ones)
+        if self._uses_sit_adaln_guidance_scale_conditioning():
+            ones = jnp.ones_like(t)
+            return self.source_net(x, t, t, y, ones)
+        if self._uses_imf_dit_backbone():
+            ones = jnp.ones_like(t)
+            zeros = jnp.zeros_like(t)
+            return self.source_net(x, t, zeros, ones, zeros, ones, y)
+        return self.source_net(x, t, t, y)

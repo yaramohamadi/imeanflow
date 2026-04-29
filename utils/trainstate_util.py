@@ -38,6 +38,22 @@ def initialized(key, image_size, model):
     return variables, variables["params"]
 
 
+def initialized_source(key, image_size, model, source_num_classes):
+    input_shape = (1, image_size, image_size, 4)
+    x = jnp.ones(input_shape)
+    t = jnp.ones((1,), dtype=int)
+    y = jnp.full((1,), source_num_classes, dtype=int)
+
+    @jax.jit
+    def init(*args):
+        return model.init(*args, method=model.init_source)
+
+    log_for_0("Initializing source params...")
+    variables = init({"params": key}, x, t, y)
+    log_for_0("Initializing source params done.")
+    return variables, variables["params"]
+
+
 #######################################################
 #                     Train State                     #
 #######################################################
@@ -85,7 +101,16 @@ def create_train_state(
             )
         )
     )
-    if needs_source_params:
+    if config.model.get("use_dogfit", False):
+        rng, rng_source_init = random.split(rng)
+        _, source_init_params = initialized_source(
+            rng_source_init,
+            image_size,
+            model,
+            int(config.model.get("source_num_classes", config.dataset.num_classes)),
+        )
+        source_params = deepcopy(source_init_params["source_net"])
+    elif needs_source_params:
         source_params = deepcopy(params)
     else:
         source_params = None

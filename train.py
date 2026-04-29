@@ -57,6 +57,10 @@ def compute_metrics(dict_losses):
     return metrics
 
 
+def compute_metrics_single_device(dict_losses):
+    return {k: jnp.mean(v) for k, v in dict_losses.items()}
+
+
 def train_step_with_vae(
     state, batch, rng_init, ema_fn, lr_fn, latent_manager, use_ema, grad_accum_steps
 ):
@@ -93,6 +97,79 @@ def train_step_with_vae(
     dict_losses = aux[1]
     metrics = compute_metrics(dict_losses)
     metrics["lr"] = lr_value
+    new_grad_accum = jax.tree_util.tree_map(
+        lambda acc, g: acc + g, state.grad_accum, grads
+    )
+    new_accum_step = state.grad_accum_step + 1
+    should_apply = new_accum_step >= grad_accum_steps
+
+    def apply_update(args):
+        current_state, accum_grads = args
+        mean_grads = jax.tree_util.tree_map(
+            lambda g: g / grad_accum_steps, accum_grads
+        )
+        updated_state = current_state.apply_gradients(grads=mean_grads)
+        if use_ema:
+            ema_value = ema_fn(current_state.step)
+            new_ema = update_ema(
+                updated_state.ema_params, updated_state.params, ema_value
+            )
+            updated_state = updated_state.replace(ema_params=new_ema)
+        zero_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+        updated_state = updated_state.replace(
+            grad_accum=zero_accum,
+            grad_accum_step=jnp.array(0, dtype=jnp.int32),
+        )
+        return updated_state
+
+    def keep_accumulating(args):
+        current_state, accum_grads = args
+        return current_state.replace(
+            grad_accum=accum_grads,
+            grad_accum_step=new_accum_step,
+        )
+
+    new_state = jax.lax.cond(
+        should_apply,
+        apply_update,
+        keep_accumulating,
+        (state, new_grad_accum),
+    )
+    metrics["did_update"] = should_apply.astype(jnp.float32)
+    return new_state, metrics
+
+
+def train_step_with_vae_single_device(
+    state, batch, rng_init, ema_fn, lr_fn, latent_manager, use_ema, grad_accum_steps
+):
+    """Single-device variant that avoids pmap collectives/compiler bugs."""
+    rng_step = random.fold_in(rng_init, state.step)
+    rng_base = rng_step
+
+    images = batch["image"][0]
+    labels = batch["label"][0]
+
+    rng_base, rng_vae = random.split(rng_base)
+    images = latent_manager.cached_encode(images, rng_vae)
+
+    def loss_fn(params):
+        outputs = state.apply_fn(
+            {"params": params},
+            images=images,
+            labels=labels,
+            source_params=state.source_params,
+            current_step=state.step,
+            rngs=dict(gen=rng_base),
+        )
+        return outputs
+
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    aux, grads = grad_fn(state.params)
+    lr_value = lr_fn(state.step)
+    dict_losses = aux[1]
+    metrics = compute_metrics_single_device(dict_losses)
+    metrics["lr"] = lr_value
+
     new_grad_accum = jax.tree_util.tree_map(
         lambda acc, g: acc + g, state.grad_accum, grads
     )
@@ -197,6 +274,60 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
         "debug/V_to_v_g_mse": jnp.mean((V - v_g) ** 2),
     }
     metrics = lax.pmean(metrics, axis_name="batch")
+    return outputs, metrics
+
+
+def debug_step_with_vae_single_device(state, batch, rng_init, latent_manager, model):
+    """Single-device debug forward without pmap collectives."""
+    rng_step = random.fold_in(rng_init, state.step)
+    rng_base = rng_step
+
+    images = batch["image"][0]
+    labels = batch["label"][0]
+
+    rng_base, rng_vae = random.split(rng_base)
+    images = latent_manager.cached_encode(images, rng_vae)
+
+    outputs = model.apply(
+        {"params": state.params},
+        images=images,
+        labels=labels,
+        source_params=state.source_params,
+        current_step=state.step,
+        rngs=dict(gen=rng_base),
+        method=model.debug_forward,
+    )
+
+    v_u = outputs["v_u"]
+    v_c = outputs["v_c"]
+    v_g = outputs["v_g"]
+    v_pred = outputs["v_pred"]
+    V = outputs["V"]
+
+    metrics = {
+        "debug/omega_mean": jnp.mean(outputs["omega"]),
+        "debug/w_eff_mean": jnp.mean(outputs["w_eff_mean"]),
+        "debug/guidance_blend_mean": jnp.mean(outputs["guidance_blend_mean"]),
+        "debug/t_mean": jnp.mean(outputs["t"]),
+        "debug/r_mean": jnp.mean(outputs["r"]),
+        "debug/fm_fraction": jnp.mean(outputs["fm_mask"]),
+        "debug/v_u_mean": jnp.mean(v_u),
+        "debug/v_u_abs_mean": jnp.mean(jnp.abs(v_u)),
+        "debug/v_c_mean": jnp.mean(v_c),
+        "debug/v_c_abs_mean": jnp.mean(jnp.abs(v_c)),
+        "debug/v_c_minus_v_u_abs_mean": jnp.mean(jnp.abs(v_c - v_u)),
+        "debug/v_pred_mean": jnp.mean(v_pred),
+        "debug/v_pred_abs_mean": jnp.mean(jnp.abs(v_pred)),
+        "debug/V_mean": jnp.mean(V),
+        "debug/V_abs_mean": jnp.mean(jnp.abs(V)),
+        "debug/v_g_mean": jnp.mean(v_g),
+        "debug/v_g_abs_mean": jnp.mean(jnp.abs(v_g)),
+        "debug/v_u_to_v_c_cosine": _cosine_similarity(v_u, v_c),
+        "debug/v_pred_to_v_g_cosine": _cosine_similarity(v_pred, v_g),
+        "debug/V_to_v_g_cosine": _cosine_similarity(V, v_g),
+        "debug/v_pred_to_v_g_mse": jnp.mean((v_pred - v_g) ** 2),
+        "debug/V_to_v_g_mse": jnp.mean((V - v_g) ** 2),
+    }
     return outputs, metrics
 
 
@@ -564,18 +695,30 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 "imf_split_consistency source ablations."
             )
         elif config.training.get("capture_source_from_load", False):
-            source_ckpt_path = config.load_from
-            source_params = load_checkpoint_params(source_ckpt_path, prefer_ema=True)
+            source_target_state = {"net": deepcopy(state.source_params)}
+            source_model_config = deepcopy(config.model)
+            source_model_config["num_classes"] = int(config.model.source_num_classes)
+            source_model_config["target_use_null_class"] = True
+            source_model_config["use_dogfit"] = False
+            loaded_source_params = load_checkpoint_params(
+                config.load_from,
+                prefer_ema=True,
+                target_state=source_target_state,
+                target_model_config=source_model_config,
+            )
+            source_params = deepcopy(loaded_source_params["net"])
             state = state.replace(source_params=source_params)
             log_for_0(
-                "Loaded frozen source_params for DogFit from %s.",
-                source_ckpt_path,
+                "Loaded frozen DogFit source_params from pretrained source checkpoint.",
             )
 
     step = int(state.step)
     epoch_offset = step // steps_per_epoch
-
-    state = jax_utils.replicate(state)
+    single_device_training = jax.local_device_count() == 1
+    if single_device_training:
+        log_for_0("Using single-device JIT training fallback on one local GPU.")
+    else:
+        state = jax_utils.replicate(state)
 
     ########### Create Latent Manager ###########
 
@@ -588,29 +731,46 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
     ########### Create train and sample pmap ###########
 
-    p_train_step = jax.pmap(
-        partial(
-            train_step_with_vae,
+    if single_device_training:
+        p_train_step = partial(
+            train_step_with_vae_single_device,
             rng_init=rng,
             ema_fn=ema_fn,
             lr_fn=lr_fn,
             latent_manager=latent_manager,
             use_ema=use_ema,
             grad_accum_steps=grad_accum_steps,
-        ),
-        axis_name="batch",
-        donate_argnums=(0,),
-    )
-
-    p_debug_step = jax.pmap(
-        partial(
-            debug_step_with_vae,
+        )
+        p_debug_step = partial(
+            debug_step_with_vae_single_device,
             rng_init=rng,
             latent_manager=latent_manager,
             model=model,
-        ),
-        axis_name="batch",
-    )
+        )
+    else:
+        p_train_step = jax.pmap(
+            partial(
+                train_step_with_vae,
+                rng_init=rng,
+                ema_fn=ema_fn,
+                lr_fn=lr_fn,
+                latent_manager=latent_manager,
+                use_ema=use_ema,
+                grad_accum_steps=grad_accum_steps,
+            ),
+            axis_name="batch",
+            donate_argnums=(0,),
+        )
+
+        p_debug_step = jax.pmap(
+            partial(
+                debug_step_with_vae,
+                rng_init=rng,
+                latent_manager=latent_manager,
+                model=model,
+            ),
+            axis_name="batch",
+        )
 
     def build_p_sample_step(num_steps):
         return jax.pmap(
@@ -658,7 +818,26 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     }
     sample_kwargs = jax_utils.replicate(eval_sample_kwargs, devices=sample_devices)
 
+    def replicate_for_sampling(state_value):
+        if not single_device_training:
+            return state_value
+        return jax_utils.replicate(state_value, devices=sample_devices)
+
+    def state_step_value(state_value):
+        step_value = jax.device_get(state_value.step)
+        if np.ndim(step_value) == 0:
+            return int(step_value)
+        return int(step_value[0])
+
+    def metric_scalar(metric_value):
+        metric_value = jax.device_get(metric_value)
+        if np.ndim(metric_value) == 0:
+            return bool(metric_value) if np.asarray(metric_value).dtype == np.bool_ else float(metric_value)
+        first_value = np.asarray(metric_value)[0]
+        return bool(first_value) if np.asarray(first_value).dtype == np.bool_ else float(first_value)
+
     def log_preview_samples(state_for_logging, step_for_logging):
+        state_for_logging = replicate_for_sampling(state_for_logging)
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
         grid_size = int(num_images ** 0.5)
         num_images = grid_size ** 2
@@ -727,7 +906,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     metrics_tracker = MetricsTracker()
     log_for_0("Initial compilation, this might take some minutes...")
 
-    initial_step = int(jax.device_get(state.step)[0])
+    initial_step = state_step_value(state)
     if (
         initial_step == 0
         and config.training.sample_per_step > 0
@@ -748,8 +927,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         for n_batch, batch in enumerate(train_loader):
             batch = input_pipeline.prepare_batch_data(batch)
             state, metrics = p_train_step(state, batch)
-            current_step = int(jax.device_get(state.step)[0])
-            did_update = bool(jax.device_get(metrics["did_update"])[0])
+            current_step = state_step_value(state)
+            did_update = bool(metric_scalar(metrics["did_update"]))
 
             if epoch == epoch_offset and n_batch == 0:
                 log_for_0("Initial compilation completed. Reset timer.")
@@ -867,7 +1046,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
                 checkpoint_path_for_csv = ""
                 if save_eval_checkpoint_per_fid:
-                    save_best_checkpoint(state, eval_ckpt_dir)
+                    save_best_checkpoint(replicate_for_sampling(state), eval_ckpt_dir)
                     checkpoint_path_for_csv = eval_ckpt_dir
 
                 for metric_num_steps, p_metric_sample_step in p_metric_sample_steps.items():
@@ -877,7 +1056,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         metric_num_steps,
                     )
                     result = image_metric_evaluator(
-                        state,
+                        replicate_for_sampling(state),
                         p_metric_sample_step,
                         current_step - 1,
                         metric_suffix=f"steps_{metric_num_steps}",
@@ -908,7 +1087,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                             metric_num_steps,
                             best_fid_ckpt_dir,
                         )
-                        save_best_checkpoint(state, best_fid_ckpt_dir)
+                        save_best_checkpoint(
+                            replicate_for_sampling(state), best_fid_ckpt_dir
+                        )
                         row_checkpoint_path = best_fid_ckpt_dir
 
                     _write_eval_metrics_csv(
@@ -945,7 +1126,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 or (epoch + 1) == config.training.num_epochs
             )
         ):
-            save_checkpoint(state, workdir)
+            save_checkpoint(replicate_for_sampling(state), workdir)
 
         if should_stop:
             log_for_0("Reached max_train_steps=%d at step %d.", max_train_steps, current_step)
