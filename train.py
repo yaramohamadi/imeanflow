@@ -32,6 +32,7 @@ from utils.lr_utils import lr_schedules
 from utils.eval_csv_util import append_eval_metrics_row
 from utils.preview_util import (
     format_preview_guidance_label,
+    generate_preview_samples_eager,
     generate_preview_samples_first_device,
     make_side_by_side_preview_panel,
     make_stacked_grid_panel,
@@ -728,6 +729,12 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         image_size,
         decode_num_local_devices=sample_local_device_count,
     )
+    preview_latent_manager = LatentManager(
+        config.dataset.vae,
+        sample_device_bsz,
+        image_size,
+        decode_num_local_devices=1,
+    )
 
     ########### Create train and sample pmap ###########
 
@@ -798,9 +805,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         if preview_num_steps
         else (1, 2, 4)
     )
-    p_preview_sample_steps = {
-        num_steps: build_p_sample_step(num_steps) for num_steps in preview_num_steps
-    }
     guidance_controllable = has_controllable_sampling_guidance(config.model)
     preview_guidance_scales = config.training.get("preview_guidance_scales", [])
     if preview_guidance_scales:
@@ -837,7 +841,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         return bool(first_value) if np.asarray(first_value).dtype == np.bool_ else float(first_value)
 
     def log_preview_samples(state_for_logging, step_for_logging):
-        state_for_logging = replicate_for_sampling(state_for_logging)
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
         grid_size = int(num_images ** 0.5)
         num_images = grid_size ** 2
@@ -854,25 +857,20 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         )
         preview_image_groups = {}
         for omega in preview_guidance_scales:
-            preview_kwargs = jax_utils.replicate(
-                {
-                    "omega": omega,
-                    "t_min": preview_t_min,
-                    "t_max": preview_t_max,
-                },
-                devices=sample_devices,
-            )
             preview_images = {}
-            for num_steps, p_preview_step in p_preview_sample_steps.items():
-                preview_images[num_steps] = generate_preview_samples_first_device(
+            for num_steps in preview_num_steps:
+                preview_images[num_steps] = generate_preview_samples_eager(
                     state_for_logging,
-                    p_preview_step,
-                    latent_manager,
-                    use_ema,
+                    model,
+                    preview_latent_manager,
+                    config,
+                    num_steps,
+                    omega,
+                    preview_t_min,
+                    preview_t_max,
+                    ema=use_ema,
                     num_samples=num_images,
                     param_dtype=get_sampling_param_dtype(config),
-                    sample_local_device_count=sample_local_device_count,
-                    **preview_kwargs,
                 )
 
             preview_panel = make_side_by_side_preview_panel(preview_images, grid_size)

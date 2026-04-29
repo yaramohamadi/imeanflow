@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 import jax
 import jax.numpy as jnp
 
+from imf import generate
 from utils.logging_util import log_for_0
 from utils.sample_util import _slice_local_device_axis
 
@@ -135,6 +136,86 @@ def generate_preview_samples_first_device(
 
         samples = latent_manager.decode(latent)
         samples = samples[: latent_manager.batch_size]
+        samples = samples.transpose(0, 2, 3, 1)
+        samples = 127.5 * samples + 128.0
+        samples = jnp.clip(samples, 0, 255).astype(jnp.uint8)
+        samples_all.append(np.asarray(jax.device_get(samples)))
+
+    samples_all = np.concatenate(samples_all, axis=0)
+    return samples_all[:num_samples]
+
+
+def _first_local_device_tree(tree):
+    local_device_count = jax.local_device_count()
+
+    def maybe_take_first(x):
+        if hasattr(x, "shape") and x.shape and x.shape[0] == local_device_count:
+            return x[0]
+        return x
+
+    return jax.tree_util.tree_map(maybe_take_first, tree)
+
+
+def generate_preview_samples_eager(
+    state,
+    model,
+    latent_manager,
+    config,
+    num_steps,
+    omega,
+    t_min,
+    t_max,
+    ema=True,
+    num_samples=None,
+    param_dtype=None,
+    rng_seed=99,
+):
+    """Generate preview samples without pmap/jit-heavy preview compilation."""
+    if num_samples is None:
+        raise ValueError("num_samples must be provided for eager preview generation.")
+
+    params = state.ema_params if ema else state.params
+    params = _first_local_device_tree(params)
+    if param_dtype is not None:
+        params = jax.tree_util.tree_map(
+            lambda x: x.astype(param_dtype)
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+            else x,
+            params,
+        )
+    variable = {"params": params}
+
+    samples_all = []
+    num_iters = int(np.ceil(num_samples / latent_manager.batch_size))
+    for step in range(num_iters):
+        batch_num_samples = min(
+            latent_manager.batch_size,
+            num_samples - step * latent_manager.batch_size,
+        )
+        rng = jax.random.fold_in(jax.random.PRNGKey(rng_seed + int(num_steps)), step)
+        log_for_0(
+            "Eager preview sampling step %d / %d with num_steps=%d.",
+            step,
+            num_iters,
+            num_steps,
+        )
+        with jax.disable_jit():
+            latent = generate(
+                variable,
+                model,
+                rng,
+                batch_num_samples,
+                config,
+                num_steps,
+                float(omega),
+                float(t_min),
+                float(t_max),
+                sample_idx=None,
+            )
+
+        latent = latent.transpose(0, 3, 1, 2)
+        samples = latent_manager.decode(latent)
+        samples = samples[:batch_num_samples]
         samples = samples.transpose(0, 2, 3, 1)
         samples = 127.5 * samples + 128.0
         samples = jnp.clip(samples, 0, 255).astype(jnp.uint8)
