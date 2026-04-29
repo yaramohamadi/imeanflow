@@ -216,6 +216,19 @@ class iMeanFlow(nn.Module):
             and not self._uses_sit_adaln_guidance_scale_conditioning()
         )
 
+    def _resolve_source_params(self, source_params):
+        if source_params is None:
+            raise ValueError("source_params must be provided for source-model calls.")
+
+        if not isinstance(source_params, dict):
+            return source_params
+
+        if "source_net" in source_params:
+            return source_params["source_net"]
+        if "net" in source_params:
+            return source_params["net"]
+        return source_params
+
     def _mf_target_interval_coeff(self, t, r):
         if self._uses_sit_dmf_time_convention() and self.use_positive_sit_dmf_mf_target:
             return r - t
@@ -671,10 +684,11 @@ class iMeanFlow(nn.Module):
                 "imf_jvp_free_src_reg."
             )
 
+        source_param_tree = self._resolve_source_params(source_params)
         bz = x.shape[0]
         if self._uses_auxiliary_v_head():
             u, _ = self.source_net.apply(
-                {"params": source_params["net"]},
+                {"params": source_param_tree},
                 x,
                 t.reshape(bz),
                 h.reshape(bz),
@@ -687,7 +701,7 @@ class iMeanFlow(nn.Module):
 
         if self._uses_imf_dit_backbone():
             u, _ = self.source_net.apply(
-                {"params": source_params["net"]},
+                {"params": source_param_tree},
                 x,
                 t.reshape(bz),
                 h.reshape(bz),
@@ -701,7 +715,7 @@ class iMeanFlow(nn.Module):
         r = t - h
         if self._uses_sit_guidance_context_conditioning():
             return self.source_net.apply(
-                {"params": source_params["net"]},
+                {"params": source_param_tree},
                 x,
                 t.reshape(bz),
                 r.reshape(bz),
@@ -712,7 +726,7 @@ class iMeanFlow(nn.Module):
             )
         if self._uses_sit_adaln_guidance_scale_conditioning():
             return self.source_net.apply(
-                {"params": source_params["net"]},
+                {"params": source_param_tree},
                 x,
                 t.reshape(bz),
                 r.reshape(bz),
@@ -722,7 +736,7 @@ class iMeanFlow(nn.Module):
 
         del omega, t_min, t_max
         return self.source_net.apply(
-            {"params": source_params["net"]},
+            {"params": source_param_tree},
             x,
             t.reshape(bz),
             r.reshape(bz),
@@ -743,13 +757,14 @@ class iMeanFlow(nn.Module):
                 f"Unsupported source_prediction_space: {self.source_prediction_space}"
             )
 
+        source_param_tree = self._resolve_source_params(source_params)
         bz = x.shape[0]
         if self._uses_auxiliary_v_head():
             h = jnp.zeros_like(t)
             t_min = jnp.zeros_like(t)
             t_max = jnp.ones_like(t)
             _, v = self.source_net.apply(
-                {"params": source_params["net"]},
+                {"params": source_param_tree},
                 x,
                 t.reshape(bz),
                 h.reshape(bz),
@@ -763,7 +778,7 @@ class iMeanFlow(nn.Module):
                 t_min = jnp.zeros_like(t)
                 t_max = jnp.ones_like(t)
                 v = self.source_net.apply(
-                    {"params": source_params["net"]},
+                    {"params": source_param_tree},
                     x,
                     t.reshape(bz),
                     t.reshape(bz),
@@ -774,7 +789,7 @@ class iMeanFlow(nn.Module):
                 )
             elif self._uses_sit_adaln_guidance_scale_conditioning():
                 v = self.source_net.apply(
-                    {"params": source_params["net"]},
+                    {"params": source_param_tree},
                     x,
                     t.reshape(bz),
                     t.reshape(bz),
@@ -783,7 +798,7 @@ class iMeanFlow(nn.Module):
                 )
             elif self._uses_imf_dit_backbone():
                 v, _ = self.source_net.apply(
-                    {"params": source_params["net"]},
+                    {"params": source_param_tree},
                     x,
                     t.reshape(bz),
                     jnp.zeros_like(t).reshape(bz),
@@ -795,7 +810,7 @@ class iMeanFlow(nn.Module):
             else:
                 del omega
                 v = self.source_net.apply(
-                    {"params": source_params["net"]},
+                    {"params": source_param_tree},
                     x,
                     t.reshape(bz),
                     t.reshape(bz),

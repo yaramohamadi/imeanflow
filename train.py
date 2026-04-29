@@ -728,7 +728,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     log_for_0("Initial compilation, this might take some minutes...")
 
     initial_step = int(jax.device_get(state.step)[0])
-    if initial_step == 0 and config.training.sample_per_step > 0:
+    if (
+        initial_step == 0
+        and config.training.sample_per_step > 0
+        and bool(config.training.get("preview_at_step_zero", True))
+    ):
         log_preview_samples(state, 0)
 
     should_stop = False
