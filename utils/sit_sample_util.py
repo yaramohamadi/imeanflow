@@ -54,11 +54,7 @@ def _guided_velocity(model, variable, x, t_model, labels, cfg_scale):
 
         out = model.apply(variable, x_cat, t_cat, y_cat)
         cond, uncond = jnp.split(out, 2, axis=0)
-
-        guided_first_three = uncond[..., :3] + cfg_scale * (
-            cond[..., :3] - uncond[..., :3]
-        )
-        return jnp.concatenate([guided_first_three, cond[..., 3:]], axis=-1)
+        return uncond + cfg_scale * (cond - uncond)
 
     return jax.lax.cond(
         jnp.equal(cfg_scale, 1.0),
@@ -84,11 +80,7 @@ def _guided_meanflow(model, variable, x, t_model, r_model, labels, cfg_scale):
 
         out = model.apply(variable, x_cat, t_cat, y_cat, r=r_cat)
         cond, uncond = jnp.split(out, 2, axis=0)
-
-        guided_first_three = uncond[..., :3] + cfg_scale * (
-            cond[..., :3] - uncond[..., :3]
-        )
-        return jnp.concatenate([guided_first_three, cond[..., 3:]], axis=-1)
+        return uncond + cfg_scale * (cond - uncond)
 
     return jax.lax.cond(
         jnp.equal(cfg_scale, 1.0),
