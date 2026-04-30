@@ -244,8 +244,21 @@ def _restore_eval_state(config, model, image_size, use_ema):
         if use_ema:
             state = state.replace(ema_params=state.params)
         return state
-
-    return restore_eval_checkpoint(load_path, use_ema=use_ema)
+    # For Flax/Orbax checkpoints, restore directly into an EvalState template so
+    # eval-only runs avoid materializing the full training state.
+    state = create_eval_state(
+        random.key(config.training.seed),
+        config,
+        model,
+        image_size,
+    )
+    state = state.replace(ema_params=state.params)
+    state = restore_checkpoint(state, load_path)
+    if use_ema and getattr(state, "ema_params", None) is None:
+        state = state.replace(ema_params=state.params)
+    if not use_ema:
+        state = state.replace(ema_params=None)
+    return state
 
 
 def _get_eval_sampling_configs(config):
