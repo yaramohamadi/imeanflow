@@ -2,6 +2,7 @@
 Training and evaluation for improved MeanFlow.
 """
 
+import dataclasses
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -98,9 +99,12 @@ def train_step_with_vae(
     dict_losses = aux[1]
     metrics = compute_metrics(dict_losses)
     metrics["lr"] = lr_value
-    new_grad_accum = jax.tree_util.tree_map(
-        lambda acc, g: acc + g, state.grad_accum, grads
-    )
+    if state.grad_accum is None:
+        new_grad_accum = grads
+    else:
+        new_grad_accum = jax.tree_util.tree_map(
+            lambda acc, g: acc + g, state.grad_accum, grads
+        )
     new_accum_step = state.grad_accum_step + 1
     should_apply = new_accum_step >= grad_accum_steps
 
@@ -116,9 +120,10 @@ def train_step_with_vae(
                 updated_state.ema_params, updated_state.params, ema_value
             )
             updated_state = updated_state.replace(ema_params=new_ema)
-        zero_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+        # Keep the pytree structure stable across lax.cond branches.
+        reset_grad_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
         updated_state = updated_state.replace(
-            grad_accum=zero_accum,
+            grad_accum=reset_grad_accum,
             grad_accum_step=jnp.array(0, dtype=jnp.int32),
         )
         return updated_state
@@ -171,9 +176,12 @@ def train_step_with_vae_single_device(
     metrics = compute_metrics_single_device(dict_losses)
     metrics["lr"] = lr_value
 
-    new_grad_accum = jax.tree_util.tree_map(
-        lambda acc, g: acc + g, state.grad_accum, grads
-    )
+    if state.grad_accum is None:
+        new_grad_accum = grads
+    else:
+        new_grad_accum = jax.tree_util.tree_map(
+            lambda acc, g: acc + g, state.grad_accum, grads
+        )
     new_accum_step = state.grad_accum_step + 1
     should_apply = new_accum_step >= grad_accum_steps
 
@@ -189,9 +197,10 @@ def train_step_with_vae_single_device(
                 updated_state.ema_params, updated_state.params, ema_value
             )
             updated_state = updated_state.replace(ema_params=new_ema)
-        zero_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
+        # Keep the pytree structure stable across lax.cond branches.
+        reset_grad_accum = jax.tree_util.tree_map(jnp.zeros_like, accum_grads)
         updated_state = updated_state.replace(
-            grad_accum=zero_accum,
+            grad_accum=reset_grad_accum,
             grad_accum_step=jnp.array(0, dtype=jnp.int32),
         )
         return updated_state
@@ -334,23 +343,24 @@ def debug_step_with_vae_single_device(state, batch, rng_init, latent_manager, mo
 
 def _latents_to_uint8_images(latent_manager, latents_bhwc):
     num_images = latents_bhwc.shape[0]
-    decode_total = latent_manager.batch_size * jax.local_device_count()
-    if num_images > decode_total:
-        raise ValueError(
-            f"Debug decode received {num_images} images, but the compiled VAE decoder "
-            f"supports at most {decode_total} images per call."
-        )
+    decode_total = latent_manager.batch_size * latent_manager.decode_num_local_devices
+    decoded_chunks = []
+    for start in range(0, num_images, decode_total):
+        chunk = latents_bhwc[start : start + decode_total]
+        chunk_size = chunk.shape[0]
+        if chunk_size < decode_total:
+            pad_shape = (decode_total - chunk_size,) + chunk.shape[1:]
+            chunk = jnp.concatenate(
+                [chunk, jnp.zeros(pad_shape, dtype=chunk.dtype)],
+                axis=0,
+            )
 
-    if num_images < decode_total:
-        pad_shape = (decode_total - num_images,) + latents_bhwc.shape[1:]
-        latents_bhwc = jnp.concatenate(
-            [latents_bhwc, jnp.zeros(pad_shape, dtype=latents_bhwc.dtype)],
-            axis=0,
-        )
+        latents_bchw = chunk.transpose(0, 3, 1, 2)
+        samples = latent_manager.decode(latents_bchw)
+        samples = samples[:chunk_size]
+        decoded_chunks.append(samples)
 
-    latents_bchw = latents_bhwc.transpose(0, 3, 1, 2)
-    samples = latent_manager.decode(latents_bchw)
-    samples = samples[:num_images]
+    samples = jnp.concatenate(decoded_chunks, axis=0)
     samples = samples.transpose(0, 2, 3, 1)
     samples = 127.5 * samples + 128.0
     return jnp.clip(samples, 0, 255).astype(jnp.uint8)
@@ -661,6 +671,16 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
     ########### Create Model ###########
     model_config = config.model.to_dict()
+    valid_model_keys = {field.name for field in dataclasses.fields(iMeanFlow)}
+    ignored_model_keys = sorted(set(model_config.keys()) - valid_model_keys)
+    if ignored_model_keys:
+        log_for_0(
+            "Ignoring unsupported iMeanFlow model config keys: %s",
+            ignored_model_keys,
+        )
+    model_config = {
+        key: value for key, value in model_config.items() if key in valid_model_keys
+    }
     model = iMeanFlow(**model_config)
 
     ########### Create Train State ###########

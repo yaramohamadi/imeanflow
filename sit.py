@@ -26,6 +26,8 @@ class PlainSiT(nn.Module):
     P_mean: float = -0.4
     P_std: float = 1.0
     data_proportion: float = 0.5
+    output_prediction_space: str = "velocity"
+    wrapper_eps: float = 1e-6
     eval: bool = False
 
     def setup(self):
@@ -58,6 +60,51 @@ class PlainSiT(nn.Module):
                 "PlainSiT objective must be one of ['sit', 'power_meanflow'], got "
                 f"{self.objective!r}."
             )
+
+    def _validate_output_prediction_space(self):
+        if self.output_prediction_space not in {"velocity", "data", "noise"}:
+            raise ValueError(
+                "PlainSiT output_prediction_space must be one of "
+                "['velocity', 'data', 'noise'], got "
+                f"{self.output_prediction_space!r}."
+            )
+        if self.output_prediction_space != "velocity" and self.objective != "sit":
+            raise ValueError(
+                "PlainSiT non-velocity output wrappers are only supported for "
+                f"objective='sit', got objective={self.objective!r}."
+            )
+
+    def _compute_wrapped_velocity(self, raw_output, xt, t):
+        self._validate_output_prediction_space()
+        if self.output_prediction_space == "velocity":
+            return raw_output
+
+        t_expanded = t.reshape((t.shape[0],) + (1,) * (xt.ndim - 1))
+        alpha_t, d_alpha_t = self.transport.path_sampler.compute_alpha_t(t_expanded)
+        sigma_t, d_sigma_t = self.transport.path_sampler.compute_sigma_t(t_expanded)
+        sigma_safe = jnp.where(
+            jnp.abs(sigma_t) > self.wrapper_eps,
+            sigma_t,
+            jnp.where(sigma_t >= 0.0, self.wrapper_eps, -self.wrapper_eps),
+        )
+
+        if self.output_prediction_space == "data":
+            x1_hat = raw_output
+            x0_hat = (xt - alpha_t * x1_hat) / sigma_safe
+        else:
+            x0_hat = raw_output
+            x1_hat = (xt - sigma_t * x0_hat) / jnp.maximum(alpha_t, self.wrapper_eps)
+
+        return d_alpha_t * x1_hat + d_sigma_t * x0_hat
+
+    def _predict_transport_output(self, x, t, y, r=None):
+        raw_output = self.net(
+            x.astype(self.dtype),
+            t.astype(self.dtype),
+            y,
+            r=None if r is None else r.astype(self.dtype),
+        )
+        return self._compute_wrapped_velocity(raw_output, x.astype(self.dtype), t.astype(self.dtype))
 
     def logit_normal_dist(self, bz):
         rnd_normal = jax.random.normal(
@@ -101,7 +148,7 @@ class PlainSiT(nn.Module):
         labels = self._drop_labels(labels, rng_drop)
 
         def model_fn(xt, t, y):
-            return self.net(xt.astype(self.dtype), t.astype(self.dtype), y)
+            return self._predict_transport_output(xt, t, y)
 
         terms = self.transport.training_losses(
             model_fn,
@@ -182,9 +229,4 @@ class PlainSiT(nn.Module):
 
     def __call__(self, x, t, y, r=None):
         """Initialization-only forward that mirrors the exact SiT backbone."""
-        return self.net(
-            x.astype(self.dtype),
-            t.astype(self.dtype),
-            y,
-            r=None if r is None else r.astype(self.dtype),
-        )
+        return self._predict_transport_output(x, t, y, r=r)

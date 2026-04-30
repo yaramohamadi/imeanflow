@@ -71,12 +71,10 @@ def create_train_state(
     if use_ema:
         ema_params = update_ema(ema_params, params, 0)
 
-    grad_accum_steps = int(config.training.get("grad_accum_steps", 1))
     grad_accum = None
-    if grad_accum_steps > 1:
-        grad_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
-    print_params(params["net"])
+    if bool(config.training.get("print_model_params", False)):
+        print_params(params["net"])
 
     tx = optax.adamw(
         learning_rate=lr_fn,

@@ -109,14 +109,15 @@ def create_train_state(
             model,
             int(config.model.get("source_num_classes", config.dataset.num_classes)),
         )
-        source_params = deepcopy(source_init_params["source_net"])
+        source_params = source_init_params["source_net"]
     elif needs_source_params:
         source_params = deepcopy(params)
     else:
         source_params = None
-    grad_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
+    grad_accum = None
     grad_accum_step = jnp.array(0, dtype=jnp.int32)
-    print_params(params["net"])
+    if bool(config.training.get("print_model_params", False)):
+        print_params(params["net"])
 
     tx = optax.adamw(
         learning_rate=lr_fn,

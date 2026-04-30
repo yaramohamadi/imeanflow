@@ -63,8 +63,18 @@ def _make_sample_labels(num_samples, num_classes, sample_idx=None):
 def _guided_model_output(model, variable, x, t, labels, cfg_scale):
     num_samples = x.shape[0]
 
+    def unwrap_prediction(model_output, x_input, t_input):
+        raw_prediction, model_var_values = jnp.split(model_output, 2, axis=-1)
+        eps_prediction = model._unwrap_prediction(
+            x_input,
+            t_input.astype(jnp.int32),
+            raw_prediction,
+        )
+        return jnp.concatenate([eps_prediction, model_var_values], axis=-1)
+
     def conditional(_):
-        return model.apply(variable, x, t.astype(jnp.float32), labels)
+        out = model.apply(variable, x, t.astype(jnp.float32), labels)
+        return unwrap_prediction(out, x, t)
 
     def guided(_):
         null_labels = jnp.full((num_samples,), model.num_classes, dtype=jnp.int32)
@@ -73,8 +83,17 @@ def _guided_model_output(model, variable, x, t, labels, cfg_scale):
         y_cat = jnp.concatenate([labels, null_labels], axis=0)
         out = model.apply(variable, x_cat, t_cat.astype(jnp.float32), y_cat)
         cond, uncond = jnp.split(out, 2, axis=0)
-        guided_eps = uncond[..., :3] + cfg_scale * (cond[..., :3] - uncond[..., :3])
-        return jnp.concatenate([guided_eps, cond[..., 3:]], axis=-1)
+        prediction_c, model_var_values_c = jnp.split(cond, 2, axis=-1)
+        prediction_u, _ = jnp.split(uncond, 2, axis=-1)
+        guided_prediction = prediction_u[..., :3] + cfg_scale * (
+            prediction_c[..., :3] - prediction_u[..., :3]
+        )
+        guided_wrapped = jnp.concatenate(
+            [guided_prediction, prediction_c[..., 3:]],
+            axis=-1,
+        )
+        guided_out = jnp.concatenate([guided_wrapped, model_var_values_c], axis=-1)
+        return unwrap_prediction(guided_out, x, t)
 
     return jax.lax.cond(jnp.equal(cfg_scale, 1.0), conditional, guided, operand=None)
 

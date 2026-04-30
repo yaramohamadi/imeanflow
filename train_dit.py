@@ -156,6 +156,9 @@ def _build_plain_dit(config, *, eval_mode=False):
         learn_sigma=bool(config.diffusion.learn_sigma),
         predict_xstart=bool(config.diffusion.predict_xstart),
         rescale_learned_sigmas=bool(config.diffusion.rescale_learned_sigmas),
+        output_prediction_space=str(
+            config.model.get("output_prediction_space", "epsilon")
+        ),
         eval=eval_mode,
     )
 

@@ -184,6 +184,24 @@ class GaussianDiffusion:
             - pred_xstart
         ) / _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, shape)
 
+    def alpha_sigma(self, x_t, t):
+        shape = x_t.shape
+        alpha_t = _extract_into_tensor(self.sqrt_alphas_cumprod, t, shape)
+        sigma_t = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, shape)
+        return alpha_t, sigma_t
+
+    def predict_xstart_from_eps(self, x_t, t, eps):
+        return self._predict_xstart_from_eps(x_t, t, eps)
+
+    def predict_velocity_from_eps(self, x_t, t, eps):
+        alpha_t, sigma_t = self.alpha_sigma(x_t, t)
+        pred_xstart = self._predict_xstart_from_eps(x_t, t, eps)
+        return alpha_t * eps - sigma_t * pred_xstart
+
+    def predict_eps_from_velocity(self, x_t, t, velocity):
+        alpha_t, sigma_t = self.alpha_sigma(x_t, t)
+        return sigma_t * x_t + alpha_t * velocity
+
     def p_mean_variance(self, model_fn, x, t, clip_denoised=True):
         x = x.astype(jnp.float32)
         model_output = model_fn(x, t).astype(jnp.float32)

@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import torch
 import torch.utils.data
-from diffusers.models import FlaxAutoencoderKL
 from flax import jax_utils
 
 from utils.logging_util import log_for_0
@@ -44,12 +43,15 @@ class LatentManager:
         input_size,
         decode_num_local_devices=None,
     ):
+        from diffusers.models import FlaxAutoencoderKL
+
         # init VAE
         vae, vae_params = FlaxAutoencoderKL.from_pretrained(
             f"pcuenq/sd-vae-ft-{vae_type}-flax"
         )
         self.vae = vae
         self.vae_params = vae_params
+        self._vae_class = FlaxAutoencoderKL
 
         self.batch_size = decode_batch_size
         self.latent_size = input_size
@@ -63,6 +65,10 @@ class LatentManager:
                 f"Requested {self.decode_num_local_devices} VAE decode devices, "
                 f"but only {jax.local_device_count()} local devices are visible."
             )
+        self.decode_compiled_batch_size = int(self.batch_size)
+        self.decode_compiled_total = (
+            self.decode_compiled_batch_size * self.decode_num_local_devices
+        )
         self.decode_devices = jax.local_devices()[: self.decode_num_local_devices]
 
         # create decode function
@@ -94,7 +100,7 @@ class LatentManager:
         z_dummy = jnp.ones(
             (
                 self.decode_num_local_devices,
-                self.batch_size,
+                self.decode_compiled_batch_size,
                 4,
                 self.latent_size,
                 self.latent_size,
@@ -105,7 +111,7 @@ class LatentManager:
             {"params": self.vae_params},
             devices=self.decode_devices,
         )
-        p_decode_fn = partial(self.vae.apply, method=FlaxAutoencoderKL.decode)
+        p_decode_fn = partial(self.vae.apply, method=self._vae_class.decode)
         p_decode_fn = jax.pmap(
             p_decode_fn,
             axis_name="batch",
@@ -117,12 +123,23 @@ class LatentManager:
         Bflops = (
             compiled_decod_fn.cost_analysis()[0]["flops"]
             / 1e9
-            / (self.batch_size * self.decode_num_local_devices)
+            / self.decode_compiled_total
         )
         log_for_0("Compiling VAE decoder done in %.2f seconds." % (time.time() - now))
         log_for_0(f"FLOPs (1e9): {Bflops}")
 
         def call_p_compiled_model_fn(x, p_func, var):
+            if x.shape[0] > self.decode_compiled_total:
+                raise ValueError(
+                    "VAE decode chunk larger than compiled size: "
+                    f"{x.shape[0]} > {self.decode_compiled_total}."
+                )
+            if x.shape[0] < self.decode_compiled_total:
+                pad_shape = (self.decode_compiled_total - x.shape[0],) + x.shape[1:]
+                x = jnp.concatenate(
+                    [x, jnp.zeros(pad_shape, dtype=x.dtype)],
+                    axis=0,
+                )
             x = dist_prepare_batch_data(dict(x=x))["x"]
             x = p_func(var, x)
             x = x.sample
@@ -135,6 +152,20 @@ class LatentManager:
 
         return call_compiled_decod_func
 
+    def _decode_raw_latents(self, latents):
+        num_latents = latents.shape[0]
+        decoded_chunks = []
+
+        for start in range(0, num_latents, self.decode_compiled_total):
+            chunk = latents[start : start + self.decode_compiled_total]
+            chunk_size = chunk.shape[0]
+            decoded = self.decode_fn(chunk)["sample"][:chunk_size]
+            decoded_chunks.append(decoded)
+
+        if len(decoded_chunks) == 1:
+            return decoded_chunks[0]
+        return jnp.concatenate(decoded_chunks, axis=0)
+
     def cached_encode(self, cached_value, rng):
         latent = LatentDist(cached_value).sample(key=rng).transpose((0, 3, 1, 2))
         latent = (latent - self.mean) / self.std
@@ -142,7 +173,7 @@ class LatentManager:
 
     def decode(self, latents):
         latents = latents * self.std + self.mean
-        return self.decode_fn(latents)["sample"]
+        return self._decode_raw_latents(latents)
 
 
 class DiTLatentManager(LatentManager):
@@ -165,7 +196,7 @@ class DiTLatentManager(LatentManager):
         )
 
     def decode(self, latents):
-        return self.decode_fn(latents / self.latent_scale)["sample"]
+        return self._decode_raw_latents(latents / self.latent_scale)
 
 
 class LatentDataset(torch.utils.data.Dataset):

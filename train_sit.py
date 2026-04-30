@@ -193,6 +193,10 @@ def _build_plain_sit(config, *, eval_mode=False):
         P_mean=float(config.model.get("P_mean", -0.4)),
         P_std=float(config.model.get("P_std", 1.0)),
         data_proportion=float(config.model.get("data_proportion", 0.5)),
+        output_prediction_space=str(
+            config.model.get("sit_output_prediction_space", "velocity")
+        ),
+        wrapper_eps=float(config.model.get("sit_wrapper_eps", 1e-6)),
         eval=eval_mode,
     )
 

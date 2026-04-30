@@ -58,6 +58,7 @@ def get_config():
     training.capture_source_from_load = False
     training.half_precision = False
     training.half_precision_dtype = "float16"
+    training.print_model_params = False
 
     training.seed = 42
 
@@ -110,6 +111,9 @@ def get_config():
     model.split_consistency_boundary_epsilon_distribution = "half_normal"
     model.split_consistency_boundary_epsilon = 1e-3
     model.split_consistency_boundary_epsilon_min = 1e-6
+    model.output_prediction_space = "epsilon"
+    model.sit_output_prediction_space = "velocity"
+    model.sit_wrapper_eps = 1e-6
 
     # Training Dynamics
     model.norm_p = 1.0
