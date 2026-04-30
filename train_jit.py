@@ -792,6 +792,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         state,
                         p_metric_sample_step,
                         current_step - 1,
+                        ema_only=use_ema,
                         metric_suffix=f"steps_{metric_num_steps}",
                         **sample_kwargs,
                     )
@@ -812,7 +813,15 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                         metric_num_steps == int(config.sampling.num_steps)
                         and is_best_fid
                     ):
-                        save_best_checkpoint(state, best_fid_ckpt_dir)
+                        save_best_checkpoint(
+                            state,
+                            best_fid_ckpt_dir,
+                            eval_state_only=bool(
+                                config.training.get(
+                                    "save_best_fid_eval_state_only", False
+                                )
+                            ),
+                        )
                         row_checkpoint_path = best_fid_ckpt_dir
 
                     _write_eval_metrics_csv(
