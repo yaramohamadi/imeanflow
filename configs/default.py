@@ -52,6 +52,7 @@ def get_config():
     training.debug_velocity_decode_scale = 0.1
     training.grad_accum_steps = 1
     training.save_best_fid_only = False
+    training.save_best_fid_eval_state_only = False
     training.best_fid_checkpoint_dir = "best_fid"
     training.save_eval_checkpoint_per_fid = False
     training.eval_checkpoint_dir = "latest_eval"

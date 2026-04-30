@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=16:00:00
+#SBATCH --time=20:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=files/logs/plain_jit_caltech_h16_%j.out
 #SBATCH --error=files/logs/plain_jit_caltech_h16_%j.err

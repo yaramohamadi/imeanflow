@@ -24,8 +24,8 @@ export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 
-SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH:-/scratch/$USER}/imeanflow}"
-PROJECT_ROOT="${PROJECT_ROOT:-${PROJECT:-$HOME/projects}/imeanflow}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-${SCRATCH:-/scratch/$USER}}"
+PROJECT_ROOT="${PROJECT_ROOT:-$REPO_DIR}"
 
 dataset_assets() {
   local dataset="$1"
@@ -99,23 +99,26 @@ sync_run_dir() {
 }
 
 DATASET_NAME="${DATASET_NAME:?Set DATASET_NAME in sbatch export.}"
-RUN_LABEL="${RUN_LABEL:-${DATASET_NAME}_jit_h16_lr1p5e6_50k}"
+RUN_LABEL="${RUN_LABEL:-${DATASET_NAME}_jit_h16_lr3e6_ema9998_40k_fid2500}"
 WANDB_PROJECT="${WANDB_PROJECT:-plain_jit_finetune}"
 USE_WANDB="${USE_WANDB:-True}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-2.2}"
-LEARNING_RATE="${LEARNING_RATE:-1.5e-6}"
-MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-50000}"
+LEARNING_RATE="${LEARNING_RATE:-3e-6}"
+EMA_VAL="${EMA_VAL:-0.9998}"
+MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-40000}"
 FID_EVERY_STEPS="${FID_EVERY_STEPS:-2500}"
 PREVIEW_EVERY_STEPS="${PREVIEW_EVERY_STEPS:-2500}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 50}"
-RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-False}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 OPTIMIZER="${OPTIMIZER:-adamw}"
-OPTIMIZER_MU_DTYPE="${OPTIMIZER_MU_DTYPE:-}"
-HALF_PRECISION="${HALF_PRECISION:-False}"
-SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-False}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
-SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-16}"
+OPTIMIZER_MU_DTYPE="${OPTIMIZER_MU_DTYPE:-float16}"
+HALF_PRECISION="${HALF_PRECISION:-True}"
+SAMPLING_HALF_PRECISION="${SAMPLING_HALF_PRECISION:-True}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"
+SAMPLE_DEVICE_BATCH_SIZE="${SAMPLE_DEVICE_BATCH_SIZE:-8}"
 NUM_SAMPLES="${NUM_SAMPLES:-10000}"
+SAVE_BEST_FID_EVAL_STATE_ONLY="${SAVE_BEST_FID_EVAL_STATE_ONLY:-True}"
 RUN_ID="${RUN_ID:-plain_JiT_finetune_${DATASET_NAME}_${RUN_LABEL}_${SLURM_JOB_ID}}"
 
 dataset_assets "$DATASET_NAME"
@@ -133,7 +136,7 @@ LOAD_FROM="$(require_existing_path "JiT weights" \
   "$SCRATCH_ROOT/weights/JiT-H-16-256.pth" \
   "$PROJECT_ROOT/weights/JiT-H-16-256.pth")"
 
-SCRATCH_RUN_DIR="$SCRATCH_ROOT/files/logs/finetuning/$RUN_ID"
+SCRATCH_RUN_DIR="$SCRATCH_ROOT/imeanflow/files/logs/finetuning/$RUN_ID"
 PROJECT_RUN_DIR="$PROJECT_ROOT/files/logs/finetuning/$RUN_ID"
 mkdir -p "$SCRATCH_RUN_DIR" "$PROJECT_RUN_DIR"
 
@@ -151,7 +154,10 @@ Weights: $LOAD_FROM
 Scratch run dir: $SCRATCH_RUN_DIR
 Project run dir: $PROJECT_RUN_DIR
 Learning rate: $LEARNING_RATE
+EMA value: $EMA_VAL
 Max train steps: $MAX_TRAIN_STEPS
+Train microbatch/effective batch: $TRAIN_BATCH_SIZE/$((TRAIN_BATCH_SIZE * GRAD_ACCUM_STEPS))
+Grad accumulation steps: $GRAD_ACCUM_STEPS
 FID every steps: $FID_EVERY_STEPS
 Preview every steps: $PREVIEW_EVERY_STEPS
 Final eval steps: $FINAL_EVAL_STEPS
@@ -167,12 +173,17 @@ bash scripts/train_plain_jit_finetune.sh "$RUN_LABEL" \
   --config.training.metric_num_steps="(4,)" \
   --config.training.preview_num_steps="(4,)" \
   --config.training.preview_guidance_scales="($GUIDANCE_SCALE,)" \
-  --config.training.use_ema=False \
+  --config.training.use_ema=True \
+  --config.training.ema_type=const \
+  --config.training.ema_val="$EMA_VAL" \
   --config.training.optimizer="$OPTIMIZER" \
   --config.training.optimizer_mu_dtype="$OPTIMIZER_MU_DTYPE" \
   --config.training.batch_size="$TRAIN_BATCH_SIZE" \
+  --config.training.grad_accum_steps="$GRAD_ACCUM_STEPS" \
   --config.training.half_precision="$HALF_PRECISION" \
+  --config.training.half_precision_dtype=float16 \
   --config.sampling.half_precision="$SAMPLING_HALF_PRECISION" \
+  --config.sampling.half_precision_dtype=float16 \
   --config.fid.sample_device_batch_size="$SAMPLE_DEVICE_BATCH_SIZE" \
   --config.fid.num_samples="$NUM_SAMPLES" \
   --config.sampling.num_steps=4 \
@@ -189,7 +200,8 @@ bash scripts/train_plain_jit_finetune.sh "$RUN_LABEL" \
   --config.model.class_dropout_prob=0.1 \
   --config.model.target_use_null_class=True \
   --config.training.save_best_fid_only=True \
-  --config.training.save_eval_checkpoint_per_fid=True \
+  --config.training.save_best_fid_eval_state_only="$SAVE_BEST_FID_EVAL_STATE_ONLY" \
+  --config.training.save_eval_checkpoint_per_fid=False \
   --config.training.eval_checkpoint_dir=latest_eval \
   --config.training.best_fid_checkpoint_dir=best_fid \
   --config.logging.wandb_project="$WANDB_PROJECT" \
@@ -216,7 +228,7 @@ if [[ "${RUN_FINAL_BEST_FID_EVAL,,}" =~ ^(1|true|yes|y|on)$ ]]; then
     --config.sampling.cfg_scale="$GUIDANCE_SCALE" \
     --config.sampling.t_min=0.1 \
     --config.sampling.t_max=1.0 \
-    --config.training.use_ema=False \
+    --config.training.use_ema=True \
     --config.logging.wandb_project="$WANDB_PROJECT" \
     --config.logging.wandb_name="${DATASET_NAME_OUT}_plain_jit_${RUN_LABEL}_best" \
     --config.logging.use_wandb="$USE_WANDB"

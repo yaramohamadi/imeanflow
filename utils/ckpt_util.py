@@ -775,7 +775,7 @@ def save_checkpoint(state, workdir):
     log_for_0("Checkpoint step %d saved.", step)
 
 
-def save_best_checkpoint(state, workdir, step=None, keep=1):
+def save_best_checkpoint(state, workdir, step=None, keep=1, eval_state_only=False):
     """
     Saves the model state to a best-checkpoint directory.
 
@@ -783,18 +783,26 @@ def save_best_checkpoint(state, workdir, step=None, keep=1):
     directories so only the latest best checkpoint remains.
     """
     workdir = os.path.abspath(workdir)
-    state = jax.device_get(
+    if eval_state_only:
+        state_to_save = EvalState(
+            step=state.step,
+            params=state.params,
+            ema_params=getattr(state, "ema_params", None),
+        )
+    else:
+        state_to_save = state
+    state_to_save = jax.device_get(
         jax.tree_util.tree_map(
             lambda x: x if x is None else x[0],
-            state,
+            state_to_save,
             is_leaf=lambda x: x is None,
         )
     )
-    ckpt_step = int(state.step) if step is None else int(step)
+    ckpt_step = int(state_to_save.step) if step is None else int(step)
     log_for_0("Saving best checkpoint step %d to %s.", ckpt_step, workdir)
     checkpoints.save_checkpoint_multiprocess(
         workdir,
-        state,
+        state_to_save,
         ckpt_step,
         keep=keep,
         overwrite=True,
