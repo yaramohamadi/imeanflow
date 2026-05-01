@@ -31,6 +31,7 @@ class PlainSiT(nn.Module):
     eval: bool = False
 
     def setup(self):
+        self._validate_output_prediction_space()
         if not (
             self.model_str.startswith("flaxSiT")
             or self.model_str.startswith("flaxDiT")
@@ -55,6 +56,7 @@ class PlainSiT(nn.Module):
             train_eps=self.train_eps,
             sample_eps=self.sample_eps,
         )
+        self.transport = self._maybe_adjust_transport_eps(self.transport)
         if self.objective not in {"sit", "power_meanflow"}:
             raise ValueError(
                 "PlainSiT objective must be one of ['sit', 'power_meanflow'], got "
@@ -73,6 +75,27 @@ class PlainSiT(nn.Module):
                 "PlainSiT non-velocity output wrappers are only supported for "
                 f"objective='sit', got objective={self.objective!r}."
             )
+
+    def _needs_nonzero_transport_eps(self):
+        return self.output_prediction_space != "velocity"
+
+    def _maybe_adjust_transport_eps(self, transport):
+        if not self._needs_nonzero_transport_eps():
+            return transport
+
+        train_eps = float(transport.train_eps)
+        sample_eps = float(transport.sample_eps)
+        min_eps = max(float(self.wrapper_eps), 1e-3)
+        if train_eps >= min_eps and sample_eps >= min_eps:
+            return transport
+
+        return create_transport(
+            path_type=self.path_type,
+            prediction="noise",
+            loss_weight=self.loss_weight,
+            train_eps=max(train_eps, min_eps),
+            sample_eps=max(sample_eps, min_eps),
+        )
 
     def _compute_wrapped_velocity(self, raw_output, xt, t):
         self._validate_output_prediction_space()
