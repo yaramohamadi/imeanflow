@@ -42,7 +42,7 @@ training:
     adam_b2: 0.95
     ema_type: 'const'
 
-    sample_per_step: 2500
+    sample_per_step: 1000
     preview_at_step_zero: False
     fid_per_step: 2500
     metric_num_steps:

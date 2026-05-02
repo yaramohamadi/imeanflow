@@ -974,9 +974,9 @@ class iMeanFlow(nn.Module):
                     jnp.ones_like(w),
                     y=y,
                 )
-                v_c = jax.lax.stop_gradient(v_c)
             else:
                 v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
+            v_c = jax.lax.stop_gradient(v_c)
             return v_t, v_c
 
         guidance_blend = self._effective_training_guidance_blend(
@@ -992,10 +992,11 @@ class iMeanFlow(nn.Module):
                     jnp.ones_like(w),
                     y=y,
                 )
-                v_c = jax.lax.stop_gradient(v_c)
             else:
                 v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             v_u = self.source_v_uncond_fn(source_params, z_t, t)
+            v_c = jax.lax.stop_gradient(v_c)
+            v_u = jax.lax.stop_gradient(v_u)
         else:
             v_c, v_u = self.v_fn(z_t, t, y=y)
 

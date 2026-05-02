@@ -3,16 +3,17 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
-Usage: USE_LATE_START=True bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh <run_label> [extra main.py args...]
+Usage: VC_TARGET_SOURCE=ema bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh <run_label> [extra main.py args...]
 
 Examples:
-  USE_LATE_START=True bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh caltech_dogfit
-  USE_LATE_START=False bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh caltech_dogfit_nols
+  VC_TARGET_SOURCE=ema bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh caltech_dogfit
+  VC_TARGET_SOURCE=online bash scripts/run_caltech_sit_dmf_dogfit_meanflow_taylor.sh caltech_dogfit_online
 
 This script:
   1) runs Caltech SiT-DMF DogFit meanflow locally on Taylor
   2) uses home/ens paths via the dedicated config
-  3) lets you toggle late-start guidance with USE_LATE_START=True/False
+  3) ablates whether DogFit's conditioned target v_c comes from the EMA or online model
+  4) always trains with stop-gradient on both v_c and v_u in the DogFit path
 EOF
   exit 1
 fi
@@ -26,22 +27,28 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES_VALUE:-0,1}}"
-USE_LATE_START="${USE_LATE_START:-True}"
-LATE_START_STEP="${LATE_START_STEP:-6000}"
+VC_TARGET_SOURCE="${VC_TARGET_SOURCE:-ema}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-False}"
 XLA_FLAGS_VALUE="${XLA_FLAGS_VALUE:---xla_gpu_strict_conv_algorithm_picker=false --xla_gpu_enable_command_buffer=}"
 
-if [[ "${USE_LATE_START}" == "True" ]]; then
-  TRAINING_GUIDANCE_START_STEP="${LATE_START_STEP}"
-else
-  TRAINING_GUIDANCE_START_STEP="0"
-fi
+case "${VC_TARGET_SOURCE}" in
+  ema)
+    USE_EMA_VC="True"
+    ;;
+  online)
+    USE_EMA_VC="False"
+    ;;
+  *)
+    echo "ERROR: VC_TARGET_SOURCE must be 'ema' or 'online', got: ${VC_TARGET_SOURCE}" >&2
+    exit 2
+    ;;
+esac
 
 NOW=$(date '+%Y%m%d_%H%M%S')
 SALT=$(head /dev/urandom | tr -dc a-z0-9 | head -c6)
-JOBNAME="caltech_SiT_DMF_DogFit_meanflow_taylor_${RUN_LABEL}_${NOW}_${SALT}"
+JOBNAME="caltech_SiT_DMF_DogFit_meanflow_taylor_${VC_TARGET_SOURCE}_${RUN_LABEL}_${NOW}_${SALT}"
 WORKDIR="${LOG_DIR}/finetuning/${JOBNAME}"
 
 mkdir -p "${WORKDIR}"
@@ -51,8 +58,9 @@ Training workdir: ${WORKDIR}
 CONFIG_MODE: ${CONFIG_MODE}
 USE_WANDB: ${USE_WANDB}
 CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES_VALUE}
-USE_LATE_START: ${USE_LATE_START}
-TRAINING_GUIDANCE_START_STEP: ${TRAINING_GUIDANCE_START_STEP}
+VC_TARGET_SOURCE: ${VC_TARGET_SOURCE}
+USE_EMA_VC: ${USE_EMA_VC}
+TRAINING_GUIDANCE_START_STEP: 0
 RUN_FINAL_BEST_FID_EVAL: ${RUN_FINAL_BEST_FID_EVAL}
 FINAL_EVAL_STEPS: ${FINAL_EVAL_STEPS}
 EOF
@@ -65,7 +73,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
   "${PYTHON}" main.py \
     --workdir="${WORKDIR}" \
     --config="configs/load_config.py:${CONFIG_MODE}" \
-    --config.model.training_guidance_start_step="${TRAINING_GUIDANCE_START_STEP}" \
+    --config.model.training_guidance_start_step="0" \
+    --config.model.use_ema_vc="${USE_EMA_VC}" \
     --config.logging.use_wandb="${USE_WANDB}" \
     --config.logging.wandb_name="${JOBNAME}" \
     "${EXTRA_ARGS[@]}" \
