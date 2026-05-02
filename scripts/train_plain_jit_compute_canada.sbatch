@@ -11,14 +11,31 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -n "${REPO_DIR:-}" ]]; then
+  REPO_DIR="$(cd "$REPO_DIR" && pwd)"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "$SLURM_SUBMIT_DIR/scripts/train_plain_jit_compute_canada.sbatch" ]]; then
+  REPO_DIR="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+  REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$REPO_DIR"
 
 module load python/3.10.13 cuda/12.2
-source .venv/bin/activate
+VENV_DIR="${VENV_DIR:-$REPO_DIR/.venv}"
+if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+  cat >&2 <<EOF
+ERROR: Python virtualenv not found at '$VENV_DIR'.
+Create it on the cluster first with:
+  cd "$REPO_DIR"
+  module load python/3.10.13 cuda/12.2
+  VENV_DIR="$VENV_DIR" bash scripts/install.sh
+EOF
+  exit 4
+fi
+source "$VENV_DIR/bin/activate"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/$USER-matplotlib}"
-export PYTHON="${PYTHON:-$REPO_DIR/.venv/bin/python}"
+export PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-3}"
 export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
@@ -169,10 +186,8 @@ bash scripts/train_plain_jit_finetune.sh "$RUN_LABEL" \
   --config.training.max_train_steps="$MAX_TRAIN_STEPS" \
   --config.training.sample_per_step="$PREVIEW_EVERY_STEPS" \
   --config.training.fid_per_step=0 \
-  --config.training.fid_schedule="({from_step: 0, every_steps: $FID_EVERY_STEPS},)" \
-  --config.training.metric_num_steps="(4,)" \
-  --config.training.preview_num_steps="(4,)" \
-  --config.training.preview_guidance_scales="($GUIDANCE_SCALE,)" \
+  --config.training.force_fid_per_step="$FID_EVERY_STEPS" \
+  --config.training.force_metric_num_steps=4 \
   --config.training.use_ema=True \
   --config.training.ema_type=const \
   --config.training.ema_val="$EMA_VAL" \
