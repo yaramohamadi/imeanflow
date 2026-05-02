@@ -19,6 +19,7 @@ model:
     use_adaln_guidance_scale_conditioning: False
     adaln_guidance_scale_init: 'timestep'
     time_conditioning_mode: 'split'
+    use_ema_vc: True
     guidance_scale_strategy: 'fixed'
     fixed_guidance_scale: 1.5
     baked_guidance_blend: 0.5
@@ -34,7 +35,7 @@ training:
     num_epochs: 200
     max_train_steps: 30000
     batch_size: 8
-    use_ema: False
+    use_ema: True
     learning_rate: 0.0001
     warmup_epochs: 5
 

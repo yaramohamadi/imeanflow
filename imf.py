@@ -82,6 +82,7 @@ class iMeanFlow(nn.Module):
     use_adaln_condition_mixing: bool = False
     decoder_only_guidance_conditioning: bool = False
     time_conditioning_mode: str = "split"
+    use_ema_vc: bool = False
     use_training_guidance: bool = True
     training_guidance_interval_strategy: str = "sampled"
     training_guidance_t_min: float = 0.0
@@ -818,6 +819,77 @@ class iMeanFlow(nn.Module):
                 )
         return v
 
+    def teacher_v_cond_fn(self, teacher_params, x, t, omega, y):
+        """
+        Compute a conditioned v prediction from an alternate frozen parameter tree.
+
+        This is used for teacher-style targets such as EMA-conditioned v_c.
+        """
+        if teacher_params is None:
+            raise ValueError("teacher_params must be provided when use_ema_vc=True.")
+
+        teacher_param_tree = self._resolve_source_params(teacher_params)
+        bz = x.shape[0]
+        if self._uses_auxiliary_v_head():
+            h = jnp.zeros_like(t)
+            t_min = jnp.zeros_like(t)
+            t_max = jnp.ones_like(t)
+            _, v = self.net.apply(
+                {"params": teacher_param_tree},
+                x,
+                t.reshape(bz),
+                h.reshape(bz),
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+                y,
+            )
+            return v
+
+        if self._uses_sit_guidance_context_conditioning():
+            t_min = jnp.zeros_like(t)
+            t_max = jnp.ones_like(t)
+            return self.net.apply(
+                {"params": teacher_param_tree},
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+                omega.reshape(bz),
+                t_min.reshape(bz),
+                t_max.reshape(bz),
+            )
+        if self._uses_sit_adaln_guidance_scale_conditioning():
+            return self.net.apply(
+                {"params": teacher_param_tree},
+                x,
+                t.reshape(bz),
+                t.reshape(bz),
+                y,
+                omega.reshape(bz),
+            )
+        if self._uses_imf_dit_backbone():
+            v, _ = self.net.apply(
+                {"params": teacher_param_tree},
+                x,
+                t.reshape(bz),
+                jnp.zeros_like(t).reshape(bz),
+                omega.reshape(bz),
+                jnp.zeros_like(t).reshape(bz),
+                jnp.ones_like(t).reshape(bz),
+                y,
+            )
+            return v
+
+        del omega
+        return self.net.apply(
+            {"params": teacher_param_tree},
+            x,
+            t.reshape(bz),
+            t.reshape(bz),
+            y,
+        )
+
     def source_v_uncond_fn(self, source_params, x, t):
         bz = x.shape[0]
         y_null = jnp.full((bz,), self.source_num_classes, dtype=jnp.int32)
@@ -871,6 +943,7 @@ class iMeanFlow(nn.Module):
         t_min,
         t_max,
         source_params=None,
+        teacher_params=None,
         current_step=None,
     ):
         """
@@ -893,7 +966,17 @@ class iMeanFlow(nn.Module):
         del r, fm_mask  # This method variant uses one interval-adjusted v_c everywhere.
 
         if not self.use_training_guidance:
-            v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
+            if self.use_ema_vc:
+                v_c = self.teacher_v_cond_fn(
+                    teacher_params,
+                    z_t,
+                    t,
+                    jnp.ones_like(w),
+                    y=y,
+                )
+                v_c = jax.lax.stop_gradient(v_c)
+            else:
+                v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             return v_t, v_c
 
         guidance_blend = self._effective_training_guidance_blend(
@@ -901,7 +984,17 @@ class iMeanFlow(nn.Module):
         )
 
         if self.use_dogfit:
-            v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
+            if self.use_ema_vc:
+                v_c = self.teacher_v_cond_fn(
+                    teacher_params,
+                    z_t,
+                    t,
+                    jnp.ones_like(w),
+                    y=y,
+                )
+                v_c = jax.lax.stop_gradient(v_c)
+            else:
+                v_c = self.v_cond_fn(z_t, t, jnp.ones_like(w), y=y)
             v_u = self.source_v_uncond_fn(source_params, z_t, t)
         else:
             v_c, v_u = self.v_fn(z_t, t, y=y)
@@ -921,7 +1014,14 @@ class iMeanFlow(nn.Module):
     #               Forward Pass and Loss                 #
     #######################################################
 
-    def forward(self, images, labels, source_params=None, current_step=None):
+    def forward(
+        self,
+        images,
+        labels,
+        source_params=None,
+        teacher_params=None,
+        current_step=None,
+    ):
         """
         Forward process of improved MeanFlow and compute loss.
 
@@ -938,6 +1038,7 @@ class iMeanFlow(nn.Module):
                 images,
                 labels,
                 source_params=source_params,
+                teacher_params=teacher_params,
                 current_step=current_step,
             )
         if self.training_mode == "imf_jvp_free_src_reg":
@@ -945,6 +1046,7 @@ class iMeanFlow(nn.Module):
                 images,
                 labels,
                 source_params=source_params,
+                teacher_params=teacher_params,
                 current_step=current_step,
             )
         if self.training_mode == "imf_split_consistency":
@@ -952,11 +1054,19 @@ class iMeanFlow(nn.Module):
                 images,
                 labels,
                 source_params=source_params,
+                teacher_params=teacher_params,
                 current_step=current_step,
             )
         raise ValueError(f"Unsupported training_mode: {self.training_mode}")
 
-    def forward_imf_jvp(self, images, labels, source_params=None, current_step=None):
+    def forward_imf_jvp(
+        self,
+        images,
+        labels,
+        source_params=None,
+        teacher_params=None,
+        current_step=None,
+    ):
         """
         Forward process of improved MeanFlow and compute loss.
         """
@@ -997,11 +1107,13 @@ class iMeanFlow(nn.Module):
             t_min,
             t_max,
             source_params=source_params,
+            teacher_params=teacher_params,
             current_step=current_step,
         )
 
         # Cond dropout (dropout class labels)
         labels, _ = self.cond_drop(v_t, v_g, labels)
+        v_g = jax.lax.stop_gradient(v_g)
 
         # Warped u-function for jvp computation
         def u_fn(z_t, t, r):
@@ -1046,6 +1158,7 @@ class iMeanFlow(nn.Module):
         images,
         labels,
         source_params=None,
+        teacher_params=None,
         current_step=None,
     ):
         """
@@ -1053,6 +1166,7 @@ class iMeanFlow(nn.Module):
         off-diagonal frozen-source regularization.
         """
         x = images.astype(self.dtype)
+        del teacher_params
         bz = images.shape[0]
 
         t, r, fm_mask = self.sample_tr(bz)
@@ -1147,6 +1261,7 @@ class iMeanFlow(nn.Module):
         images,
         labels,
         source_params=None,
+        teacher_params=None,
         current_step=None,
     ):
         """
@@ -1155,6 +1270,7 @@ class iMeanFlow(nn.Module):
         average velocities.
         """
         x = images.astype(self.dtype)
+        del teacher_params
         bz = images.shape[0]
 
         t, r, fm_mask = self.sample_split_consistency_tr(bz)
@@ -1310,7 +1426,14 @@ class iMeanFlow(nn.Module):
 
         return loss, dict_losses
 
-    def debug_forward(self, images, labels, source_params=None, current_step=None):
+    def debug_forward(
+        self,
+        images,
+        labels,
+        source_params=None,
+        teacher_params=None,
+        current_step=None,
+    ):
         """
         Forward process with intermediate tensors exposed for debugging.
         """
@@ -1353,6 +1476,7 @@ class iMeanFlow(nn.Module):
             t_min,
             t_max,
             source_params=source_params,
+            teacher_params=teacher_params,
             current_step=current_step,
         )
 

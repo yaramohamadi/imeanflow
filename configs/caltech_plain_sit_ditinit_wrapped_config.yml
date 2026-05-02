@@ -11,7 +11,10 @@ model:
     target_use_null_class: True
     class_dropout_prob: 0.1
     sit_output_prediction_space: noise
-    sit_wrapper_eps: 1.0e-6
+    sit_wrapper_eps: 1.0e-3
+    sit_wrapped_loss_weight: denom_squared
+    sit_model_time_scale: 999.0
+    sit_model_time_flip: True
 
 transport:
     path_type: Linear
@@ -82,6 +85,7 @@ fd_dino:
 sampling:
     num_steps: 4
     method: heun
+    plain_sit_native_prediction_sampling: True
     half_precision: False
     half_precision_dtype: float16
     omega: 1.5

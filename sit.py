@@ -28,6 +28,9 @@ class PlainSiT(nn.Module):
     data_proportion: float = 0.5
     output_prediction_space: str = "velocity"
     wrapper_eps: float = 1e-6
+    wrapped_loss_weight: str = "none"
+    model_time_scale: float = 1.0
+    model_time_flip: bool = False
     eval: bool = False
 
     def setup(self):
@@ -120,14 +123,84 @@ class PlainSiT(nn.Module):
 
         return d_alpha_t * x1_hat + d_sigma_t * x0_hat
 
-    def _predict_transport_output(self, x, t, y, r=None):
+    def _compute_data_prediction(self, raw_output, xt, t):
+        self._validate_output_prediction_space()
+        if self.output_prediction_space == "data":
+            return raw_output
+        if self.output_prediction_space == "noise":
+            t_expanded = t.reshape((t.shape[0],) + (1,) * (xt.ndim - 1))
+            alpha_t, _ = self.transport.path_sampler.compute_alpha_t(t_expanded)
+            sigma_t, _ = self.transport.path_sampler.compute_sigma_t(t_expanded)
+            return (xt - sigma_t * raw_output) / jnp.maximum(alpha_t, self.wrapper_eps)
+        raise ValueError(
+            "PlainSiT data reconstruction is only defined for output_prediction_space "
+            f"'data' or 'noise', got {self.output_prediction_space!r}."
+        )
+
+    def _wrapped_velocity_loss_weight(self, t):
+        if self.wrapped_loss_weight in {"", "none", None}:
+            return 1.0
+        if self.wrapped_loss_weight != "denom_squared":
+            raise ValueError(
+                "PlainSiT wrapped_loss_weight must be one of "
+                "['none', 'denom_squared'], got "
+                f"{self.wrapped_loss_weight!r}."
+            )
+        if self.output_prediction_space == "velocity":
+            return 1.0
+
+        t_expanded = t.reshape((t.shape[0],) + (1,) * 0)
+        alpha_t, _ = self.transport.path_sampler.compute_alpha_t(t_expanded)
+        sigma_t, _ = self.transport.path_sampler.compute_sigma_t(t_expanded)
+        denom = sigma_t if self.output_prediction_space == "data" else alpha_t
+        denom = jnp.maximum(jnp.abs(denom), self.wrapper_eps)
+        return jnp.square(denom)
+
+    def _predict_backbone_output(self, x, t, y, r=None):
+        t_model = t.astype(self.dtype)
+        if self.model_time_flip:
+            t_model = 1.0 - t_model
+        t_model = t_model * jnp.asarray(self.model_time_scale, dtype=self.dtype)
+
+        r_model = None
+        if r is not None:
+            r_model = r.astype(self.dtype)
+            if self.model_time_flip:
+                r_model = 1.0 - r_model
+            r_model = r_model * jnp.asarray(self.model_time_scale, dtype=self.dtype)
+
         raw_output = self.net(
             x.astype(self.dtype),
-            t.astype(self.dtype),
+            t_model,
             y,
-            r=None if r is None else r.astype(self.dtype),
+            r=r_model,
         )
-        return self._compute_wrapped_velocity(raw_output, x.astype(self.dtype), t.astype(self.dtype))
+        return raw_output
+
+    def _predict_transport_output(self, x, t, y, r=None):
+        raw_output = self._predict_backbone_output(x, t, y, r=r)
+        return self._compute_wrapped_velocity(
+            raw_output, x.astype(self.dtype), t.astype(self.dtype)
+        )
+
+    def predict_native_output(self, x, t, y, r=None):
+        """Return the backbone output in its configured native prediction space."""
+        return self._predict_backbone_output(x, t, y, r=r)
+
+    def predict_data(self, x, t, y, r=None):
+        """Reconstruct x1/data from a native non-velocity prediction."""
+        raw_output = self._predict_backbone_output(x, t, y, r=r)
+        return self._compute_data_prediction(
+            raw_output, x.astype(self.dtype), t.astype(self.dtype)
+        )
+
+    def convert_native_output_to_data(self, raw_output, x, t):
+        """Reconstruct x1/data from a provided native backbone prediction."""
+        return self._compute_data_prediction(
+            raw_output,
+            x.astype(self.dtype),
+            t.astype(self.dtype),
+        )
 
     def logit_normal_dist(self, bz):
         rnd_normal = jax.random.normal(
@@ -179,10 +252,14 @@ class PlainSiT(nn.Module):
             rng=rng_loss,
             model_kwargs={"y": labels},
         )
-        loss = jnp.mean(terms["loss"])
+        loss_weight = self._wrapped_velocity_loss_weight(terms["t"])
+        weighted_loss = terms["loss"] * loss_weight
+        loss = jnp.mean(weighted_loss)
         dict_losses = {
             "loss": loss,
-            "loss_transport": jnp.mean(terms["loss"]),
+            "loss_transport": loss,
+            "loss_transport_unweighted": jnp.mean(terms["loss"]),
+            "wrapped_loss_weight_mean": jnp.mean(loss_weight),
             "t_mean": jnp.mean(terms["t"]),
         }
         return loss, dict_losses

@@ -64,6 +64,43 @@ def _guided_velocity(model, variable, x, t_model, labels, cfg_scale):
     )
 
 
+def _guided_native_output(model, variable, x, t_model, labels, cfg_scale):
+    num_samples = x.shape[0]
+
+    def conditional_output(_):
+        return model.apply(
+            variable,
+            x,
+            t_model,
+            labels,
+            method=model.predict_native_output,
+        )
+
+    def classifier_free_guided_output(_):
+        null_labels = jnp.full((num_samples,), model.num_classes, dtype=jnp.int32)
+
+        x_cat = jnp.concatenate([x, x], axis=0)
+        t_cat = jnp.concatenate([t_model, t_model], axis=0)
+        y_cat = jnp.concatenate([labels, null_labels], axis=0)
+
+        out = model.apply(
+            variable,
+            x_cat,
+            t_cat,
+            y_cat,
+            method=model.predict_native_output,
+        )
+        cond, uncond = jnp.split(out, 2, axis=0)
+        return uncond + cfg_scale * (cond - uncond)
+
+    return jax.lax.cond(
+        jnp.equal(cfg_scale, 1.0),
+        conditional_output,
+        classifier_free_guided_output,
+        operand=None,
+    )
+
+
 def _guided_meanflow(model, variable, x, t_model, r_model, labels, cfg_scale):
     num_samples = x.shape[0]
 
@@ -92,6 +129,89 @@ def _guided_meanflow(model, variable, x, t_model, r_model, labels, cfg_scale):
 
 def _use_interval_meanflow_sampling(config):
     return str(config.transport.get("objective", "sit")) == "power_meanflow"
+
+
+def _create_sampling_transport(config):
+    prediction = config.transport.prediction
+    train_eps = config.transport.train_eps
+    sample_eps = config.transport.sample_eps
+
+    output_prediction_space = str(
+        config.model.get("sit_output_prediction_space", "velocity")
+    )
+    if (
+        str(config.transport.get("objective", "sit")) == "sit"
+        and output_prediction_space != "velocity"
+    ):
+        min_eps = max(float(config.model.get("sit_wrapper_eps", 1e-6)), 1e-3)
+        prediction = "noise"
+        train_eps = min_eps if train_eps is None else max(float(train_eps), min_eps)
+        sample_eps = min_eps if sample_eps is None else max(float(sample_eps), min_eps)
+
+    return create_transport(
+        path_type=config.transport.path_type,
+        prediction=prediction,
+        loss_weight=config.transport.loss_weight,
+        train_eps=train_eps,
+        sample_eps=sample_eps,
+    )
+
+
+def _use_native_prediction_sampling(config):
+    return bool(config.sampling.get("plain_sit_native_prediction_sampling", False))
+
+
+def _get_native_prediction_space(config):
+    return str(config.model.get("sit_output_prediction_space", "velocity"))
+
+
+def _native_prediction_to_drift(transport, prediction_space, native_output, x, t):
+    if prediction_space == "velocity":
+        return native_output
+
+    drift_mean, drift_var = transport.path_sampler.compute_drift(x, t)
+    if prediction_space == "noise":
+        sigma_t, _ = transport.path_sampler.compute_sigma_t(
+            t.reshape((t.shape[0],) + (1,) * (x.ndim - 1))
+        )
+        score = native_output / -sigma_t
+        return -drift_mean + drift_var * score
+
+    raise ValueError(
+        "Native plain SiT prediction sampling currently supports "
+        f"'velocity' and 'noise', got {prediction_space!r}."
+    )
+
+
+def _convert_final_sample_to_data(
+    model,
+    variable,
+    x,
+    t_model,
+    labels,
+    cfg_scale,
+    *,
+    native_prediction_sampling,
+    prediction_space,
+):
+    if not native_prediction_sampling or prediction_space == "velocity":
+        return x
+
+    native_output = _guided_native_output(
+        model,
+        variable,
+        x,
+        t_model,
+        labels,
+        cfg_scale,
+    )
+    return model.apply(
+        variable,
+        native_output,
+        x,
+        t_model,
+        method=model.convert_native_output_to_data,
+    )
 
 
 def generate(
@@ -128,13 +248,7 @@ def generate(
         sample_idx=sample_idx,
     )
 
-    transport = create_transport(
-        path_type=config.transport.path_type,
-        prediction=config.transport.prediction,
-        loss_weight=config.transport.loss_weight,
-        train_eps=config.transport.train_eps,
-        sample_eps=config.transport.sample_eps,
-    )
+    transport = _create_sampling_transport(config)
     tau0, tau1 = transport.check_interval(
         transport.train_eps,
         transport.sample_eps,
@@ -148,6 +262,8 @@ def generate(
     method = str(config.sampling.get("method", "euler")).lower()
     flip_time = bool(config.sampling.get("flip_time", False))
     cfg_scale = jnp.asarray(omega, dtype=sample_dtype)
+    native_prediction_sampling = _use_native_prediction_sampling(config)
+    prediction_space = _get_native_prediction_space(config)
 
     def euler_step(i, x_cur):
         tau_cur = times[i]
@@ -158,8 +274,21 @@ def generate(
             1.0 - tau_cur if flip_time else tau_cur,
             dtype=sample_dtype,
         )
-        velocity = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
-        return (x_cur + dt * velocity).astype(sample_dtype)
+        if native_prediction_sampling:
+            native_output = _guided_native_output(
+                model,
+                variable,
+                x_cur,
+                t_cur,
+                labels,
+                cfg_scale,
+            )
+            drift = _native_prediction_to_drift(
+                transport, prediction_space, native_output, x_cur, t_cur
+            )
+        else:
+            drift = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
+        return (x_cur + dt * drift).astype(sample_dtype)
 
     def heun_step(i, x_cur):
         tau_cur = times[i]
@@ -170,15 +299,43 @@ def generate(
             1.0 - tau_cur if flip_time else tau_cur,
             dtype=sample_dtype,
         )
-        velocity = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
-        x_pred = x_cur + dt * velocity
+        if native_prediction_sampling:
+            native_output = _guided_native_output(
+                model,
+                variable,
+                x_cur,
+                t_cur,
+                labels,
+                cfg_scale,
+            )
+            drift = _native_prediction_to_drift(
+                transport, prediction_space, native_output, x_cur, t_cur
+            )
+        else:
+            drift = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
+        x_pred = x_cur + dt * drift
         t_next = jnp.full(
             (n_sample,),
             1.0 - tau_next if flip_time else tau_next,
             dtype=sample_dtype,
         )
-        velocity_next = _guided_velocity(model, variable, x_pred, t_next, labels, cfg_scale)
-        return (x_cur + 0.5 * dt * (velocity + velocity_next)).astype(sample_dtype)
+        if native_prediction_sampling:
+            native_output_next = _guided_native_output(
+                model,
+                variable,
+                x_pred,
+                t_next,
+                labels,
+                cfg_scale,
+            )
+            drift_next = _native_prediction_to_drift(
+                transport, prediction_space, native_output_next, x_pred, t_next
+            )
+        else:
+            drift_next = _guided_velocity(
+                model, variable, x_pred, t_next, labels, cfg_scale
+            )
+        return (x_cur + 0.5 * dt * (drift + drift_next)).astype(sample_dtype)
 
     def meanflow_step(i, x_cur):
         tau_cur = times[i]
@@ -208,10 +365,29 @@ def generate(
     if _use_interval_meanflow_sampling(config):
         return jax.lax.fori_loop(0, num_steps, meanflow_step, x)
     if method == "euler":
-        return jax.lax.fori_loop(0, num_steps, euler_step, x)
-    if method == "heun":
-        return jax.lax.fori_loop(0, num_steps, heun_step, x)
-    raise ValueError(f"Unsupported plain SiT sampling method: {method}")
+        x_final = jax.lax.fori_loop(0, num_steps, euler_step, x)
+    elif method == "heun":
+        x_final = jax.lax.fori_loop(0, num_steps, heun_step, x)
+    else:
+        raise ValueError(f"Unsupported plain SiT sampling method: {method}")
+
+    t_final = times[-1]
+    t_model_final = jnp.full(
+        (n_sample,),
+        1.0 - t_final if flip_time else t_final,
+        dtype=sample_dtype,
+    )
+    final_data = _convert_final_sample_to_data(
+        model,
+        variable,
+        x_final,
+        t_model_final,
+        labels,
+        cfg_scale,
+        native_prediction_sampling=native_prediction_sampling,
+        prediction_space=prediction_space,
+    )
+    return final_data.astype(sample_dtype)
 
 
 def sample_step(

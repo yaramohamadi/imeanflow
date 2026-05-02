@@ -85,6 +85,7 @@ def train_step_with_vae(
             images=images,
             labels=labels,
             source_params=state.source_params,
+            teacher_params=state.ema_params,
             current_step=state.step,
             rngs=dict(
                 gen=rng_base,
@@ -164,6 +165,7 @@ def train_step_with_vae_single_device(
             images=images,
             labels=labels,
             source_params=state.source_params,
+            teacher_params=state.ema_params,
             current_step=state.step,
             rngs=dict(gen=rng_base),
         )
@@ -248,6 +250,7 @@ def debug_step_with_vae(state, batch, rng_init, latent_manager, model):
         images=images,
         labels=labels,
         source_params=state.source_params,
+        teacher_params=state.ema_params,
         current_step=state.step,
         rngs=dict(gen=rng_base),
         method=model.debug_forward,
@@ -303,6 +306,7 @@ def debug_step_with_vae_single_device(state, batch, rng_init, latent_manager, mo
         images=images,
         labels=labels,
         source_params=state.source_params,
+        teacher_params=state.ema_params,
         current_step=state.step,
         rngs=dict(gen=rng_base),
         method=model.debug_forward,

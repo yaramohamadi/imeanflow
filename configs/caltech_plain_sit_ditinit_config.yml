@@ -10,6 +10,8 @@ model:
     target_use_null_class: True
     class_dropout_prob: 0.1
     sit_output_prediction_space: velocity
+    sit_model_time_scale: 999.0
+    sit_model_time_flip: True
 
 transport:
     path_type: Linear

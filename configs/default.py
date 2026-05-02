@@ -94,6 +94,7 @@ def get_config():
     model.use_adaln_condition_mixing = False
     model.decoder_only_guidance_conditioning = False
     model.time_conditioning_mode = "split"
+    model.use_ema_vc = False
     model.use_training_guidance = True
     model.training_guidance_interval_strategy = "sampled"
     model.training_guidance_t_min = 0.0
@@ -115,6 +116,9 @@ def get_config():
     model.output_prediction_space = "epsilon"
     model.sit_output_prediction_space = "velocity"
     model.sit_wrapper_eps = 1e-6
+    model.sit_wrapped_loss_weight = "none"
+    model.sit_model_time_scale = 1.0
+    model.sit_model_time_flip = False
 
     # Training Dynamics
     model.norm_p = 1.0

@@ -197,6 +197,9 @@ def _build_plain_sit(config, *, eval_mode=False):
             config.model.get("sit_output_prediction_space", "velocity")
         ),
         wrapper_eps=float(config.model.get("sit_wrapper_eps", 1e-6)),
+        wrapped_loss_weight=str(config.model.get("sit_wrapped_loss_weight", "none")),
+        model_time_scale=float(config.model.get("sit_model_time_scale", 1.0)),
+        model_time_flip=bool(config.model.get("sit_model_time_flip", False)),
         eval=eval_mode,
     )
 
