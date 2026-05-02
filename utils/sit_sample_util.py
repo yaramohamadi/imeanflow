@@ -39,6 +39,16 @@ def _make_sample_labels(num_samples, num_classes, sample_idx=None):
     )
 
 
+def _make_random_sample_labels(rng, num_samples, num_classes):
+    return random.randint(
+        rng,
+        (num_samples,),
+        0,
+        num_classes,
+        dtype=jnp.int32,
+    )
+
+
 def _guided_velocity(model, variable, x, t_model, labels, cfg_scale):
     num_samples = x.shape[0]
 
@@ -241,7 +251,6 @@ def generate(
         (n_sample, img_size, img_size, img_channels),
         dtype=sample_dtype,
     )
-
     labels = _make_sample_labels(
         n_sample,
         config.dataset.num_classes,
@@ -388,6 +397,214 @@ def generate(
         prediction_space=prediction_space,
     )
     return final_data.astype(sample_dtype)
+
+
+def generate_with_initial_noise(
+    variable,
+    model,
+    rng,
+    n_sample,
+    config,
+    num_steps,
+    omega,
+    t_min,
+    t_max,
+    sample_idx=None,
+):
+    """Generate latents and also return the initial Gaussian latents used."""
+    del t_min, t_max
+    if num_steps < 1:
+        raise ValueError(
+            f"Plain SiT sampling requires num_steps >= 1, got {num_steps}."
+        )
+
+    img_size = config.dataset.image_size
+    img_channels = config.dataset.image_channels
+    sample_dtype = _get_sampling_dtype(config)
+    rng_noise, rng_labels = random.split(rng)
+    x = jax.random.normal(
+        rng_noise,
+        (n_sample, img_size, img_size, img_channels),
+        dtype=sample_dtype,
+    )
+    x_init = x
+
+    labels = _make_random_sample_labels(
+        rng_labels,
+        n_sample,
+        config.dataset.num_classes,
+    )
+
+    transport = _create_sampling_transport(config)
+    tau0, tau1 = transport.check_interval(
+        transport.train_eps,
+        transport.sample_eps,
+        sde=False,
+        eval=True,
+        reverse=False,
+        last_step_size=0.0,
+    )
+    times = jnp.linspace(float(tau0), float(tau1), num_steps + 1, dtype=sample_dtype)
+
+    method = str(config.sampling.get("method", "euler")).lower()
+    flip_time = bool(config.sampling.get("flip_time", False))
+    cfg_scale = jnp.asarray(omega, dtype=sample_dtype)
+    native_prediction_sampling = _use_native_prediction_sampling(config)
+    prediction_space = _get_native_prediction_space(config)
+
+    def euler_step(i, x_cur):
+        tau_cur = times[i]
+        tau_next = times[i + 1]
+        dt = tau_next - tau_cur
+        t_cur = jnp.full(
+            (n_sample,),
+            1.0 - tau_cur if flip_time else tau_cur,
+            dtype=sample_dtype,
+        )
+        if native_prediction_sampling:
+            native_output = _guided_native_output(
+                model,
+                variable,
+                x_cur,
+                t_cur,
+                labels,
+                cfg_scale,
+            )
+            drift = _native_prediction_to_drift(
+                transport, prediction_space, native_output, x_cur, t_cur
+            )
+        else:
+            drift = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
+        return (x_cur + dt * drift).astype(sample_dtype)
+
+    def heun_step(i, x_cur):
+        tau_cur = times[i]
+        tau_next = times[i + 1]
+        dt = tau_next - tau_cur
+        t_cur = jnp.full(
+            (n_sample,),
+            1.0 - tau_cur if flip_time else tau_cur,
+            dtype=sample_dtype,
+        )
+        if native_prediction_sampling:
+            native_output = _guided_native_output(
+                model,
+                variable,
+                x_cur,
+                t_cur,
+                labels,
+                cfg_scale,
+            )
+            drift = _native_prediction_to_drift(
+                transport, prediction_space, native_output, x_cur, t_cur
+            )
+        else:
+            drift = _guided_velocity(model, variable, x_cur, t_cur, labels, cfg_scale)
+        x_pred = x_cur + dt * drift
+        t_next = jnp.full(
+            (n_sample,),
+            1.0 - tau_next if flip_time else tau_next,
+            dtype=sample_dtype,
+        )
+        if native_prediction_sampling:
+            native_output_next = _guided_native_output(
+                model,
+                variable,
+                x_pred,
+                t_next,
+                labels,
+                cfg_scale,
+            )
+            drift_next = _native_prediction_to_drift(
+                transport, prediction_space, native_output_next, x_pred, t_next
+            )
+        else:
+            drift_next = _guided_velocity(
+                model, variable, x_pred, t_next, labels, cfg_scale
+            )
+        return (x_cur + 0.5 * dt * (drift + drift_next)).astype(sample_dtype)
+
+    def meanflow_step(i, x_cur):
+        tau_cur = times[i]
+        tau_next = times[i + 1]
+        t_cur = jnp.full(
+            (n_sample,),
+            1.0 - tau_cur if flip_time else tau_cur,
+            dtype=sample_dtype,
+        )
+        r_next = jnp.full(
+            (n_sample,),
+            1.0 - tau_next if flip_time else tau_next,
+            dtype=sample_dtype,
+        )
+        meanflow = _guided_meanflow(
+            model,
+            variable,
+            x_cur,
+            t_cur,
+            r_next,
+            labels,
+            cfg_scale,
+        )
+        delta_t = (r_next - t_cur).reshape((n_sample, 1, 1, 1))
+        return (x_cur + delta_t * meanflow).astype(sample_dtype)
+
+    if _use_interval_meanflow_sampling(config):
+        x_final = jax.lax.fori_loop(0, num_steps, meanflow_step, x)
+        return x_init.astype(sample_dtype), x_final.astype(sample_dtype)
+    if method == "euler":
+        x_final = jax.lax.fori_loop(0, num_steps, euler_step, x)
+    elif method == "heun":
+        x_final = jax.lax.fori_loop(0, num_steps, heun_step, x)
+    else:
+        raise ValueError(f"Unsupported plain SiT sampling method: {method}")
+
+    t_final = times[-1]
+    t_model_final = jnp.full(
+        (n_sample,),
+        1.0 - t_final if flip_time else t_final,
+        dtype=sample_dtype,
+    )
+    final_data = _convert_final_sample_to_data(
+        model,
+        variable,
+        x_final,
+        t_model_final,
+        labels,
+        cfg_scale,
+        native_prediction_sampling=native_prediction_sampling,
+        prediction_space=prediction_space,
+    )
+    return x_init.astype(sample_dtype), final_data.astype(sample_dtype)
+
+
+def sample_step_with_initial_noise(
+    variable,
+    sample_idx,
+    model,
+    rng_init,
+    device_batch_size,
+    config,
+    num_steps,
+    omega,
+    t_min,
+    t_max,
+):
+    """PMapped sampling step returning initial noise and final latents in BCHW."""
+    rng_sample = random.fold_in(rng_init, sample_idx)
+    initial_noise, images = generate_with_initial_noise(
+        variable,
+        model,
+        rng_sample,
+        device_batch_size,
+        config,
+        num_steps,
+        omega,
+        t_min,
+        t_max,
+        sample_idx=sample_idx,
+    )
+    return initial_noise.transpose(0, 3, 1, 2), images.transpose(0, 3, 1, 2)
 
 
 def sample_step(
