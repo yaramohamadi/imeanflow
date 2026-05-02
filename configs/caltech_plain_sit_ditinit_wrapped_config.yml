@@ -85,7 +85,8 @@ fd_dino:
 sampling:
     num_steps: 4
     method: heun
-    plain_sit_native_prediction_sampling: True
+    plain_sit_native_prediction_sampling: False
+    flip_time: False
     half_precision: False
     half_precision_dtype: float16
     omega: 1.5
@@ -104,6 +105,10 @@ logging:
         - dit-init
         - epsilon-wrapper
     wandb_notes: 'Caltech-101 plain SiT fine-tuning from DiT weights with epsilon-to-velocity wrapper'
+
+debug:
+    noise_reconstruction: True
+    noise_reconstruction_num_images: 16
 
 load_from: '/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt'
 partial_load: True

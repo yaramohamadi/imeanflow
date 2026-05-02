@@ -202,6 +202,34 @@ class PlainSiT(nn.Module):
             t.astype(self.dtype),
         )
 
+    def debug_noise_reconstruction(self, images, labels):
+        """Return training-path noise prediction diagnostics for one batch."""
+        if self.objective != "sit" or self.output_prediction_space != "noise":
+            raise ValueError(
+                "debug_noise_reconstruction is only defined for objective='sit' "
+                "with output_prediction_space='noise'."
+            )
+
+        x1 = images.astype(self.dtype)
+        labels = labels.astype(jnp.int32)
+        t, x0, x1 = self.transport.sample(x1, self.make_rng("gen"))
+        t, xt, _ = self.transport.path_sampler.plan(t, x0, x1)
+        x0_hat = self._predict_backbone_output(xt, t, labels)
+        x1_hat = self._compute_data_prediction(x0_hat, xt, t)
+
+        mse_x0 = jnp.mean(jnp.square(x0_hat - x0), axis=tuple(range(1, x0.ndim)))
+        mse_x1 = jnp.mean(jnp.square(x1_hat - x1), axis=tuple(range(1, x1.ndim)))
+        return {
+            "x0": x0,
+            "x1": x1,
+            "xt": xt,
+            "x0_hat": x0_hat,
+            "x1_hat": x1_hat,
+            "t": t,
+            "mse_x0": jnp.mean(mse_x0),
+            "mse_x1": jnp.mean(mse_x1),
+        }
+
     def logit_normal_dist(self, bz):
         rnd_normal = jax.random.normal(
             self.make_rng("gen"), [bz, 1, 1, 1], dtype=self.dtype

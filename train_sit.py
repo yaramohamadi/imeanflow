@@ -5,6 +5,7 @@ import os
 import jax
 import jax.numpy as jnp
 import ml_collections
+import numpy as np
 import torch
 from flax import jax_utils
 from functools import partial
@@ -46,6 +47,25 @@ def compute_metrics(dict_losses):
     metrics = {k: jnp.mean(v) for k, v in dict_losses.items()}
     metrics = lax.pmean(metrics, axis_name="batch")
     return metrics
+
+
+def debug_noise_reconstruction_step(
+    state, batch, rng_init, model, latent_manager
+):
+    """Build x_t on a training batch and reconstruct x1 from predicted noise."""
+    rng_step = random.fold_in(rng_init, state.step)
+    rng_base = random.fold_in(rng_step, lax.axis_index(axis_name="batch"))
+    rng_vae, rng_debug = random.split(rng_base)
+
+    images = latent_manager.cached_encode(batch["image"], rng_vae)
+    labels = batch["label"]
+    return model.apply(
+        {"params": state.params},
+        images,
+        labels,
+        rngs=dict(gen=rng_debug),
+        method=model.debug_noise_reconstruction,
+    )
 
 
 def train_step_with_vae(
@@ -142,6 +162,24 @@ class CachedLatentEncoder:
         latent = LatentDist(cached_value).sample(key=rng).transpose((0, 3, 1, 2))
         latent = (latent - self.mean) / self.std
         return latent.transpose((0, 2, 3, 1))
+
+
+def _decode_debug_latents_to_uint8(latent_manager, latents_bhwc, num_images):
+    latents_bhwc = jnp.asarray(latents_bhwc[:num_images])
+    latents_bchw = latents_bhwc.transpose(0, 3, 1, 2)
+    samples = latent_manager.decode(latents_bchw)[:num_images]
+    samples = samples.transpose(0, 2, 3, 1)
+    samples = 127.5 * samples + 128.0
+    samples = jnp.clip(samples, 0, 255).astype(jnp.uint8)
+    return np.asarray(jax.device_get(samples))
+
+
+def _scalar_from_replicated(value):
+    return float(np.asarray(jax.device_get(value), dtype=np.float64).mean())
+
+
+def _first_device_debug_batch(debug_outputs):
+    return jax.tree_util.tree_map(lambda x: jax.device_get(x[0]), debug_outputs)
 
 
 def infer_num_classes_from_latents(dataset_root):
@@ -610,6 +648,20 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         axis_name="batch",
         donate_argnums=(0,),
     )
+    debug_config = config.get("debug", {})
+    enable_noise_reconstruction_debug = bool(
+        debug_config.get("noise_reconstruction", False)
+    )
+    debug_noise_reconstruction_model = _build_plain_sit(config, eval_mode=True)
+    p_debug_noise_reconstruction = jax.pmap(
+        partial(
+            debug_noise_reconstruction_step,
+            rng_init=random.PRNGKey(int(config.training.seed) + 1701),
+            model=debug_noise_reconstruction_model,
+            latent_manager=latent_encoder,
+        ),
+        axis_name="batch",
+    )
 
     metrics_tracker = MetricsTracker()
     timer = Timer()
@@ -723,6 +775,63 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             {f"image_grid_{sample_mode}": stacked_preview_panel},
         )
 
+    def log_noise_reconstruction_debug(state_for_logging, batch_for_logging, step_for_logging):
+        debug_outputs = p_debug_noise_reconstruction(state_for_logging, batch_for_logging)
+        writer.write_scalars(
+            step_for_logging,
+            {
+                "debug_noise_reconstruction/mse_x0": _scalar_from_replicated(
+                    debug_outputs["mse_x0"]
+                ),
+                "debug_noise_reconstruction/mse_x1": _scalar_from_replicated(
+                    debug_outputs["mse_x1"]
+                ),
+                "debug_noise_reconstruction/t_mean": _scalar_from_replicated(
+                    debug_outputs["t"]
+                ),
+            },
+        )
+
+        first_device_outputs = _first_device_debug_batch(debug_outputs)
+        max_images = int(debug_config.get("noise_reconstruction_num_images", 16))
+        num_images = min(
+            max_images,
+            int(config.fid.num_images_to_log),
+            int(sample_latent_manager.batch_size),
+            int(first_device_outputs["x1"].shape[0]),
+        )
+        grid_size = int(num_images ** 0.5)
+        num_images = grid_size ** 2
+        if num_images <= 0:
+            return
+
+        image_groups = {
+            "x1_data": _decode_debug_latents_to_uint8(
+                sample_latent_manager, first_device_outputs["x1"], num_images
+            ),
+            "xt_training": _decode_debug_latents_to_uint8(
+                sample_latent_manager, first_device_outputs["xt"], num_images
+            ),
+            "x1_hat_from_pred_noise": _decode_debug_latents_to_uint8(
+                sample_latent_manager, first_device_outputs["x1_hat"], num_images
+            ),
+            "x0_noise": _decode_debug_latents_to_uint8(
+                sample_latent_manager, first_device_outputs["x0"], num_images
+            ),
+            "x0_hat_pred_noise": _decode_debug_latents_to_uint8(
+                sample_latent_manager, first_device_outputs["x0_hat"], num_images
+            ),
+        }
+        writer.write_images(
+            step_for_logging,
+            {
+                "debug_noise_reconstruction_grid": make_stacked_grid_panel(
+                    image_groups,
+                    grid_size,
+                )
+            },
+        )
+
     image_metric_evaluator = get_image_metric_evaluator(
         config,
         writer,
@@ -787,6 +896,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 and current_step > 0
                 and current_step % config.training.sample_per_step == 0
             ):
+                if enable_noise_reconstruction_debug:
+                    log_noise_reconstruction_debug(state, batch, current_step)
                 log_preview_samples(state, current_step)
 
             if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
