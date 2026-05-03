@@ -255,6 +255,7 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
     run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
     use_ema = config.training.get("use_ema", True)
+    fid_use_online_only = config.training.get("fid_use_online_only", False)
     guidance_controllable = has_controllable_sampling_guidance(config.model)
 
     def _evaluate_one_mode(state, p_sample_step, ema, metric_suffix="", **kwargs):
@@ -332,7 +333,16 @@ def get_image_metric_evaluator(config, writer, latent_manager):
     ):
         metric_dict = {}
         primary_result = None
-        if use_ema:
+        if fid_use_online_only:
+            metric, primary_result = _evaluate_one_mode(
+                state,
+                p_sample_step,
+                False,
+                metric_suffix=metric_suffix,
+                **kwargs,
+            )
+            metric_dict.update(metric)
+        elif use_ema:
             metric, primary_result = _evaluate_one_mode(
                 state,
                 p_sample_step,

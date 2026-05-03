@@ -65,6 +65,8 @@ training:
     eval_checkpoint_dir: latest_eval
     half_precision: False
     half_precision_dtype: float16
+    noise_reconstruction_debug: True
+    noise_reconstruction_debug_num_images: 16
 
     seed: 42
 
@@ -105,10 +107,6 @@ logging:
         - dit-init
         - epsilon-wrapper
     wandb_notes: 'Caltech-101 plain SiT fine-tuning from DiT weights with epsilon-to-velocity wrapper'
-
-debug:
-    noise_reconstruction: True
-    noise_reconstruction_num_images: 16
 
 load_from: '/home/ens/AT74470/imeanflow/files/weights/DiT-XL-2-256x256.pt'
 partial_load: True

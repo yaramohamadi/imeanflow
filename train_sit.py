@@ -648,9 +648,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         axis_name="batch",
         donate_argnums=(0,),
     )
-    debug_config = config.get("debug", {})
     enable_noise_reconstruction_debug = bool(
-        debug_config.get("noise_reconstruction", False)
+        config.training.get("noise_reconstruction_debug", False)
     )
     debug_noise_reconstruction_model = _build_plain_sit(config, eval_mode=True)
     p_debug_noise_reconstruction = jax.pmap(
@@ -793,7 +792,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         )
 
         first_device_outputs = _first_device_debug_batch(debug_outputs)
-        max_images = int(debug_config.get("noise_reconstruction_num_images", 16))
+        max_images = int(
+            config.training.get("noise_reconstruction_debug_num_images", 16)
+        )
         num_images = min(
             max_images,
             int(config.fid.num_images_to_log),

@@ -922,7 +922,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         workdir,
         config.training.get("eval_checkpoint_dir", "latest_eval"),
     )
-    metric_mode = _primary_metric_mode(use_ema)
+    metric_mode = _primary_metric_mode(
+        use_ema and not config.training.get("fid_use_online_only", False)
+    )
 
     ########### Training Loop ###########
     metrics_tracker = MetricsTracker()

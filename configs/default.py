@@ -56,6 +56,7 @@ def get_config():
     training.best_fid_checkpoint_dir = "best_fid"
     training.save_eval_checkpoint_per_fid = False
     training.eval_checkpoint_dir = "latest_eval"
+    training.fid_use_online_only = False
     training.capture_source_from_load = False
     training.half_precision = False
     training.half_precision_dtype = "float16"

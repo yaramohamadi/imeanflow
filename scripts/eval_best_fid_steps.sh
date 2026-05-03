@@ -30,6 +30,10 @@ MODEL_STR="${MODEL_STR:-}"
 MODEL_USE_DOGFIT="${MODEL_USE_DOGFIT:-}"
 TARGET_USE_NULL_CLASS="${TARGET_USE_NULL_CLASS:-}"
 CLASS_DROPOUT_PROB="${CLASS_DROPOUT_PROB:-}"
+DATASET_ROOT="${DATASET_ROOT:-}"
+DATASET_NUM_CLASSES="${DATASET_NUM_CLASSES:-}"
+FID_CACHE_REF="${FID_CACHE_REF:-}"
+FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
 EVAL_PLATFORM="${EVAL_PLATFORM:-gpu}"
 
 case "$EVAL_PLATFORM" in
@@ -92,6 +96,20 @@ for NUM_STEPS in "${STEPS[@]}"; do
   fi
   if [[ -n "$CLASS_DROPOUT_PROB" ]]; then
     EXTRA_CONFIG_ARGS+=("--config.model.class_dropout_prob=${CLASS_DROPOUT_PROB}")
+  fi
+  if [[ -n "$DATASET_ROOT" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.dataset.root=${DATASET_ROOT}")
+  fi
+  if [[ -n "$DATASET_NUM_CLASSES" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.dataset.num_classes=${DATASET_NUM_CLASSES}")
+    EXTRA_CONFIG_ARGS+=("--config.model.num_classes=${DATASET_NUM_CLASSES}")
+    EXTRA_CONFIG_ARGS+=("--config.sampling.num_classes=${DATASET_NUM_CLASSES}")
+  fi
+  if [[ -n "$FID_CACHE_REF" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.fid.cache_ref=${FID_CACHE_REF}")
+  fi
+  if [[ -n "$FD_DINO_CACHE_REF" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.fd_dino.cache_ref=${FD_DINO_CACHE_REF}")
   fi
 
   if [[ "$EVAL_PLATFORM" == "cpu" ]]; then

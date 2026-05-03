@@ -60,6 +60,7 @@ training:
     grad_accum_steps: 4
     save_best_fid_only: True
     best_fid_checkpoint_dir: 'best_fid'
+    fid_use_online_only: True
     capture_source_from_load: True
 
     seed: 42
