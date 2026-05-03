@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
 # This repo was originally developed in a TPU/JAX environment. On Compute
 # Canada we prefer the local wheelhouse when it exists, because it provides
 # cluster-compatible builds without requiring internet access.
@@ -53,6 +55,12 @@ else
     TORCH_VERSION="${TORCH_VERSION:-${DEFAULT_TORCH_VERSION}}"
 fi
 
+# Python 3.12 cannot use the original TensorFlow 2.15 pin from this repo.
+# These defaults keep TensorFlow in the same environment while remaining
+# compatible with the newer ml-dtypes stack used by JAX.
+TENSORFLOW_VERSION="${TENSORFLOW_VERSION:-2.19.1}"
+ML_DTYPES_VERSION="${ML_DTYPES_VERSION:-0.5.1}"
+
 # Default to the NVIDIA GPU build of JAX. Override with:
 #   JAX_PLATFORM=cpu bash scripts/install.sh
 #   JAX_PLATFORM=tpu bash scripts/install.sh
@@ -103,7 +111,7 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
         "diffusers==${DIFFUSERS_VERSION}+computecanada" \
         "matplotlib==3.9.2" \
         "ml-collections" \
-        "ml-dtypes==0.5.0" \
+        "ml-dtypes==${ML_DTYPES_VERSION}" \
         "optax==${OPTAX_VERSION}+computecanada" \
         "orbax-checkpoint==${ORBAX_CHECKPOINT_VERSION}+computecanada" \
         "pillow" \
@@ -121,22 +129,20 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
 else
     python -m pip install --upgrade \
         "flax>=0.8" \
-        "jaxlib==${JAX_VERSION}" \
         "absl-py" \
         "cached_property" \
         "clu" \
         "diffusers" \
         "dm-tree" \
-        "keras<3" \
         "matplotlib==3.9.2" \
         "ml-collections" \
-        "ml-dtypes==0.5.0" \
+        "ml-dtypes==${ML_DTYPES_VERSION}" \
         "optax" \
         "orbax-checkpoint==0.6.4" \
         "pillow" \
         "PyYAML" \
         "requests" \
-        "tensorflow==2.15.0" \
+        "tensorflow==${TENSORFLOW_VERSION}" \
         "tensorflow_datasets" \
         "tensorstore==0.1.67" \
         "timm" \
