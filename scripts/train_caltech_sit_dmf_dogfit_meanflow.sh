@@ -45,6 +45,7 @@ TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
     main.py \
     --workdir="$WORKDIR" \
     --config=configs/load_config.py:${CONFIG_MODE} \
+    --config.dataset.num_classes_from_data=False \
     --config.logging.use_wandb=${USE_WANDB} \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "$WORKDIR/output.log"

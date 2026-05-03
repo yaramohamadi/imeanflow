@@ -134,6 +134,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
     --config="configs/load_config.py:${CONFIG_MODE}" \
     --config.dataset.root="${DATASET_ROOT}" \
     --config.dataset.num_classes="${DATASET_NUM_CLASSES}" \
+    --config.dataset.num_classes_from_data="False" \
     --config.model.num_classes="${DATASET_NUM_CLASSES}" \
     --config.sampling.num_classes="${DATASET_NUM_CLASSES}" \
     --config.fid.cache_ref="${FID_CACHE_REF}" \
