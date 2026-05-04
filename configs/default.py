@@ -87,7 +87,12 @@ def get_config():
     model.use_dogfit = False
     model.target_use_null_class = True
     model.source_prediction_space = "v"
+    model.source_model_str = ""
     model.source_num_classes = dataset.num_classes
+    model.source_path_type = "Linear"
+    model.source_wrapper_eps = 1e-6
+    model.source_model_time_scale = 1.0
+    model.source_model_time_flip = False
     model.use_auxiliary_v_head = True
     model.use_context_guidance_conditioning = False
     model.use_adaln_guidance_scale_conditioning = False

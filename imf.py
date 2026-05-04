@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from models import imfDiT
 from utils.imf_param_util import is_v_only_param_tree
+from utils.sit_transport_jax import create_transport
 
 
 def generate(variable, model, rng, n_sample, config, 
@@ -75,7 +76,12 @@ class iMeanFlow(nn.Module):
     use_dogfit: bool = False
     target_use_null_class: bool = True
     source_prediction_space: str = "v"
+    source_model_str: str = ""
     source_num_classes: int = 1000
+    source_path_type: str = "Linear"
+    source_wrapper_eps: float = 1e-6
+    source_model_time_scale: float = 1.0
+    source_model_time_flip: bool = False
     use_auxiliary_v_head: bool = True
     use_context_guidance_conditioning: bool = False
     use_adaln_guidance_scale_conditioning: bool = False
@@ -122,9 +128,9 @@ class iMeanFlow(nn.Module):
             use_null_class=self.target_use_null_class,
             eval=self.eval,
         )
-        if "DiT" in self.model_str and "SiT" not in self.model_str:
+        if self._uses_plain_imf_dit_backbone():
             net_kwargs["use_auxiliary_v_head"] = self.use_auxiliary_v_head
-        if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
+        if self._uses_dmf_single_head_backbone():
             net_kwargs["use_context_guidance_conditioning"] = self.use_context_guidance_conditioning
             net_kwargs["use_adaln_guidance_scale_conditioning"] = (
                 self.use_adaln_guidance_scale_conditioning
@@ -147,15 +153,23 @@ class iMeanFlow(nn.Module):
                 else self.num_classes
             )
             source_use_null_class = True if self.use_dogfit else self.target_use_null_class
+            source_model_str = (
+                self.source_model_str if self.source_model_str else self.model_str
+            )
+            source_net_fn = getattr(imfDiT, source_model_str)
             source_net_kwargs = dict(
                 name="source_net",
                 num_classes=source_num_classes,
                 use_null_class=source_use_null_class,
                 eval=False,
             )
-            if "DiT" in self.model_str and "SiT" not in self.model_str:
+            if self._uses_plain_exact_source_backbone(source_model_str):
+                source_net_kwargs["learn_sigma"] = True
+                source_net_kwargs["return_learned_sigma"] = False
+                source_net_kwargs["use_r_conditioning"] = False
+            elif self._uses_plain_imf_dit_backbone(source_model_str):
                 source_net_kwargs["use_auxiliary_v_head"] = self.use_auxiliary_v_head
-            if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
+            elif self._uses_dmf_single_head_backbone(source_model_str):
                 source_net_kwargs["use_context_guidance_conditioning"] = (
                     self.use_context_guidance_conditioning
                 )
@@ -174,7 +188,12 @@ class iMeanFlow(nn.Module):
                 source_net_kwargs["time_conditioning_mode"] = (
                     self.time_conditioning_mode
                 )
-            self.source_net: imfDiT.imfDiT = net_fn(**source_net_kwargs)
+            self.source_net = source_net_fn(**source_net_kwargs)
+            if self.source_prediction_space == "noise":
+                self.source_transport = create_transport(
+                    path_type=self.source_path_type,
+                    prediction="noise",
+                )
 
     def _uses_src_reg_training_mode(self):
         return self.training_mode == "imf_jvp_free_src_reg"
@@ -191,26 +210,36 @@ class iMeanFlow(nn.Module):
     def _uses_auxiliary_v_head(self):
         return self.use_auxiliary_v_head
 
+    def _uses_dmf_single_head_backbone(self, model_str=None):
+        model_str = self.model_str if model_str is None else model_str
+        return (not self._uses_auxiliary_v_head()) and ("_DMF" in model_str)
+
     def _uses_sit_dmf_time_convention(self):
-        return (not self._uses_auxiliary_v_head()) and ("SiT" in self.model_str)
+        return self._uses_dmf_single_head_backbone()
 
     def _uses_sit_cfg_channel_rule(self):
-        return "SiT" in self.model_str
+        return self._uses_dmf_single_head_backbone() or ("SiT" in self.model_str)
+
+    def _uses_plain_imf_dit_backbone(self, model_str=None):
+        model_str = self.model_str if model_str is None else model_str
+        return ("DiT" in model_str) and ("SiT" not in model_str) and ("_DMF" not in model_str)
 
     def _uses_imf_dit_backbone(self):
-        return "DiT" in self.model_str and "SiT" not in self.model_str
+        return self._uses_plain_imf_dit_backbone()
+
+    def _uses_plain_exact_source_backbone(self, model_str=None):
+        model_str = self.model_str if model_str is None else model_str
+        return model_str.startswith("flaxDiT") or model_str.startswith("flaxSiT")
 
     def _uses_sit_guidance_context_conditioning(self):
         return (
-            (not self._uses_auxiliary_v_head())
-            and ("SiT_DMF" in self.model_str)
+            self._uses_dmf_single_head_backbone()
             and self.use_context_guidance_conditioning
         )
 
     def _uses_sit_adaln_guidance_scale_conditioning(self):
         return (
-            (not self._uses_auxiliary_v_head())
-            and ("SiT_DMF" in self.model_str)
+            self._uses_dmf_single_head_backbone()
             and self.use_adaln_guidance_scale_conditioning
         )
 
@@ -235,6 +264,39 @@ class iMeanFlow(nn.Module):
         if "net" in source_params:
             return source_params["net"]
         return source_params
+
+    def _source_predict_backbone_output(self, source_params, x, t, y):
+        source_param_tree = self._resolve_source_params(source_params)
+        t_model = t.astype(self.dtype)
+        if self.source_model_time_flip:
+            t_model = 1.0 - t_model
+        t_model = t_model * jnp.asarray(self.source_model_time_scale, dtype=self.dtype)
+        return self.source_net.apply(
+            {"params": source_param_tree},
+            x.astype(self.dtype),
+            t_model,
+            y,
+        )
+
+    def _source_noise_to_velocity(self, raw_output, x_t, t):
+        t_expanded = t.reshape((t.shape[0],) + (1,) * (x_t.ndim - 1))
+        alpha_t, d_alpha_t = self.source_transport.path_sampler.compute_alpha_t(
+            t_expanded
+        )
+        sigma_t, d_sigma_t = self.source_transport.path_sampler.compute_sigma_t(
+            t_expanded
+        )
+        sigma_safe = jnp.where(
+            jnp.abs(sigma_t) > self.source_wrapper_eps,
+            sigma_t,
+            jnp.where(sigma_t >= 0.0, self.source_wrapper_eps, -self.source_wrapper_eps),
+        )
+        x0_hat = raw_output
+        x1_hat = (x_t - sigma_t * x0_hat) / jnp.maximum(
+            alpha_t,
+            self.source_wrapper_eps,
+        )
+        return d_alpha_t * x1_hat + d_sigma_t * x0_hat
 
     def _mf_target_interval_coeff(self, t, r):
         if self._uses_sit_dmf_time_convention() and self.use_positive_sit_dmf_mf_target:
@@ -761,6 +823,15 @@ class iMeanFlow(nn.Module):
         """
         if source_params is None:
             raise ValueError("source_params must be provided when use_dogfit=True.")
+        if self.source_prediction_space == "noise":
+            if not self._uses_plain_exact_source_backbone(self.source_model_str):
+                raise NotImplementedError(
+                    "source_prediction_space='noise' currently requires a plain "
+                    f"exact source backbone, got {self.source_model_str!r}."
+                )
+            del omega
+            raw_output = self._source_predict_backbone_output(source_params, x, t, y)
+            return self._source_noise_to_velocity(raw_output, x.astype(self.dtype), t)
         if self.source_prediction_space != "v":
             raise NotImplementedError(
                 f"Unsupported source_prediction_space: {self.source_prediction_space}"
@@ -1575,6 +1646,16 @@ class iMeanFlow(nn.Module):
             or self._uses_split_consistency_source_ablation()
         ):
             return y
+
+        if self._uses_plain_exact_source_backbone(self.source_model_str):
+            t_model = t.astype(self.dtype)
+            if self.source_model_time_flip:
+                t_model = 1.0 - t_model
+            t_model = t_model * jnp.asarray(
+                self.source_model_time_scale,
+                dtype=self.dtype,
+            )
+            return self.source_net(x.astype(self.dtype), t_model, y)
 
         if self._uses_auxiliary_v_head():
             zeros = jnp.zeros_like(t)

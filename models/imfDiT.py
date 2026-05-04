@@ -1350,6 +1350,12 @@ imfSiT_DMF_XL_2_ZS = partial(
     decoder_depth=6,
 )
 
+# DiT_DMF reuses the exact single-head encoder/decoder layout from SiT_DMF in
+# this repo; the distinction is the initialization/source family and how the
+# raw DiT predictions may be wrapped into velocity.
+imfDiT_DMF_XL_2 = imfSiT_DMF_XL_2
+imfDiT_DMF_XL_2_ZS = imfSiT_DMF_XL_2_ZS
+
 flaxSiT_XL_2 = partial(
     FlaxSiT,
     depth=28,
