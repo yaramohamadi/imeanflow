@@ -905,7 +905,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         stacked_preview_panel = make_stacked_grid_panel(preview_image_groups, 1)
         writer.write_images(step_for_logging, {"image_grid": stacked_preview_panel})
 
-    image_metric_evaluator = get_image_metric_evaluator(config, writer, latent_manager)
+    image_metric_evaluator = None
     best_fid_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
     best_fd_dino_by_steps = {
         num_steps: float("inf") for num_steps in metric_num_steps
@@ -1068,6 +1068,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
 
             ########### FID ###########
             if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
+                if image_metric_evaluator is None:
+                    image_metric_evaluator = get_image_metric_evaluator(
+                        config, writer, latent_manager
+                    )
                 checkpoint_path_for_csv = ""
                 if save_eval_checkpoint_per_fid:
                     save_best_checkpoint(replicate_for_sampling(state), eval_ckpt_dir)
@@ -1181,6 +1185,8 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     sample_local_device_count = get_sample_local_device_count(config)
     sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
+    if config.training.get("fid_use_online_only", False):
+        use_ema = False
     metric_mode = _primary_metric_mode(use_ema)
 
     ########### Create Model ###########
