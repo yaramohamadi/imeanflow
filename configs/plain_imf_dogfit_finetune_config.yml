@@ -16,7 +16,7 @@ model:
     target_use_null_class: False
     source_prediction_space: 'v'
     source_num_classes: 1000
-    use_auxiliary_v_head: True
+    use_auxiliary_v_head: False
     use_ema_vc: True
     guidance_scale_strategy: fixed
     fixed_guidance_scale: 1.5
@@ -96,7 +96,7 @@ logging:
         - plain-imf
         - dogfit
         - meanflow
-    wandb_notes: 'Native iMF DogFit meanflow fine-tuning from iMF checkpoint'
+    wandb_notes: 'Native iMF DogFit meanflow fine-tuning from iMF checkpoint (single-head boundary v)'
 
 load_from: '/projets/Ymohammadi/imeanflow/files/weights/iMF-XL-2-full'
 partial_load: True

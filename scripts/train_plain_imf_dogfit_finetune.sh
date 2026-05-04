@@ -190,7 +190,7 @@ CONFIG_OVERRIDE_ARGS=(
   --config.training.fid_use_online_only="True"
   --config.logging.wandb_name="${WANDB_NAME}"
   --config.logging.wandb_project="${WANDB_PROJECT}"
-  --config.logging.wandb_notes="${DATASET_LABEL} native iMF DogFit meanflow fine-tuning (${VC_TARGET_SOURCE} v_c, stopgrad v_c/v_u, ema=0.9998)"
+  --config.logging.wandb_notes="${DATASET_LABEL} native iMF DogFit meanflow fine-tuning (${VC_TARGET_SOURCE} v_c, stopgrad v_c/v_u, ema=0.9998, single-head boundary v)"
 )
 
 if [[ -n "${FD_DINO_CACHE_REF:-}" ]]; then
