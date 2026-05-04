@@ -1185,6 +1185,16 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
     ########### Create Model ###########
     model_config = config.model.to_dict()
+    valid_model_keys = {field.name for field in dataclasses.fields(iMeanFlow)}
+    ignored_model_keys = sorted(set(model_config.keys()) - valid_model_keys)
+    if ignored_model_keys:
+        log_for_0(
+            "Ignoring unsupported iMeanFlow model config keys during eval: %s",
+            ignored_model_keys,
+        )
+    model_config = {
+        key: value for key, value in model_config.items() if key in valid_model_keys
+    }
     model = iMeanFlow(**model_config, eval=True)
 
     ########### Restore lightweight Eval State ###########
