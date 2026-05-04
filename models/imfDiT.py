@@ -147,6 +147,7 @@ class imfDiT(nn.Module):
     mlp_ratio: float = 8 / 3
     num_classes: int = 1000
     use_null_class: bool = True
+    use_auxiliary_v_head: bool = True
 
     aux_head_depth: int = 8
 
@@ -259,18 +260,22 @@ class imfDiT(nn.Module):
         ]
         self.u_heads = [TransformerBlock(**block_kwargs) for _ in range(head_depth)]
 
-        # We don't need the v heads during evaluation
-        self.v_heads = [
-            TransformerBlock(**block_kwargs)
-            for _ in range(head_depth if not self.eval else 0)
-        ]
+        self.v_heads = []
+        if self.use_auxiliary_v_head:
+            # We don't need the deeper v refinement blocks during evaluation.
+            self.v_heads = [
+                TransformerBlock(**block_kwargs)
+                for _ in range(head_depth if not self.eval else 0)
+            ]
 
         self.u_final_layer = FinalLayer(
             self.hidden_size, self.patch_size, self.out_channels
         )
-        self.v_final_layer = FinalLayer(
-            self.hidden_size, self.patch_size, self.out_channels
-        )
+        self.v_final_layer = None
+        if self.use_auxiliary_v_head:
+            self.v_final_layer = FinalLayer(
+                self.hidden_size, self.patch_size, self.out_channels
+            )
 
     def unpatchify(self, x):
         c = self.out_channels
@@ -342,7 +347,9 @@ class imfDiT(nn.Module):
         
         Returns:
             u: Average velocity field
-            v: Instantaneous velocity field
+            v: Instantaneous velocity field. In single-head mode this aliases
+               `u`, so callers can recover boundary-time v by making a second
+               forward pass with `h = 0`.
         """
 
         # We don't explicitly condition on time t, only on h = t - r
@@ -352,17 +359,19 @@ class imfDiT(nn.Module):
         for block in self.shared_blocks:
             seq = block(seq, self.rope_freqs)
 
-        u_seq = v_seq = seq
+        u_seq = seq
         for block in self.u_heads:
             u_seq = block(u_seq, self.rope_freqs)
+        u_tokens = u_seq[:, self.prefix_tokens :]
+        u = self.unpatchify(self.u_final_layer(u_tokens))
 
+        if not self.use_auxiliary_v_head:
+            return u, u
+
+        v_seq = seq
         for block in self.v_heads:
             v_seq = block(v_seq, self.rope_freqs)
-
-        u_tokens = u_seq[:, self.prefix_tokens :]
         v_tokens = v_seq[:, self.prefix_tokens :]
-
-        u = self.unpatchify(self.u_final_layer(u_tokens))
         v = self.unpatchify(self.v_final_layer(v_tokens))
 
         return u, v

@@ -120,6 +120,8 @@ class iMeanFlow(nn.Module):
             use_null_class=self.target_use_null_class,
             eval=self.eval,
         )
+        if "DiT" in self.model_str and "SiT" not in self.model_str:
+            net_kwargs["use_auxiliary_v_head"] = self.use_auxiliary_v_head
         if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
             net_kwargs["use_context_guidance_conditioning"] = self.use_context_guidance_conditioning
             net_kwargs["use_adaln_guidance_scale_conditioning"] = (
@@ -149,6 +151,8 @@ class iMeanFlow(nn.Module):
                 use_null_class=source_use_null_class,
                 eval=False,
             )
+            if "DiT" in self.model_str and "SiT" not in self.model_str:
+                source_net_kwargs["use_auxiliary_v_head"] = self.use_auxiliary_v_head
             if (not self.use_auxiliary_v_head) and ("SiT_DMF" in self.model_str):
                 source_net_kwargs["use_context_guidance_conditioning"] = (
                     self.use_context_guidance_conditioning
@@ -251,6 +255,7 @@ class iMeanFlow(nn.Module):
     def _effective_training_guidance_scale(self, t, w, t_min, t_max, current_step=None):
         w_eff = jnp.where((t >= t_min) & (t <= t_max), w, 1.0)
         if current_step is not None:
+            current_step = jnp.asarray(current_step)
             guidance_enabled = current_step >= jnp.asarray(
                 self.training_guidance_start_step, dtype=current_step.dtype
             )
@@ -262,6 +267,7 @@ class iMeanFlow(nn.Module):
             alpha = jnp.full_like(w, self.baked_guidance_blend, dtype=jnp.float32)
             alpha = jnp.where((t >= t_min) & (t <= t_max), alpha, jnp.zeros_like(alpha))
             if current_step is not None:
+                current_step = jnp.asarray(current_step)
                 guidance_enabled = current_step >= jnp.asarray(
                     self.training_guidance_start_step, dtype=current_step.dtype
                 )

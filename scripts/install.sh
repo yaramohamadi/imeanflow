@@ -36,6 +36,11 @@ fi
 # the nearest Compute Canada build when the exact upstream pin is unavailable.
 DEFAULT_JAX_VERSION="${JAX_VERSION:-0.4.27}"
 DEFAULT_TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
+DEFAULT_FLAX_VERSION="${FLAX_VERSION:-0.8.5}"
+DEFAULT_OPTAX_VERSION="${OPTAX_VERSION:-0.2.2}"
+DEFAULT_CHEX_VERSION="${CHEX_VERSION:-0.1.86}"
+DEFAULT_ORBAX_CHECKPOINT_VERSION="${ORBAX_CHECKPOINT_VERSION:-0.6.4}"
+DEFAULT_CLU_VERSION="${CLU_VERSION:-0.0.11}"
 
 if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     GPU_JAX_VERSION="${GPU_JAX_VERSION:-0.4.28}"
@@ -53,6 +58,11 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
 else
     JAX_VERSION="${JAX_VERSION:-${DEFAULT_JAX_VERSION}}"
     TORCH_VERSION="${TORCH_VERSION:-${DEFAULT_TORCH_VERSION}}"
+    FLAX_VERSION="${FLAX_VERSION:-${DEFAULT_FLAX_VERSION}}"
+    OPTAX_VERSION="${OPTAX_VERSION:-${DEFAULT_OPTAX_VERSION}}"
+    CHEX_VERSION="${CHEX_VERSION:-${DEFAULT_CHEX_VERSION}}"
+    ORBAX_CHECKPOINT_VERSION="${ORBAX_CHECKPOINT_VERSION:-${DEFAULT_ORBAX_CHECKPOINT_VERSION}}"
+    CLU_VERSION="${CLU_VERSION:-${DEFAULT_CLU_VERSION}}"
 fi
 
 # Python 3.12 cannot use the original TensorFlow 2.15 pin from this repo.
@@ -128,17 +138,18 @@ if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     install_jax
 else
     python -m pip install --upgrade \
-        "flax>=0.8" \
+        "flax==${FLAX_VERSION}" \
         "absl-py" \
         "cached_property" \
-        "clu" \
+        "chex==${CHEX_VERSION}" \
+        "clu==${CLU_VERSION}" \
         "diffusers" \
         "dm-tree" \
         "matplotlib==3.9.2" \
         "ml-collections" \
         "ml-dtypes==${ML_DTYPES_VERSION}" \
-        "optax" \
-        "orbax-checkpoint==0.6.4" \
+        "optax==${OPTAX_VERSION}" \
+        "orbax-checkpoint==${ORBAX_CHECKPOINT_VERSION}" \
         "pillow" \
         "PyYAML" \
         "requests" \
@@ -149,27 +160,38 @@ else
         "tqdm" \
         "transformers" \
         "wandb"
+
+    # Some upstream wheels have broad JAX requirements and may pull in a newer
+    # CPU-only jaxlib during the dependency install above. Re-apply the
+    # requested JAX platform pin so GPU jobs do not silently fall back to CPU.
+    install_jax
 fi
 
 # PyTorch GPU wheels can pull in a newer cuDNN runtime that conflicts with the
 # pinned JAX GPU wheel above. Install CPU-only PyTorch so JAX keeps control of
 # the CUDA/cuDNN stack for the main training/eval path.
-python -m pip uninstall -y \
-    torch \
-    torchvision \
-    nvidia-cudnn-cu12 \
-    nvidia-cublas-cu12 \
-    nvidia-cuda-cupti-cu12 \
-    nvidia-cuda-nvrtc-cu12 \
-    nvidia-cuda-runtime-cu12 \
-    nvidia-cufft-cu12 \
-    nvidia-curand-cu12 \
-    nvidia-cusolver-cu12 \
-    nvidia-cusparse-cu12 \
-    nvidia-nccl-cu12 \
-    nvidia-nvjitlink-cu12 \
-    nvidia-cuda-nvcc-cu12 \
-    triton || true
+#
+# For the upstream `jax[cuda12_pip]` path, JAX itself depends on the pip
+# `nvidia-*` packages that provide CUDA/cuDNN userspace libraries, so we must
+# not remove them here. The Compute Canada path uses cluster-provided JAX wheels
+# instead, so there it is safe to clear the NVIDIA pip packages.
+python -m pip uninstall -y torch torchvision triton || true
+
+if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
+    python -m pip uninstall -y \
+        nvidia-cudnn-cu12 \
+        nvidia-cublas-cu12 \
+        nvidia-cuda-cupti-cu12 \
+        nvidia-cuda-nvrtc-cu12 \
+        nvidia-cuda-runtime-cu12 \
+        nvidia-cufft-cu12 \
+        nvidia-curand-cu12 \
+        nvidia-cusolver-cu12 \
+        nvidia-cusparse-cu12 \
+        nvidia-nccl-cu12 \
+        nvidia-nvjitlink-cu12 \
+        nvidia-cuda-nvcc-cu12 || true
+fi
 
 if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     python -m pip install --upgrade \

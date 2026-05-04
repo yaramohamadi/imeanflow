@@ -2,9 +2,10 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import random
 
-from utils.dit_diffusion import create_diffusion
+from utils.dit_diffusion import create_diffusion, space_timesteps
 
 
 def get_default_cfg_scale(config):
@@ -85,17 +86,158 @@ def _guided_model_output(model, variable, x, t, labels, cfg_scale):
         cond, uncond = jnp.split(out, 2, axis=0)
         prediction_c, model_var_values_c = jnp.split(cond, 2, axis=-1)
         prediction_u, _ = jnp.split(uncond, 2, axis=-1)
-        guided_prediction = prediction_u[..., :3] + cfg_scale * (
-            prediction_c[..., :3] - prediction_u[..., :3]
-        )
-        guided_wrapped = jnp.concatenate(
-            [guided_prediction, prediction_c[..., 3:]],
-            axis=-1,
-        )
+        # Apply CFG to every latent channel. Restricting it to the first three
+        # channels is only appropriate for RGB pixel-space outputs, not 4-channel
+        # DiT latent predictions.
+        guided_wrapped = prediction_u + cfg_scale * (prediction_c - prediction_u)
         guided_out = jnp.concatenate([guided_wrapped, model_var_values_c], axis=-1)
         return unwrap_prediction(guided_out, x, t)
 
     return jax.lax.cond(jnp.equal(cfg_scale, 1.0), conditional, guided, operand=None)
+
+
+def _guided_eps_prediction(model, variable, x, t, labels, cfg_scale):
+    model_output = _guided_model_output(model, variable, x, t, labels, cfg_scale)
+    eps_prediction, _ = jnp.split(model_output, 2, axis=-1)
+    return eps_prediction
+
+
+def _unwrap_eps_prediction(model, x_input, t_input, model_output):
+    raw_prediction, _ = jnp.split(model_output, 2, axis=-1)
+    return model._unwrap_prediction(
+        x_input,
+        t_input.astype(jnp.int32),
+        raw_prediction,
+    )
+
+
+def _conditional_eps_prediction(model, variable, x, t, labels):
+    model_output = model.apply(variable, x, t.astype(jnp.float32), labels)
+    return _unwrap_eps_prediction(model, x, t, model_output)
+
+
+def _conditional_unconditional_eps_predictions(model, variable, x, t, labels):
+    num_samples = x.shape[0]
+    null_labels = jnp.full((num_samples,), model.num_classes, dtype=jnp.int32)
+    x_cat = jnp.concatenate([x, x], axis=0)
+    t_cat = jnp.concatenate([t, t], axis=0)
+    y_cat = jnp.concatenate([labels, null_labels], axis=0)
+    out = model.apply(variable, x_cat, t_cat.astype(jnp.float32), y_cat)
+    cond, uncond = jnp.split(out, 2, axis=0)
+    cond_eps = _unwrap_eps_prediction(model, x, t, cond)
+    uncond_eps = _unwrap_eps_prediction(model, x, t, uncond)
+    return cond_eps, uncond_eps
+
+
+def _broadcast_schedule_value(value, x):
+    value = jnp.asarray(value, dtype=jnp.float32)
+    while value.ndim < x.ndim:
+        value = value[..., None]
+    return value + jnp.zeros(x.shape, dtype=jnp.float32)
+
+
+def _build_native_velocity_schedule(num_steps, diffusion_steps):
+    if num_steps < 1:
+        raise ValueError(
+            f"DiT native-velocity sampling requires num_steps >= 1, got {num_steps}."
+        )
+    # Euler integration needs both endpoints so that num_steps matches NFEs.
+    schedule = sorted(space_timesteps(diffusion_steps, [num_steps + 1]))
+    return np.asarray(schedule, dtype=np.int32)
+
+
+def _sample_with_native_velocity(
+    model,
+    variable,
+    noise,
+    labels,
+    cfg_scale,
+    *,
+    num_steps,
+    config,
+):
+    diffusion_steps = int(config.diffusion.diffusion_steps)
+    base_diffusion = create_diffusion(
+        "",
+        noise_schedule=config.diffusion.noise_schedule,
+        learn_sigma=config.diffusion.learn_sigma,
+        predict_xstart=config.diffusion.predict_xstart,
+        rescale_learned_sigmas=config.diffusion.rescale_learned_sigmas,
+        diffusion_steps=diffusion_steps,
+    )
+    schedule = _build_native_velocity_schedule(num_steps, diffusion_steps)
+    schedule_t = jnp.asarray(schedule, dtype=jnp.int32)
+    tau = schedule_t.astype(jnp.float32) / jnp.maximum(diffusion_steps - 1, 1)
+    alpha = jnp.asarray(base_diffusion.sqrt_alphas_cumprod[schedule], dtype=jnp.float32)
+    sigma = jnp.asarray(
+        base_diffusion.sqrt_one_minus_alphas_cumprod[schedule],
+        dtype=jnp.float32,
+    )
+    x = noise.astype(jnp.float32)
+    alpha_eps = jnp.asarray(1e-6, dtype=jnp.float32)
+    num_intervals = schedule_t.shape[0] - 1
+    native_velocity_cfg_space = str(
+        config.sampling.get("native_velocity_cfg_space", "epsilon")
+    ).lower()
+    if native_velocity_cfg_space not in {"epsilon", "velocity"}:
+        raise ValueError(
+            "native_velocity_cfg_space must be 'epsilon' or 'velocity', got "
+            f"{native_velocity_cfg_space!r}."
+        )
+
+    def eps_to_velocity(x_t, eps_hat, current_pos, next_pos):
+        alpha_t = _broadcast_schedule_value(alpha[current_pos], x_t)
+        sigma_t = _broadcast_schedule_value(sigma[current_pos], x_t)
+        dt = tau[next_pos] - tau[current_pos]
+        alpha_dot = (alpha[next_pos] - alpha[current_pos]) / dt
+        sigma_dot = (sigma[next_pos] - sigma[current_pos]) / dt
+        alpha_dot_t = _broadcast_schedule_value(alpha_dot, x_t)
+        sigma_dot_t = _broadcast_schedule_value(sigma_dot, x_t)
+        x0_hat = (x_t - sigma_t * eps_hat) / jnp.maximum(alpha_t, alpha_eps)
+        v_hat = alpha_dot_t * x0_hat + sigma_dot_t * eps_hat
+        return v_hat, dt
+
+    def step_fn(i, x_t):
+        current_pos = num_intervals - i
+        next_pos = current_pos - 1
+
+        model_t = jnp.full((x_t.shape[0],), schedule_t[current_pos], dtype=jnp.int32)
+
+        if native_velocity_cfg_space == "velocity":
+            cond_eps, uncond_eps = _conditional_unconditional_eps_predictions(
+                model,
+                variable,
+                x_t,
+                model_t,
+                labels,
+            )
+            cond_v, dt = eps_to_velocity(
+                x_t,
+                cond_eps.astype(jnp.float32),
+                current_pos,
+                next_pos,
+            )
+            uncond_v, _ = eps_to_velocity(
+                x_t,
+                uncond_eps.astype(jnp.float32),
+                current_pos,
+                next_pos,
+            )
+            v_hat = uncond_v + cfg_scale.astype(jnp.float32) * (cond_v - uncond_v)
+        else:
+            eps_hat = _guided_eps_prediction(
+                model,
+                variable,
+                x_t,
+                model_t,
+                labels,
+                cfg_scale,
+            ).astype(jnp.float32)
+            v_hat, dt = eps_to_velocity(x_t, eps_hat, current_pos, next_pos)
+
+        return x_t + _broadcast_schedule_value(dt, x_t) * v_hat
+
+    return jax.lax.fori_loop(0, num_intervals, step_fn, x)
 
 
 def generate(
@@ -131,6 +273,18 @@ def generate(
     if cfg_scale_value is None:
         cfg_scale_value = get_default_cfg_scale(config)
     cfg_scale = jnp.asarray(cfg_scale_value, dtype=sample_dtype)
+    sampling_method = str(config.sampling.get("method", "p_sample"))
+
+    if sampling_method == "native_velocity":
+        return _sample_with_native_velocity(
+            model,
+            variable,
+            noise,
+            labels,
+            cfg_scale,
+            num_steps=num_steps,
+            config=config,
+        ).astype(sample_dtype)
 
     diffusion = create_diffusion(
         str(num_steps),

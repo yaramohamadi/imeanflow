@@ -833,11 +833,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             },
         )
 
-    image_metric_evaluator = get_image_metric_evaluator(
-        config,
-        writer,
-        sample_latent_manager,
-    )
+    image_metric_evaluator = None
     best_fid_by_steps = {num_steps: float("inf") for num_steps in metric_num_steps}
     best_fd_dino_by_steps = {
         num_steps: float("inf") for num_steps in metric_num_steps
@@ -902,6 +898,12 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 log_preview_samples(state, current_step)
 
             if did_update and current_step > 0 and _should_run_fid(current_step, config.training):
+                if image_metric_evaluator is None:
+                    image_metric_evaluator = get_image_metric_evaluator(
+                        config,
+                        writer,
+                        sample_latent_manager,
+                    )
                 checkpoint_path_for_csv = (
                     eval_ckpt_dir if save_eval_checkpoint_per_fid else ""
                 )
