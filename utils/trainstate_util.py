@@ -12,6 +12,11 @@ from flax import struct
 from utils.logging_util import log_for_0
 from utils.state_util import print_params
 from utils.ema_util import update_ema
+from utils.imf_param_util import (
+    extract_v_only_params,
+    use_v_only_teacher_source_copies,
+    v_only_teacher_source_compatible,
+)
 
 
 #######################################################
@@ -89,6 +94,14 @@ def create_train_state(
     ema_params = deepcopy(params)
     if use_ema:
         ema_params = update_ema(ema_params, params, 0)
+    if use_v_only_teacher_source_copies(config.model):
+        if not v_only_teacher_source_compatible(config.model):
+            raise ValueError(
+                "use_v_only_teacher_source_copies requires an auxiliary-head "
+                "full iMF backbone."
+            )
+        if use_ema:
+            ema_params = extract_v_only_params(ema_params)
     needs_source_params = (
         config.model.get("use_dogfit", False)
         or config.training.get("capture_source_from_load", False)
@@ -110,6 +123,8 @@ def create_train_state(
             int(config.model.get("source_num_classes", config.dataset.num_classes)),
         )
         source_params = source_init_params["source_net"]
+        if use_v_only_teacher_source_copies(config.model):
+            source_params = extract_v_only_params(source_params)
     elif needs_source_params:
         source_params = deepcopy(params)
     else:

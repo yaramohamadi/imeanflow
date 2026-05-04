@@ -27,6 +27,10 @@ from utils.ckpt_util import (
     restore_partial_checkpoint,
 )
 from utils.ema_util import ema_schedules, update_ema
+from utils.imf_param_util import (
+    extract_v_only_params,
+    use_v_only_teacher_source_copies,
+)
 from utils.logging_util import MetricsTracker, Timer, log_for_0, Writer
 from utils.vae_util import LatentManager
 from utils.lr_utils import lr_schedules
@@ -64,7 +68,15 @@ def compute_metrics_single_device(dict_losses):
 
 
 def train_step_with_vae(
-    state, batch, rng_init, ema_fn, lr_fn, latent_manager, use_ema, grad_accum_steps
+    state,
+    batch,
+    rng_init,
+    ema_fn,
+    lr_fn,
+    latent_manager,
+    use_ema,
+    grad_accum_steps,
+    v_only_teacher_source_copies,
 ):
     """
     Perform a single training step.
@@ -117,8 +129,13 @@ def train_step_with_vae(
         updated_state = current_state.apply_gradients(grads=mean_grads)
         if use_ema:
             ema_value = ema_fn(current_state.step)
+            ema_target_params = (
+                extract_v_only_params(updated_state.params)
+                if v_only_teacher_source_copies
+                else updated_state.params
+            )
             new_ema = update_ema(
-                updated_state.ema_params, updated_state.params, ema_value
+                updated_state.ema_params, ema_target_params, ema_value
             )
             updated_state = updated_state.replace(ema_params=new_ema)
         # Keep the pytree structure stable across lax.cond branches.
@@ -147,7 +164,15 @@ def train_step_with_vae(
 
 
 def train_step_with_vae_single_device(
-    state, batch, rng_init, ema_fn, lr_fn, latent_manager, use_ema, grad_accum_steps
+    state,
+    batch,
+    rng_init,
+    ema_fn,
+    lr_fn,
+    latent_manager,
+    use_ema,
+    grad_accum_steps,
+    v_only_teacher_source_copies,
 ):
     """Single-device variant that avoids pmap collectives/compiler bugs."""
     rng_step = random.fold_in(rng_init, state.step)
@@ -195,8 +220,13 @@ def train_step_with_vae_single_device(
         updated_state = current_state.apply_gradients(grads=mean_grads)
         if use_ema:
             ema_value = ema_fn(current_state.step)
+            ema_target_params = (
+                extract_v_only_params(updated_state.params)
+                if v_only_teacher_source_copies
+                else updated_state.params
+            )
             new_ema = update_ema(
-                updated_state.ema_params, updated_state.params, ema_value
+                updated_state.ema_params, ema_target_params, ema_value
             )
             updated_state = updated_state.replace(ema_params=new_ema)
         # Keep the pytree structure stable across lax.cond branches.
@@ -653,6 +683,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     use_ema = config.training.get("use_ema", True)
     max_train_steps = config.training.get("max_train_steps", None)
     grad_accum_steps = config.training.get("grad_accum_steps", 1)
+    v_only_teacher_source_copies = use_v_only_teacher_source_copies(config.model)
 
     log_for_0("config.training.batch_size: {}".format(config.training.batch_size))
     log_for_0("config.training.use_ema: {}".format(use_ema))
@@ -701,6 +732,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             )
         else:
             state = restore_checkpoint(state, config.load_from)
+        if use_ema and v_only_teacher_source_copies:
+            state = state.replace(ema_params=extract_v_only_params(state.params))
         if config.model.get("training_mode", "imf_jvp") == "imf_jvp_free_src_reg":
             state = state.replace(source_params=deepcopy(state.params))
             log_for_0(
@@ -732,6 +765,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 target_model_config=source_model_config,
             )
             source_params = deepcopy(loaded_source_params["net"])
+            if v_only_teacher_source_copies:
+                source_params = extract_v_only_params(source_params)
             state = state.replace(source_params=source_params)
             log_for_0(
                 "Loaded frozen DogFit source_params from pretrained source checkpoint.",
@@ -771,6 +806,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             latent_manager=latent_manager,
             use_ema=use_ema,
             grad_accum_steps=grad_accum_steps,
+            v_only_teacher_source_copies=v_only_teacher_source_copies,
         )
         p_debug_step = partial(
             debug_step_with_vae_single_device,
@@ -788,6 +824,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                 latent_manager=latent_manager,
                 use_ema=use_ema,
                 grad_accum_steps=grad_accum_steps,
+                v_only_teacher_source_copies=v_only_teacher_source_copies,
             ),
             axis_name="batch",
             donate_argnums=(0,),
@@ -864,6 +901,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         first_value = np.asarray(metric_value)[0]
         return bool(first_value) if np.asarray(first_value).dtype == np.bool_ else float(first_value)
 
+    sampling_uses_ema = use_ema and not v_only_teacher_source_copies
+
     def log_preview_samples(state_for_logging, step_for_logging):
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
         grid_size = int(num_images ** 0.5)
@@ -892,7 +931,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
                     omega,
                     preview_t_min,
                     preview_t_max,
-                    ema=use_ema,
+                    ema=sampling_uses_ema,
                     num_samples=num_images,
                     param_dtype=get_sampling_param_dtype(config),
                 )
@@ -923,7 +962,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         config.training.get("eval_checkpoint_dir", "latest_eval"),
     )
     metric_mode = _primary_metric_mode(
-        use_ema and not config.training.get("fid_use_online_only", False)
+        sampling_uses_ema and not config.training.get("fid_use_online_only", False)
     )
 
     ########### Training Loop ###########
@@ -1185,7 +1224,7 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
     sample_local_device_count = get_sample_local_device_count(config)
     sample_devices = get_sample_devices(config)
     use_ema = config.training.get("use_ema", True)
-    if config.training.get("fid_use_online_only", False):
+    if config.training.get("fid_use_online_only", False) or use_v_only_teacher_source_copies(config.model):
         use_ema = False
     metric_mode = _primary_metric_mode(use_ema)
 

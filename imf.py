@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 
 from models import imfDiT
+from utils.imf_param_util import is_v_only_param_tree
 
 
 def generate(variable, model, rng, n_sample, config, 
@@ -83,6 +84,7 @@ class iMeanFlow(nn.Module):
     decoder_only_guidance_conditioning: bool = False
     time_conditioning_mode: str = "split"
     use_ema_vc: bool = False
+    use_v_only_teacher_source_copies: bool = False
     use_training_guidance: bool = True
     training_guidance_interval_strategy: str = "sampled"
     training_guidance_t_min: float = 0.0
@@ -770,16 +772,29 @@ class iMeanFlow(nn.Module):
             h = jnp.zeros_like(t)
             t_min = jnp.zeros_like(t)
             t_max = jnp.ones_like(t)
-            _, v = self.source_net.apply(
-                {"params": source_param_tree},
-                x,
-                t.reshape(bz),
-                h.reshape(bz),
-                omega.reshape(bz),
-                t_min.reshape(bz),
-                t_max.reshape(bz),
-                y,
-            )
+            if is_v_only_param_tree(source_param_tree):
+                v = self.source_net.apply(
+                    {"params": source_param_tree},
+                    x,
+                    t.reshape(bz),
+                    h.reshape(bz),
+                    omega.reshape(bz),
+                    t_min.reshape(bz),
+                    t_max.reshape(bz),
+                    y,
+                    method=self.source_net.predict_v_only,
+                )
+            else:
+                _, v = self.source_net.apply(
+                    {"params": source_param_tree},
+                    x,
+                    t.reshape(bz),
+                    h.reshape(bz),
+                    omega.reshape(bz),
+                    t_min.reshape(bz),
+                    t_max.reshape(bz),
+                    y,
+                )
         else:
             if self._uses_sit_guidance_context_conditioning():
                 t_min = jnp.zeros_like(t)
@@ -840,16 +855,29 @@ class iMeanFlow(nn.Module):
             h = jnp.zeros_like(t)
             t_min = jnp.zeros_like(t)
             t_max = jnp.ones_like(t)
-            _, v = self.net.apply(
-                {"params": teacher_param_tree},
-                x,
-                t.reshape(bz),
-                h.reshape(bz),
-                omega.reshape(bz),
-                t_min.reshape(bz),
-                t_max.reshape(bz),
-                y,
-            )
+            if is_v_only_param_tree(teacher_param_tree):
+                v = self.net.apply(
+                    {"params": teacher_param_tree},
+                    x,
+                    t.reshape(bz),
+                    h.reshape(bz),
+                    omega.reshape(bz),
+                    t_min.reshape(bz),
+                    t_max.reshape(bz),
+                    y,
+                    method=self.net.predict_v_only,
+                )
+            else:
+                _, v = self.net.apply(
+                    {"params": teacher_param_tree},
+                    x,
+                    t.reshape(bz),
+                    h.reshape(bz),
+                    omega.reshape(bz),
+                    t_min.reshape(bz),
+                    t_max.reshape(bz),
+                    y,
+                )
             return v
 
         if self._uses_sit_guidance_context_conditioning():

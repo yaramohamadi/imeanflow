@@ -7,6 +7,7 @@ from functools import partial
 from utils import dino_util
 from utils import fid_util
 from utils.logging_util import log_for_0
+from utils.imf_param_util import use_v_only_teacher_source_copies
 
 
 def get_sample_local_device_count(config):
@@ -255,6 +256,8 @@ def get_image_metric_evaluator(config, writer, latent_manager):
 
     run_p_sample_step_inner = partial(run_p_sample_step, latent_manager=latent_manager)
     use_ema = config.training.get("use_ema", True)
+    if use_v_only_teacher_source_copies(config.model):
+        use_ema = False
     fid_use_online_only = config.training.get("fid_use_online_only", False)
     guidance_controllable = has_controllable_sampling_guidance(config.model)
 

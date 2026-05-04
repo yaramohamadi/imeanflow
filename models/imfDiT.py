@@ -333,6 +333,35 @@ class imfDiT(nn.Module):
 
         return seq
 
+    def _run_shared_blocks(self, seq):
+        for block in self.shared_blocks:
+            seq = block(seq, self.rope_freqs)
+        return seq
+
+    def _decode_u(self, seq):
+        u_seq = seq
+        for block in self.u_heads:
+            u_seq = block(u_seq, self.rope_freqs)
+        u_tokens = u_seq[:, self.prefix_tokens :]
+        return self.unpatchify(self.u_final_layer(u_tokens))
+
+    def _decode_v(self, seq):
+        if not self.use_auxiliary_v_head:
+            raise ValueError("_decode_v requires use_auxiliary_v_head=True.")
+
+        v_seq = seq
+        for block in self.v_heads:
+            v_seq = block(v_seq, self.rope_freqs)
+        v_tokens = v_seq[:, self.prefix_tokens :]
+        return self.unpatchify(self.v_final_layer(v_tokens))
+
+    def predict_v_only(self, x, t, h, w, t_min, t_max, y):
+        """Run only the shared trunk plus the v branch."""
+        del t
+        seq = self._build_sequence(x, h, w, t_min, t_max, y)
+        seq = self._run_shared_blocks(seq)
+        return self._decode_v(seq)
+
     def __call__(self, x, t, h, w, t_min, t_max, y):
         """
         Forward pass of the imfDiT model.
@@ -355,24 +384,13 @@ class imfDiT(nn.Module):
         # We don't explicitly condition on time t, only on h = t - r
         # following https://arxiv.org/abs/2502.13129
         seq = self._build_sequence(x, h, w, t_min, t_max, y)
-
-        for block in self.shared_blocks:
-            seq = block(seq, self.rope_freqs)
-
-        u_seq = seq
-        for block in self.u_heads:
-            u_seq = block(u_seq, self.rope_freqs)
-        u_tokens = u_seq[:, self.prefix_tokens :]
-        u = self.unpatchify(self.u_final_layer(u_tokens))
+        seq = self._run_shared_blocks(seq)
+        u = self._decode_u(seq)
 
         if not self.use_auxiliary_v_head:
             return u, u
 
-        v_seq = seq
-        for block in self.v_heads:
-            v_seq = block(v_seq, self.rope_freqs)
-        v_tokens = v_seq[:, self.prefix_tokens :]
-        v = self.unpatchify(self.v_final_layer(v_tokens))
+        v = self._decode_v(seq)
 
         return u, v
 

@@ -96,6 +96,7 @@ def get_config():
     model.decoder_only_guidance_conditioning = False
     model.time_conditioning_mode = "split"
     model.use_ema_vc = False
+    model.use_v_only_teacher_source_copies = False
     model.use_training_guidance = True
     model.training_guidance_interval_strategy = "sampled"
     model.training_guidance_t_min = 0.0
