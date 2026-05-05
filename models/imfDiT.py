@@ -1278,15 +1278,6 @@ imfDiT_B_2 = partial(
     aux_head_depth=8,
 )
 
-imfDiT_M_2 = partial(
-    imfDiT,
-    depth=24,
-    hidden_size=768,
-    patch_size=2,
-    num_heads=12,
-    aux_head_depth=8,
-)
-
 imfDiT_L_2 = partial(
     imfDiT,
     depth=32,
@@ -1299,24 +1290,6 @@ imfDiT_L_2 = partial(
 imfDiT_XL_2 = partial(
     imfDiT,
     depth=48,
-    hidden_size=1024,
-    patch_size=2,
-    num_heads=16,
-    aux_head_depth=8,
-)
-
-imfSiT_B_2 = partial(
-    imfSiT_MF,
-    depth=12,
-    hidden_size=768,
-    patch_size=2,
-    num_heads=12,
-    aux_head_depth=8,
-)
-
-imfSiT_L_2 = partial(
-    imfSiT_MF,
-    depth=24,
     hidden_size=1024,
     patch_size=2,
     num_heads=16,

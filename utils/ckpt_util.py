@@ -10,8 +10,8 @@ from flax import serialization
 from utils.logging_util import log_for_0
 from utils.trainstate_util import EvalState
 
-# The PyTorch model files in models/torch_SiT.py, models/torch_SiT_MF.py,
-# and models/torch_DiT.py are not directly imported by the Flax training or
+# The PyTorch reference model files in models/torch_SiT.py and
+# models/torch_DiT.py are not directly imported by the Flax training or
 # evaluation code here. This loader only consumes a serialized PyTorch
 # checkpoint (.pt/.pth) and converts its SiT state_dict tensors into the
 # Flax parameter tree expected by the target SiT-based model family.

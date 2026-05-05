@@ -446,50 +446,6 @@ class JiT(nn.Module):
         return self.unpatchify(x)
 
 
-flaxJiT_B_16 = partial(
-    JiT,
-    depth=12,
-    hidden_size=768,
-    num_heads=12,
-    bottleneck_dim=128,
-    in_context_len=32,
-    in_context_start=4,
-    patch_size=16,
-)
-
-flaxJiT_B_32 = partial(
-    JiT,
-    depth=12,
-    hidden_size=768,
-    num_heads=12,
-    bottleneck_dim=128,
-    in_context_len=32,
-    in_context_start=4,
-    patch_size=32,
-)
-
-flaxJiT_L_16 = partial(
-    JiT,
-    depth=24,
-    hidden_size=1024,
-    num_heads=16,
-    bottleneck_dim=128,
-    in_context_len=32,
-    in_context_start=8,
-    patch_size=16,
-)
-
-flaxJiT_L_32 = partial(
-    JiT,
-    depth=24,
-    hidden_size=1024,
-    num_heads=16,
-    bottleneck_dim=128,
-    in_context_len=32,
-    in_context_start=8,
-    patch_size=32,
-)
-
 flaxJiT_H_16 = partial(
     JiT,
     depth=32,
@@ -501,23 +457,7 @@ flaxJiT_H_16 = partial(
     patch_size=16,
 )
 
-flaxJiT_H_32 = partial(
-    JiT,
-    depth=32,
-    hidden_size=1280,
-    num_heads=16,
-    bottleneck_dim=256,
-    in_context_len=32,
-    in_context_start=10,
-    patch_size=32,
-)
-
 
 JiT_models = {
-    "flaxJiT_B_16": flaxJiT_B_16,
-    "flaxJiT_B_32": flaxJiT_B_32,
-    "flaxJiT_L_16": flaxJiT_L_16,
-    "flaxJiT_L_32": flaxJiT_L_32,
     "flaxJiT_H_16": flaxJiT_H_16,
-    "flaxJiT_H_32": flaxJiT_H_32,
 }
