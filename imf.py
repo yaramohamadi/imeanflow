@@ -281,9 +281,17 @@ class iMeanFlow(nn.Module):
             return source_params["net"]
         return source_params
 
+    def _batch_scalar(self, value, bz, dtype=None):
+        """Collapse `[B]` or broadcasted `[B, 1, ...]` scalars to `[B]`."""
+        value = jnp.asarray(value, dtype=dtype)
+        if value.ndim == 1:
+            return value.reshape((bz,))
+        return value.reshape((bz, -1))[:, 0]
+
     def _source_predict_backbone_output(self, source_params, x, t, y):
         source_param_tree = self._resolve_source_params(source_params)
-        t_model = t.astype(self.dtype)
+        bz = x.shape[0]
+        t_model = self._batch_scalar(t, bz, dtype=self.dtype)
         if self.source_model_time_flip:
             t_model = 1.0 - t_model
         t_model = t_model * jnp.asarray(self.source_model_time_scale, dtype=self.dtype)
@@ -910,19 +918,21 @@ class iMeanFlow(nn.Module):
 
         source_param_tree = self._resolve_source_params(source_params)
         bz = x.shape[0]
+        t_batch = self._batch_scalar(t, bz, dtype=self.dtype)
+        omega_batch = self._batch_scalar(omega, bz, dtype=self.dtype)
         if self._uses_auxiliary_v_head():
-            h = jnp.zeros_like(t)
-            t_min = jnp.zeros_like(t)
-            t_max = jnp.ones_like(t)
+            h = jnp.zeros_like(t_batch)
+            t_min = jnp.zeros_like(t_batch)
+            t_max = jnp.ones_like(t_batch)
             if is_v_only_param_tree(source_param_tree):
                 v = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    h.reshape(bz),
-                    omega.reshape(bz),
-                    t_min.reshape(bz),
-                    t_max.reshape(bz),
+                    t_batch,
+                    h,
+                    omega_batch,
+                    t_min,
+                    t_max,
                     y,
                     method=self.source_net.predict_v_only,
                 )
@@ -930,45 +940,45 @@ class iMeanFlow(nn.Module):
                 _, v = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    h.reshape(bz),
-                    omega.reshape(bz),
-                    t_min.reshape(bz),
-                    t_max.reshape(bz),
+                    t_batch,
+                    h,
+                    omega_batch,
+                    t_min,
+                    t_max,
                     y,
                 )
         else:
             if self._uses_sit_guidance_context_conditioning():
-                t_min = jnp.zeros_like(t)
-                t_max = jnp.ones_like(t)
+                t_min = jnp.zeros_like(t_batch)
+                t_max = jnp.ones_like(t_batch)
                 v = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    t.reshape(bz),
+                    t_batch,
+                    t_batch,
                     y,
-                    omega.reshape(bz),
-                    t_min.reshape(bz),
-                    t_max.reshape(bz),
+                    omega_batch,
+                    t_min,
+                    t_max,
                 )
             elif self._uses_sit_adaln_guidance_scale_conditioning():
                 v = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    t.reshape(bz),
+                    t_batch,
+                    t_batch,
                     y,
-                    omega.reshape(bz),
+                    omega_batch,
                 )
             elif self._uses_imf_dit_backbone():
                 v, _ = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    jnp.zeros_like(t).reshape(bz),
-                    omega.reshape(bz),
-                    jnp.zeros_like(t).reshape(bz),
-                    jnp.ones_like(t).reshape(bz),
+                    t_batch,
+                    jnp.zeros_like(t_batch),
+                    omega_batch,
+                    jnp.zeros_like(t_batch),
+                    jnp.ones_like(t_batch),
                     y,
                 )
             else:
@@ -976,8 +986,8 @@ class iMeanFlow(nn.Module):
                 v = self.source_net.apply(
                     {"params": source_param_tree},
                     x,
-                    t.reshape(bz),
-                    t.reshape(bz),
+                    t_batch,
+                    t_batch,
                     y,
                 )
         return v
@@ -993,19 +1003,21 @@ class iMeanFlow(nn.Module):
 
         teacher_param_tree = self._resolve_source_params(teacher_params)
         bz = x.shape[0]
+        t_batch = self._batch_scalar(t, bz, dtype=self.dtype)
+        omega_batch = self._batch_scalar(omega, bz, dtype=self.dtype)
         if self._uses_auxiliary_v_head():
-            h = jnp.zeros_like(t)
-            t_min = jnp.zeros_like(t)
-            t_max = jnp.ones_like(t)
+            h = jnp.zeros_like(t_batch)
+            t_min = jnp.zeros_like(t_batch)
+            t_max = jnp.ones_like(t_batch)
             if is_v_only_param_tree(teacher_param_tree):
                 v = self.net.apply(
                     {"params": teacher_param_tree},
                     x,
-                    t.reshape(bz),
-                    h.reshape(bz),
-                    omega.reshape(bz),
-                    t_min.reshape(bz),
-                    t_max.reshape(bz),
+                    t_batch,
+                    h,
+                    omega_batch,
+                    t_min,
+                    t_max,
                     y,
                     method=self.net.predict_v_only,
                 )
@@ -1013,46 +1025,46 @@ class iMeanFlow(nn.Module):
                 _, v = self.net.apply(
                     {"params": teacher_param_tree},
                     x,
-                    t.reshape(bz),
-                    h.reshape(bz),
-                    omega.reshape(bz),
-                    t_min.reshape(bz),
-                    t_max.reshape(bz),
+                    t_batch,
+                    h,
+                    omega_batch,
+                    t_min,
+                    t_max,
                     y,
                 )
             return v
 
         if self._uses_sit_guidance_context_conditioning():
-            t_min = jnp.zeros_like(t)
-            t_max = jnp.ones_like(t)
+            t_min = jnp.zeros_like(t_batch)
+            t_max = jnp.ones_like(t_batch)
             return self.net.apply(
                 {"params": teacher_param_tree},
                 x,
-                t.reshape(bz),
-                t.reshape(bz),
+                t_batch,
+                t_batch,
                 y,
-                omega.reshape(bz),
-                t_min.reshape(bz),
-                t_max.reshape(bz),
+                omega_batch,
+                t_min,
+                t_max,
             )
         if self._uses_sit_adaln_guidance_scale_conditioning():
             return self.net.apply(
                 {"params": teacher_param_tree},
                 x,
-                t.reshape(bz),
-                t.reshape(bz),
+                t_batch,
+                t_batch,
                 y,
-                omega.reshape(bz),
+                omega_batch,
             )
         if self._uses_imf_dit_backbone():
             v, _ = self.net.apply(
                 {"params": teacher_param_tree},
                 x,
-                t.reshape(bz),
-                jnp.zeros_like(t).reshape(bz),
-                omega.reshape(bz),
-                jnp.zeros_like(t).reshape(bz),
-                jnp.ones_like(t).reshape(bz),
+                t_batch,
+                jnp.zeros_like(t_batch),
+                omega_batch,
+                jnp.zeros_like(t_batch),
+                jnp.ones_like(t_batch),
                 y,
             )
             return v
@@ -1061,8 +1073,8 @@ class iMeanFlow(nn.Module):
         return self.net.apply(
             {"params": teacher_param_tree},
             x,
-            t.reshape(bz),
-            t.reshape(bz),
+            t_batch,
+            t_batch,
             y,
         )
 
