@@ -33,6 +33,7 @@ DATASET_NAME="${DATASET_NAME:-caltech101}"
 ENABLE_DOGFIT="${ENABLE_DOGFIT:-True}"
 VC_TARGET_SOURCE="${VC_TARGET_SOURCE:-ema}"
 SOURCE_VELOCITY_MAP_MODE="${SOURCE_VELOCITY_MAP_MODE:-transport}"
+SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE="${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE:-finite_difference}"
 PYTHONUNBUFFERED_VALUE="${PYTHONUNBUFFERED:-1}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
@@ -144,6 +145,7 @@ VC_TARGET_SOURCE: ${VC_LABEL}
 USE_EMA_VC: ${USE_EMA_VC}
 TRAIN_USE_EMA: ${TRAIN_USE_EMA}
 SOURCE_VELOCITY_MAP_MODE: ${SOURCE_VELOCITY_MAP_MODE}
+SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE: ${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE}
 PYTHONUNBUFFERED: ${PYTHONUNBUFFERED_VALUE}
 RUN_FINAL_BEST_FID_EVAL: ${RUN_FINAL_BEST_FID_EVAL}
 FINAL_EVAL_STEPS: ${FINAL_EVAL_STEPS}
@@ -168,12 +170,13 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
     --config.model.use_dogfit="${MODEL_USE_DOGFIT}" \
     --config.model.use_ema_vc="${USE_EMA_VC}" \
     --config.model.source_velocity_map_mode="${SOURCE_VELOCITY_MAP_MODE}" \
+    --config.model.source_native_velocity_derivative_mode="${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE}" \
     --config.training.use_ema="${TRAIN_USE_EMA}" \
     --config.training.capture_source_from_load="${CAPTURE_SOURCE_FROM_LOAD}" \
     --config.training.fid_use_online_only="True" \
     --config.logging.use_wandb="${USE_WANDB}" \
     --config.logging.wandb_name="${JOBNAME}" \
-    --config.logging.wandb_notes="${DATASET_LABEL} DiT_DMF meanflow (${RUN_FLAVOR}, v_c=${VC_LABEL}, source velocity map=${SOURCE_VELOCITY_MAP_MODE}, plain-DiT noise->velocity source only when DogFit is enabled)" \
+    --config.logging.wandb_notes="${DATASET_LABEL} DiT_DMF meanflow (${RUN_FLAVOR}, v_c=${VC_LABEL}, source velocity map=${SOURCE_VELOCITY_MAP_MODE}, source native derivative=${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE}, plain-DiT noise->velocity source only when DogFit is enabled)" \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${WORKDIR}/output.log"
 

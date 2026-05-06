@@ -91,6 +91,7 @@ def get_config():
     model.source_num_classes = dataset.num_classes
     model.source_path_type = "Linear"
     model.source_velocity_map_mode = "transport"
+    model.source_native_velocity_derivative_mode = "finite_difference"
     model.source_wrapper_eps = 1e-6
     model.source_model_time_scale = 1.0
     model.source_model_time_flip = False

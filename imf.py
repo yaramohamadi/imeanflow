@@ -81,6 +81,7 @@ class iMeanFlow(nn.Module):
     source_num_classes: int = 1000
     source_path_type: str = "Linear"
     source_velocity_map_mode: str = "transport"
+    source_native_velocity_derivative_mode: str = "finite_difference"
     source_wrapper_eps: float = 1e-6
     source_model_time_scale: float = 1.0
     source_model_time_flip: bool = False
@@ -210,6 +211,13 @@ class iMeanFlow(nn.Module):
                 self.source_native_sigma = jnp.sqrt(
                     jnp.maximum(1.0 - native_alphas_cumprod, 1e-12)
                 )
+                self.source_native_time_scale = jnp.asarray(
+                    max(self.source_native_diffusion_steps - 1, 1), dtype=jnp.float32
+                )
+                self.source_native_tau = (
+                    jnp.arange(self.source_native_diffusion_steps, dtype=jnp.float32)
+                    / self.source_native_time_scale
+                )
 
     def _uses_src_reg_training_mode(self):
         return self.training_mode == "imf_jvp_free_src_reg"
@@ -305,13 +313,26 @@ class iMeanFlow(nn.Module):
     def _source_noise_to_velocity(self, raw_output, x_t, t):
         if self.source_velocity_map_mode == "transport":
             return self._source_noise_to_velocity_transport(raw_output, x_t, t)
-        if self.source_velocity_map_mode == "dit_native_analytic":
-            return self._source_noise_to_velocity_dit_native_analytic(
-                raw_output, x_t, t
+        if self.source_velocity_map_mode in {
+            "dit_native",
+            "dit_native_analytic",
+            "dit_native_finite_difference",
+        }:
+            derivative_mode = self.source_native_velocity_derivative_mode
+            if self.source_velocity_map_mode == "dit_native_analytic":
+                derivative_mode = "analytic"
+            elif self.source_velocity_map_mode == "dit_native_finite_difference":
+                derivative_mode = "finite_difference"
+            return self._source_noise_to_velocity_dit_native(
+                raw_output,
+                x_t,
+                t,
+                derivative_mode=derivative_mode,
             )
         raise ValueError(
-            "source_velocity_map_mode must be 'transport' or "
-            f"'dit_native_analytic', got {self.source_velocity_map_mode!r}."
+            "source_velocity_map_mode must be 'transport', 'dit_native', "
+            "'dit_native_analytic', or 'dit_native_finite_difference', got "
+            f"{self.source_velocity_map_mode!r}."
         )
 
     def _source_noise_to_velocity_transport(self, raw_output, x_t, t):
@@ -334,11 +355,11 @@ class iMeanFlow(nn.Module):
         )
         return d_alpha_t * x1_hat + d_sigma_t * x0_hat
 
-    def _source_noise_to_velocity_dit_native_analytic(self, raw_output, x_t, t):
+    def _source_noise_to_velocity_dit_native(
+        self, raw_output, x_t, t, *, derivative_mode
+    ):
         diffusion_steps = max(int(self.source_native_diffusion_steps), 1)
-        time_scale = jnp.asarray(
-            max(diffusion_steps - 1, 1), dtype=jnp.float32
-        )
+        time_scale = self.source_native_time_scale
         source_time_scale = jnp.asarray(self.source_model_time_scale, dtype=jnp.float32)
         tau = jnp.asarray(t, dtype=jnp.float32) * (source_time_scale / time_scale)
         dtau_dt = source_time_scale / time_scale
@@ -355,12 +376,32 @@ class iMeanFlow(nn.Module):
         alpha_scalar = self.source_native_alpha[schedule_pos]
         sigma_scalar = self.source_native_sigma[schedule_pos]
 
-        beta_start = jnp.asarray(1e-4, dtype=jnp.float32)
-        beta_end = jnp.asarray(2e-2, dtype=jnp.float32)
-        beta_tau = time_scale * (beta_start + (beta_end - beta_start) * tau)
-        sigma_safe = jnp.maximum(sigma_scalar, self.source_wrapper_eps)
-        alpha_dot_tau = -0.5 * beta_tau * alpha_scalar
-        sigma_dot_tau = 0.5 * beta_tau * (alpha_scalar ** 2) / sigma_safe
+        if derivative_mode == "analytic":
+            beta_start = jnp.asarray(1e-4, dtype=jnp.float32)
+            beta_end = jnp.asarray(2e-2, dtype=jnp.float32)
+            beta_tau = time_scale * (beta_start + (beta_end - beta_start) * tau)
+            sigma_safe = jnp.maximum(sigma_scalar, self.source_wrapper_eps)
+            alpha_dot_tau = -0.5 * beta_tau * alpha_scalar
+            sigma_dot_tau = 0.5 * beta_tau * (alpha_scalar ** 2) / sigma_safe
+        elif derivative_mode == "finite_difference":
+            next_pos = jnp.where(schedule_pos > 0, schedule_pos - 1, schedule_pos + 1)
+            alpha_next = self.source_native_alpha[next_pos]
+            sigma_next = self.source_native_sigma[next_pos]
+            tau_next = self.source_native_tau[next_pos]
+            tau_cur = self.source_native_tau[schedule_pos]
+            dt = tau_next - tau_cur
+            dt = jnp.where(
+                jnp.abs(dt) > self.source_wrapper_eps,
+                dt,
+                jnp.where(dt >= 0.0, self.source_wrapper_eps, -self.source_wrapper_eps),
+            )
+            alpha_dot_tau = (alpha_next - alpha_scalar) / dt
+            sigma_dot_tau = (sigma_next - sigma_scalar) / dt
+        else:
+            raise ValueError(
+                "source_native_velocity_derivative_mode must be "
+                f"'finite_difference' or 'analytic', got {derivative_mode!r}."
+            )
 
         expand_dims = (1,) * (x_t.ndim - 1)
         alpha_t = alpha_scalar.reshape((alpha_scalar.shape[0],) + expand_dims)
