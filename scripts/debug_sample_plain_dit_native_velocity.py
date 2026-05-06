@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample a plain-DiT checkpoint with p_sample or native DDPM-path velocity."""
+"""Sample a plain-DiT checkpoint with p_sample, native, or transport velocity."""
 
 import argparse
 import math
@@ -70,7 +70,10 @@ def resolve_checkpoint(path):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a plain-DiT sample grid with p_sample or native velocity."
+        description=(
+            "Generate a plain-DiT sample grid with p_sample, native DDPM velocity, "
+            "or linear transport velocity."
+        )
     )
     parser.add_argument("checkpoint_or_run_dir", nargs="?", default=None)
     parser.add_argument("--config-mode", default="plain_dit_finetune")
@@ -81,7 +84,7 @@ def parse_args():
     parser.add_argument(
         "--method",
         default="native_velocity",
-        choices=("native_velocity", "p_sample"),
+        choices=("native_velocity", "transport_velocity", "p_sample"),
     )
     parser.add_argument(
         "--native-velocity-cfg-space",
@@ -97,6 +100,30 @@ def parse_args():
         "--native-velocity-sigma-clamp",
         type=float,
         default=1e-6,
+    )
+    parser.add_argument(
+        "--transport-velocity-cfg-space",
+        default="velocity",
+        choices=("epsilon", "velocity"),
+    )
+    parser.add_argument(
+        "--transport-velocity-eps",
+        type=float,
+        default=1e-3,
+        help="Linear transport start time used to avoid the singular t=0 endpoint.",
+    )
+    parser.set_defaults(transport_velocity_scale_input=True)
+    parser.add_argument(
+        "--transport-velocity-scale-input",
+        dest="transport_velocity_scale_input",
+        action="store_true",
+        help="Scale linear-transport x_t to the matched DDPM/VP input norm.",
+    )
+    parser.add_argument(
+        "--no-transport-velocity-scale-input",
+        dest="transport_velocity_scale_input",
+        action="store_false",
+        help="Call DiT directly on the linear-transport x_t without VP norm scaling.",
     )
     parser.add_argument("--omega", type=float, default=None)
     parser.add_argument("--dataset-root", default=None)
@@ -199,6 +226,11 @@ def main():
         args.native_velocity_derivative_mode
     )
     config.sampling.native_velocity_sigma_clamp = args.native_velocity_sigma_clamp
+    config.sampling.transport_velocity_cfg_space = args.transport_velocity_cfg_space
+    config.sampling.transport_velocity_eps = args.transport_velocity_eps
+    config.sampling.transport_velocity_scale_input = (
+        args.transport_velocity_scale_input
+    )
     config.fid.sample_device_batch_size = args.device_batch_size
     if args.dataset_root is not None:
         config.dataset.root = args.dataset_root
@@ -263,6 +295,18 @@ def main():
     log_for_0(
         "sampling.native_velocity_sigma_clamp: %.6g",
         float(config.sampling.native_velocity_sigma_clamp),
+    )
+    log_for_0(
+        "sampling.transport_velocity_cfg_space: %s",
+        config.sampling.transport_velocity_cfg_space,
+    )
+    log_for_0(
+        "sampling.transport_velocity_eps: %.6g",
+        float(config.sampling.transport_velocity_eps),
+    )
+    log_for_0(
+        "sampling.transport_velocity_scale_input: %s",
+        bool(config.sampling.transport_velocity_scale_input),
     )
     log_for_0("sampling.num_steps: %d", args.num_steps)
     log_for_0("sampling.omega: %.4f", float(config.sampling.omega))
@@ -359,6 +403,16 @@ def main():
             native_velocity_sigma_clamp=np.asarray(
                 float(config.sampling.native_velocity_sigma_clamp),
                 dtype=np.float32,
+            ),
+            transport_velocity_cfg_space=np.asarray(
+                str(config.sampling.transport_velocity_cfg_space)
+            ),
+            transport_velocity_eps=np.asarray(
+                float(config.sampling.transport_velocity_eps),
+                dtype=np.float32,
+            ),
+            transport_velocity_scale_input=np.asarray(
+                bool(config.sampling.transport_velocity_scale_input)
             ),
         )
         log_for_0("Saved grid to %s", grid_path)

@@ -268,6 +268,118 @@ def _sample_with_native_velocity(
     return jax.lax.fori_loop(0, num_intervals, step_fn, x)
 
 
+def _sample_with_transport_velocity(
+    model,
+    variable,
+    noise,
+    labels,
+    cfg_scale,
+    *,
+    num_steps,
+    config,
+):
+    diffusion_steps = int(config.diffusion.diffusion_steps)
+    base_diffusion = create_diffusion(
+        "",
+        noise_schedule=config.diffusion.noise_schedule,
+        learn_sigma=config.diffusion.learn_sigma,
+        predict_xstart=config.diffusion.predict_xstart,
+        rescale_learned_sigmas=config.diffusion.rescale_learned_sigmas,
+        diffusion_steps=diffusion_steps,
+    )
+    ddpm_alpha = jnp.asarray(base_diffusion.sqrt_alphas_cumprod, dtype=jnp.float32)
+    ddpm_sigma = jnp.asarray(
+        base_diffusion.sqrt_one_minus_alphas_cumprod,
+        dtype=jnp.float32,
+    )
+    eps_value = float(config.sampling.get("transport_velocity_eps", 1e-3))
+    if eps_value <= 0.0 or eps_value >= 1.0:
+        raise ValueError(
+            "sampling.transport_velocity_eps must be in (0, 1), got "
+            f"{eps_value}."
+        )
+    eps = jnp.asarray(eps_value, dtype=jnp.float32)
+
+    cfg_space = str(
+        config.sampling.get(
+            "transport_velocity_cfg_space",
+            config.sampling.get("native_velocity_cfg_space", "velocity"),
+        )
+    ).lower()
+    if cfg_space not in {"epsilon", "velocity"}:
+        raise ValueError(
+            "transport_velocity_cfg_space must be 'epsilon' or 'velocity', got "
+            f"{cfg_space!r}."
+        )
+
+    scale_input = bool(config.sampling.get("transport_velocity_scale_input", True))
+    x = noise.astype(jnp.float32)
+    t_steps = jnp.linspace(eps, 1.0, num_steps + 1, dtype=jnp.float32)
+    ddpm_log_noise_ratio = jnp.log(jnp.maximum(ddpm_sigma, eps)) - jnp.log(
+        jnp.maximum(ddpm_alpha, eps)
+    )
+
+    def matched_ddpm_timestep(alpha_t, sigma_t):
+        target_log_noise_ratio = jnp.log(jnp.maximum(sigma_t, eps)) - jnp.log(
+            jnp.maximum(alpha_t, eps)
+        )
+        return jnp.argmin(
+            jnp.abs(ddpm_log_noise_ratio - target_log_noise_ratio)
+        ).astype(jnp.int32)
+
+    def prepare_model_input(x_t, alpha_t, sigma_t):
+        if not scale_input:
+            return x_t
+        path_norm = jnp.sqrt(jnp.maximum(alpha_t ** 2 + sigma_t ** 2, eps))
+        return x_t / path_norm
+
+    def eps_to_linear_velocity(x_t, eps_hat, alpha_t, sigma_t):
+        alpha_b = _broadcast_schedule_value(alpha_t, x_t)
+        sigma_b = _broadcast_schedule_value(sigma_t, x_t)
+        x0_hat = (x_t - sigma_b * eps_hat) / jnp.maximum(alpha_b, eps)
+        return x0_hat - eps_hat
+
+    def step_fn(i, x_t):
+        t_cur = t_steps[i]
+        t_next = t_steps[i + 1]
+        alpha_t = t_cur
+        sigma_t = 1.0 - t_cur
+        dt = t_next - t_cur
+        model_x = prepare_model_input(x_t, alpha_t, sigma_t)
+        model_t_idx = matched_ddpm_timestep(alpha_t, sigma_t)
+        model_t = jnp.full((x_t.shape[0],), model_t_idx, dtype=jnp.int32)
+
+        if cfg_space == "velocity":
+            cond_eps, uncond_eps = _conditional_unconditional_eps_predictions(
+                model,
+                variable,
+                model_x,
+                model_t,
+                labels,
+            )
+            cond_v = eps_to_linear_velocity(
+                x_t, cond_eps.astype(jnp.float32), alpha_t, sigma_t
+            )
+            uncond_v = eps_to_linear_velocity(
+                x_t, uncond_eps.astype(jnp.float32), alpha_t, sigma_t
+            )
+            v_hat = uncond_v + cfg_scale.astype(jnp.float32) * (cond_v - uncond_v)
+        else:
+            eps_hat = _guided_eps_prediction(
+                model,
+                variable,
+                model_x,
+                model_t,
+                labels,
+                cfg_scale,
+            ).astype(jnp.float32)
+            v_hat = eps_to_linear_velocity(x_t, eps_hat, alpha_t, sigma_t)
+
+        return x_t + _broadcast_schedule_value(dt, x_t) * v_hat
+
+    return jax.lax.fori_loop(0, num_steps, step_fn, x)
+
+
 def generate(
     variable,
     model,
@@ -305,6 +417,17 @@ def generate(
 
     if sampling_method == "native_velocity":
         return _sample_with_native_velocity(
+            model,
+            variable,
+            noise,
+            labels,
+            cfg_scale,
+            num_steps=num_steps,
+            config=config,
+        ).astype(sample_dtype)
+
+    if sampling_method == "transport_velocity":
+        return _sample_with_transport_velocity(
             model,
             variable,
             noise,
