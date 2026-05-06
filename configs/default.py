@@ -90,9 +90,12 @@ def get_config():
     model.source_model_str = ""
     model.source_num_classes = dataset.num_classes
     model.source_path_type = "Linear"
+    model.source_velocity_map_mode = "transport"
     model.source_wrapper_eps = 1e-6
     model.source_model_time_scale = 1.0
     model.source_model_time_flip = False
+    model.source_native_diffusion_steps = 1000
+    model.source_native_beta_schedule = "linear"
     model.use_auxiliary_v_head = True
     model.use_context_guidance_conditioning = False
     model.use_adaln_guidance_scale_conditioning = False

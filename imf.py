@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 
 from models import imfDiT
+from utils.dit_diffusion import get_named_beta_schedule
 from utils.imf_param_util import is_v_only_param_tree
 from utils.sit_transport_jax import create_transport
 
@@ -79,9 +80,12 @@ class iMeanFlow(nn.Module):
     source_model_str: str = ""
     source_num_classes: int = 1000
     source_path_type: str = "Linear"
+    source_velocity_map_mode: str = "transport"
     source_wrapper_eps: float = 1e-6
     source_model_time_scale: float = 1.0
     source_model_time_flip: bool = False
+    source_native_diffusion_steps: int = 1000
+    source_native_beta_schedule: str = "linear"
     use_auxiliary_v_head: bool = True
     use_context_guidance_conditioning: bool = False
     use_adaln_guidance_scale_conditioning: bool = False
@@ -194,6 +198,18 @@ class iMeanFlow(nn.Module):
                     path_type=self.source_path_type,
                     prediction="noise",
                 )
+                native_betas = get_named_beta_schedule(
+                    self.source_native_beta_schedule,
+                    self.source_native_diffusion_steps,
+                )
+                native_alphas = 1.0 - native_betas
+                native_alphas_cumprod = jnp.asarray(
+                    native_alphas.cumprod(), dtype=jnp.float32
+                )
+                self.source_native_alpha = jnp.sqrt(native_alphas_cumprod)
+                self.source_native_sigma = jnp.sqrt(
+                    jnp.maximum(1.0 - native_alphas_cumprod, 1e-12)
+                )
 
     def _uses_src_reg_training_mode(self):
         return self.training_mode == "imf_jvp_free_src_reg"
@@ -279,6 +295,18 @@ class iMeanFlow(nn.Module):
         )
 
     def _source_noise_to_velocity(self, raw_output, x_t, t):
+        if self.source_velocity_map_mode == "transport":
+            return self._source_noise_to_velocity_transport(raw_output, x_t, t)
+        if self.source_velocity_map_mode == "dit_native_analytic":
+            return self._source_noise_to_velocity_dit_native_analytic(
+                raw_output, x_t, t
+            )
+        raise ValueError(
+            "source_velocity_map_mode must be 'transport' or "
+            f"'dit_native_analytic', got {self.source_velocity_map_mode!r}."
+        )
+
+    def _source_noise_to_velocity_transport(self, raw_output, x_t, t):
         t_expanded = t.reshape((t.shape[0],) + (1,) * (x_t.ndim - 1))
         alpha_t, d_alpha_t = self.source_transport.path_sampler.compute_alpha_t(
             t_expanded
@@ -297,6 +325,49 @@ class iMeanFlow(nn.Module):
             self.source_wrapper_eps,
         )
         return d_alpha_t * x1_hat + d_sigma_t * x0_hat
+
+    def _source_noise_to_velocity_dit_native_analytic(self, raw_output, x_t, t):
+        diffusion_steps = max(int(self.source_native_diffusion_steps), 1)
+        time_scale = jnp.asarray(
+            max(diffusion_steps - 1, 1), dtype=jnp.float32
+        )
+        source_time_scale = jnp.asarray(self.source_model_time_scale, dtype=jnp.float32)
+        tau = jnp.asarray(t, dtype=jnp.float32) * (source_time_scale / time_scale)
+        dtau_dt = source_time_scale / time_scale
+        if self.source_model_time_flip:
+            tau = 1.0 - tau
+            dtau_dt = -dtau_dt
+        tau = jnp.clip(tau, 0.0, 1.0)
+
+        schedule_pos = jnp.clip(
+            jnp.rint(tau * time_scale).astype(jnp.int32),
+            0,
+            diffusion_steps - 1,
+        )
+        alpha_scalar = self.source_native_alpha[schedule_pos]
+        sigma_scalar = self.source_native_sigma[schedule_pos]
+
+        beta_start = jnp.asarray(1e-4, dtype=jnp.float32)
+        beta_end = jnp.asarray(2e-2, dtype=jnp.float32)
+        beta_tau = time_scale * (beta_start + (beta_end - beta_start) * tau)
+        sigma_safe = jnp.maximum(sigma_scalar, self.source_wrapper_eps)
+        alpha_dot_tau = -0.5 * beta_tau * alpha_scalar
+        sigma_dot_tau = 0.5 * beta_tau * (alpha_scalar ** 2) / sigma_safe
+
+        expand_dims = (1,) * (x_t.ndim - 1)
+        alpha_t = alpha_scalar.reshape((alpha_scalar.shape[0],) + expand_dims)
+        sigma_t = sigma_scalar.reshape((sigma_scalar.shape[0],) + expand_dims)
+        alpha_dot_t = (alpha_dot_tau * dtau_dt).reshape(
+            (alpha_dot_tau.shape[0],) + expand_dims
+        )
+        sigma_dot_t = (sigma_dot_tau * dtau_dt).reshape(
+            (sigma_dot_tau.shape[0],) + expand_dims
+        )
+
+        x0_hat = (x_t - sigma_t * raw_output) / jnp.maximum(
+            alpha_t, self.source_wrapper_eps
+        )
+        return alpha_dot_t * x0_hat + sigma_dot_t * raw_output
 
     def _mf_target_interval_coeff(self, t, r):
         if self._uses_sit_dmf_time_convention() and self.use_positive_sit_dmf_mf_target:
