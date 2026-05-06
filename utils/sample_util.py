@@ -1,3 +1,4 @@
+import os
 import jax
 from jax import random
 import jax.numpy as jnp
@@ -237,7 +238,11 @@ def get_image_metric_evaluator(config, writer, latent_manager):
     """
     sample_local_device_count = get_sample_local_device_count(config)
     inception_batch_size = config.fid.device_batch_size * sample_local_device_count
-    inception_net = fid_util.build_jax_inception(batch_size=inception_batch_size)
+    fid_device = os.environ.get("IMF_FID_DEVICE", "").strip().lower() or None
+    inception_net = fid_util.build_jax_inception(
+        batch_size=inception_batch_size,
+        device=fid_device,
+    )
     fid_stats_ref = fid_util.get_reference(config.fid.cache_ref)
 
     fd_dino_config = config.get("fd_dino", None)

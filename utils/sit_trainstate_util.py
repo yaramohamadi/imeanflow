@@ -17,7 +17,7 @@ from utils.logging_util import log_for_0
 from utils.state_util import print_params
 
 
-def initialized(key, image_size, model):
+def initialized(key, image_size, model, model_label="model"):
     input_shape = (1, image_size, image_size, 4)
     x = jnp.ones(input_shape, dtype=jnp.float32)
     t = jnp.ones((1,), dtype=jnp.float32)
@@ -27,9 +27,9 @@ def initialized(key, image_size, model):
     def init(*args):
         return model.init(*args)
 
-    log_for_0("Initializing plain SiT params...")
+    log_for_0("Initializing %s params...", model_label)
     variables = init({"params": key}, x, t, y)
-    log_for_0("Initializing plain SiT params done.")
+    log_for_0("Initializing %s params done.", model_label)
 
     param_count = sum(x.size for x in jax.tree_leaves(variables["params"]))
     log_for_0("Total trainable parameters: %s", param_count)
@@ -49,10 +49,16 @@ class EvalState:
     ema_params: Any
 
 
-def create_eval_state(rng, config: ml_collections.ConfigDict, model, image_size):
+def create_eval_state(
+    rng,
+    config: ml_collections.ConfigDict,
+    model,
+    image_size,
+    model_label="model",
+):
     del config
     rng, rng_init = random.split(rng)
-    _, params = initialized(rng_init, image_size, model)
+    _, params = initialized(rng_init, image_size, model, model_label=model_label)
     return EvalState(
         step=jnp.array(0, dtype=jnp.int32),
         params=params,
@@ -61,11 +67,17 @@ def create_eval_state(rng, config: ml_collections.ConfigDict, model, image_size)
 
 
 def create_train_state(
-    rng, config: ml_collections.ConfigDict, model, image_size, lr_fn
+    rng,
+    config: ml_collections.ConfigDict,
+    model,
+    image_size,
+    lr_fn,
+    model_label="model",
 ):
     rng, rng_init = random.split(rng)
 
-    _, params = initialized(rng_init, image_size, model)
+    del config
+    _, params = initialized(rng_init, image_size, model, model_label=model_label)
     use_ema = config.training.get("use_ema", True)
     ema_params = deepcopy(params)
     if use_ema:

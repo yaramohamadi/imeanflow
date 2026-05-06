@@ -142,6 +142,9 @@ def get_config():
     sampling.eval_modes = ()
     sampling.half_precision = False
     sampling.half_precision_dtype = "float16"
+    sampling.native_velocity_cfg_space = "epsilon"
+    sampling.native_velocity_derivative_mode = "finite_difference"
+    sampling.native_velocity_sigma_clamp = 1e-6
 
     # ------------------------------------------------------------
     # Plain SiT transport

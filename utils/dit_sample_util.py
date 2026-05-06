@@ -179,18 +179,46 @@ def _sample_with_native_velocity(
     native_velocity_cfg_space = str(
         config.sampling.get("native_velocity_cfg_space", "epsilon")
     ).lower()
+    native_velocity_derivative_mode = str(
+        config.sampling.get("native_velocity_derivative_mode", "finite_difference")
+    ).lower()
+    native_velocity_sigma_clamp = jnp.asarray(
+        float(config.sampling.get("native_velocity_sigma_clamp", 1e-6)),
+        dtype=jnp.float32,
+    )
     if native_velocity_cfg_space not in {"epsilon", "velocity"}:
         raise ValueError(
             "native_velocity_cfg_space must be 'epsilon' or 'velocity', got "
             f"{native_velocity_cfg_space!r}."
         )
+    if native_velocity_derivative_mode not in {"finite_difference", "analytic"}:
+        raise ValueError(
+            "native_velocity_derivative_mode must be 'finite_difference' or "
+            f"'analytic', got {native_velocity_derivative_mode!r}."
+        )
+
+    beta_start = jnp.asarray(1e-4, dtype=jnp.float32)
+    beta_end = jnp.asarray(2e-2, dtype=jnp.float32)
+    time_scale = jnp.asarray(max(diffusion_steps - 1, 1), dtype=jnp.float32)
 
     def eps_to_velocity(x_t, eps_hat, current_pos, next_pos):
         alpha_t = _broadcast_schedule_value(alpha[current_pos], x_t)
         sigma_t = _broadcast_schedule_value(sigma[current_pos], x_t)
         dt = tau[next_pos] - tau[current_pos]
-        alpha_dot = (alpha[next_pos] - alpha[current_pos]) / dt
-        sigma_dot = (sigma[next_pos] - sigma[current_pos]) / dt
+        if native_velocity_derivative_mode == "analytic":
+            tau_cur = tau[current_pos]
+            # `tau` is the normalized discrete index t / (T - 1), so
+            # d/dtau = (T - 1) d/dt_index. Without this factor the analytic
+            # velocity is under-scaled by ~1000x for a 1000-step DiT schedule.
+            beta_tau = time_scale * (beta_start + (beta_end - beta_start) * tau_cur)
+            alpha_scalar = alpha[current_pos]
+            sigma_scalar = sigma[current_pos]
+            sigma_safe = jnp.maximum(sigma_scalar, native_velocity_sigma_clamp)
+            alpha_dot = -0.5 * beta_tau * alpha_scalar
+            sigma_dot = 0.5 * beta_tau * (alpha_scalar ** 2) / sigma_safe
+        else:
+            alpha_dot = (alpha[next_pos] - alpha[current_pos]) / dt
+            sigma_dot = (sigma[next_pos] - sigma[current_pos]) / dt
         alpha_dot_t = _broadcast_schedule_value(alpha_dot, x_t)
         sigma_dot_t = _broadcast_schedule_value(sigma_dot, x_t)
         x0_hat = (x_t - sigma_t * eps_hat) / jnp.maximum(alpha_t, alpha_eps)

@@ -31,7 +31,7 @@ def compute_fid(mu1, mu2, sigma1, sigma2, eps=1e-6):
     return fid
 
 
-def build_jax_inception(batch_size=200):
+def build_jax_inception(batch_size=200, device=None):
     """
     Build InceptionV3 model that always returns all features.
 
@@ -41,6 +41,10 @@ def build_jax_inception(batch_size=200):
     Returns:
         Dictionary with model parameters and compiled function
     """
+    target_device = None
+    if device is not None:
+        target_device = jax.devices(device)[0]
+
     logging.info("Initializing Extended InceptionV3")
     model = inception.InceptionV3(
         pretrained=True,
@@ -49,9 +53,14 @@ def build_jax_inception(batch_size=200):
     )
 
     # Initialize with dummy input
-    dummy_input = jnp.ones((1, 299, 299, 3))
     rng = jax.random.PRNGKey(0)
-    inception_params = model.init(rng, dummy_input, train=False)
+    if target_device is None:
+        dummy_input = jnp.ones((1, 299, 299, 3))
+        inception_params = model.init(rng, dummy_input, train=False)
+    else:
+        with jax.default_device(target_device):
+            dummy_input = jnp.ones((1, 299, 299, 3))
+            inception_params = model.init(rng, dummy_input, train=False)
 
     logging.info("Initialized Extended InceptionV3")
 
@@ -60,10 +69,17 @@ def build_jax_inception(batch_size=200):
         return model.apply(params, x, train=False)
 
     # JIT compile the function
-    inception_fn = jax.jit(inception_apply)
+    if target_device is None:
+        inception_fn = jax.jit(inception_apply)
+    else:
+        inception_fn = jax.jit(inception_apply, device=target_device)
 
     # Compile for the expected batch size
-    fake_x = jnp.zeros((batch_size, 299, 299, 3), dtype=jnp.float32)
+    if target_device is None:
+        fake_x = jnp.zeros((batch_size, 299, 299, 3), dtype=jnp.float32)
+    else:
+        with jax.default_device(target_device):
+            fake_x = jnp.zeros((batch_size, 299, 299, 3), dtype=jnp.float32)
     logging.info("Start compiling inception function...")
     t_start = time.time()
 
@@ -72,7 +88,12 @@ def build_jax_inception(batch_size=200):
 
     logging.info(f"End compiling: {(time.time() - t_start):.4f} seconds.")
 
-    inception_net = {"params": inception_params, "fn": inception_fn, "model": model}
+    inception_net = {
+        "params": inception_params,
+        "fn": inception_fn,
+        "model": model,
+        "device": target_device,
+    }
     return inception_net
 
 
@@ -132,6 +153,7 @@ def compute_stats(
 ):
     inception_fn = inception_net["fn"]
     inception_params = inception_net["params"]
+    inception_device = inception_net.get("device", None)
 
     num_samples = len(samples)
     local_device_count = LDC if num_local_devices is None else int(num_local_devices)
@@ -152,8 +174,11 @@ def compute_stats(
         x = resize.forward(x)  # match the Pytorch version
         x = x.numpy().transpose(0, 2, 3, 1)
 
+        x_jax = jax.lax.stop_gradient(x)
+        if inception_device is not None:
+            x_jax = jax.device_put(x_jax, inception_device)
         pooled_features, spatial_features, logits = inception_fn(
-            inception_params, jax.lax.stop_gradient(x)
+            inception_params, x_jax
         )
 
         # Pooled features are already in the right shape [B, 2048]
