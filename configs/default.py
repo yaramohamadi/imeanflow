@@ -150,6 +150,7 @@ def get_config():
     sampling.native_velocity_derivative_mode = "finite_difference"
     sampling.native_velocity_sigma_clamp = 1e-6
     sampling.transport_velocity_cfg_space = "velocity"
+    sampling.transport_velocity_time_map = "noise_ratio"
     sampling.transport_velocity_eps = 1e-3
     sampling.transport_velocity_scale_input = True
 

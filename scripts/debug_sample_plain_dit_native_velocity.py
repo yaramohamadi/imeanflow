@@ -107,6 +107,12 @@ def parse_args():
         choices=("epsilon", "velocity"),
     )
     parser.add_argument(
+        "--transport-velocity-time-map",
+        default="noise_ratio",
+        choices=("noise_ratio", "flipped_linear", "linear"),
+        help="How linear transport time is mapped to the source DiT DDPM timestep.",
+    )
+    parser.add_argument(
         "--transport-velocity-eps",
         type=float,
         default=1e-3,
@@ -227,6 +233,7 @@ def main():
     )
     config.sampling.native_velocity_sigma_clamp = args.native_velocity_sigma_clamp
     config.sampling.transport_velocity_cfg_space = args.transport_velocity_cfg_space
+    config.sampling.transport_velocity_time_map = args.transport_velocity_time_map
     config.sampling.transport_velocity_eps = args.transport_velocity_eps
     config.sampling.transport_velocity_scale_input = (
         args.transport_velocity_scale_input
@@ -299,6 +306,10 @@ def main():
     log_for_0(
         "sampling.transport_velocity_cfg_space: %s",
         config.sampling.transport_velocity_cfg_space,
+    )
+    log_for_0(
+        "sampling.transport_velocity_time_map: %s",
+        config.sampling.transport_velocity_time_map,
     )
     log_for_0(
         "sampling.transport_velocity_eps: %.6g",
@@ -406,6 +417,9 @@ def main():
             ),
             transport_velocity_cfg_space=np.asarray(
                 str(config.sampling.transport_velocity_cfg_space)
+            ),
+            transport_velocity_time_map=np.asarray(
+                str(config.sampling.transport_velocity_time_map)
             ),
             transport_velocity_eps=np.asarray(
                 float(config.sampling.transport_velocity_eps),

@@ -312,20 +312,40 @@ def _sample_with_transport_velocity(
             f"{cfg_space!r}."
         )
 
+    time_map = str(
+        config.sampling.get("transport_velocity_time_map", "noise_ratio")
+    ).lower()
+    if time_map not in {"noise_ratio", "flipped_linear", "linear"}:
+        raise ValueError(
+            "transport_velocity_time_map must be 'noise_ratio', "
+            f"'flipped_linear', or 'linear', got {time_map!r}."
+        )
+
     scale_input = bool(config.sampling.get("transport_velocity_scale_input", True))
     x = noise.astype(jnp.float32)
     t_steps = jnp.linspace(eps, 1.0, num_steps + 1, dtype=jnp.float32)
     ddpm_log_noise_ratio = jnp.log(jnp.maximum(ddpm_sigma, eps)) - jnp.log(
         jnp.maximum(ddpm_alpha, eps)
     )
+    ddpm_time_scale = jnp.asarray(max(diffusion_steps - 1, 1), dtype=jnp.float32)
 
-    def matched_ddpm_timestep(alpha_t, sigma_t):
-        target_log_noise_ratio = jnp.log(jnp.maximum(sigma_t, eps)) - jnp.log(
-            jnp.maximum(alpha_t, eps)
+    def mapped_ddpm_timestep(t_linear, alpha_t, sigma_t):
+        if time_map == "noise_ratio":
+            target_log_noise_ratio = jnp.log(jnp.maximum(sigma_t, eps)) - jnp.log(
+                jnp.maximum(alpha_t, eps)
+            )
+            return jnp.argmin(
+                jnp.abs(ddpm_log_noise_ratio - target_log_noise_ratio)
+            ).astype(jnp.int32)
+        if time_map == "flipped_linear":
+            tau = 1.0 - t_linear
+        else:
+            tau = t_linear
+        return jnp.clip(
+            jnp.rint(tau * ddpm_time_scale).astype(jnp.int32),
+            0,
+            diffusion_steps - 1,
         )
-        return jnp.argmin(
-            jnp.abs(ddpm_log_noise_ratio - target_log_noise_ratio)
-        ).astype(jnp.int32)
 
     def prepare_model_input(x_t, alpha_t, sigma_t):
         if not scale_input:
@@ -346,7 +366,7 @@ def _sample_with_transport_velocity(
         sigma_t = 1.0 - t_cur
         dt = t_next - t_cur
         model_x = prepare_model_input(x_t, alpha_t, sigma_t)
-        model_t_idx = matched_ddpm_timestep(alpha_t, sigma_t)
+        model_t_idx = mapped_ddpm_timestep(t_cur, alpha_t, sigma_t)
         model_t = jnp.full((x_t.shape[0],), model_t_idx, dtype=jnp.int32)
 
         if cfg_space == "velocity":
