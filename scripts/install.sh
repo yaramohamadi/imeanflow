@@ -2,7 +2,43 @@
 
 set -euo pipefail
 
-PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+# Override with, for example:
+#   PYTHON_BIN=python3.10 JAX_PLATFORM=cpu bash scripts/install.sh
+PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_VERSION="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_MAJOR="$("${PYTHON_BIN}" -c 'import sys; print(sys.version_info.major)')"
+PYTHON_MINOR="$("${PYTHON_BIN}" -c 'import sys; print(sys.version_info.minor)')"
+
+require_supported_python() {
+    local python_version="$1"
+    local python_major="$2"
+    local python_minor="$3"
+
+    if [ "${python_major}" -ne 3 ] || [ "${python_minor}" -lt 10 ] || [ "${python_minor}" -gt 12 ]; then
+        echo "Unsupported Python ${python_version}. This repo currently supports Python 3.10, 3.11, and 3.12."
+        echo "Re-run with a supported interpreter, for example:"
+        echo "  PYTHON_BIN=python3.10 JAX_PLATFORM=cpu bash scripts/install.sh"
+        exit 1
+    fi
+}
+
+create_venv() {
+    if command -v virtualenv >/dev/null 2>&1; then
+        virtualenv --python "${PYTHON_BIN}" "${VENV_DIR}"
+        return
+    fi
+
+    if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
+        if ! "${PYTHON_BIN}" -m ensurepip --version >/dev/null 2>&1; then
+            echo "Failed to create ${VENV_DIR} with ${PYTHON_BIN}: Python ${PYTHON_VERSION} does not provide ensurepip on this machine."
+            echo "Install the system venv package or virtualenv, then rerun. For example on Debian/Ubuntu:"
+            echo "  sudo apt install python${PYTHON_VERSION}-venv"
+            echo "Or install virtualenv in a Python that already has pip:"
+            echo "  python -m pip install --user virtualenv"
+        fi
+        exit 1
+    fi
+}
 
 # This repo was originally developed in a TPU/JAX environment. On Compute
 # Canada we prefer the local wheelhouse when it exists, because it provides
@@ -16,25 +52,52 @@ fi
 VENV_DIR="${VENV_DIR:-.venv}"
 
 if [ -z "${VIRTUAL_ENV:-}" ]; then
-    if [ ! -d "${VENV_DIR}" ]; then
-        if [ "${IS_COMPUTE_CANADA}" -eq 1 ] && command -v virtualenv >/dev/null 2>&1; then
-            virtualenv --no-download "${VENV_DIR}"
-        else
-            python -m venv "${VENV_DIR}"
+    require_supported_python "${PYTHON_VERSION}" "${PYTHON_MAJOR}" "${PYTHON_MINOR}"
+
+    if [ -d "${VENV_DIR}" ] && [ -x "${VENV_DIR}/bin/python" ]; then
+        EXISTING_VENV_VERSION="$("${VENV_DIR}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        if [ "${EXISTING_VENV_VERSION}" != "${PYTHON_VERSION}" ]; then
+            echo "Existing ${VENV_DIR} uses Python ${EXISTING_VENV_VERSION}, but PYTHON_BIN points to Python ${PYTHON_VERSION}."
+            echo "Move or remove ${VENV_DIR} and rerun, for example:"
+            echo "  mv ${VENV_DIR} ${VENV_DIR}.bak"
+            echo "  PYTHON_BIN=${PYTHON_BIN} JAX_PLATFORM=${JAX_PLATFORM:-gpu} bash scripts/install.sh"
+            exit 1
         fi
+    fi
+
+    if [ ! -x "${VENV_DIR}/bin/python" ] || [ ! -f "${VENV_DIR}/bin/activate" ]; then
+        create_venv
+    fi
+
+    if [ ! -x "${VENV_DIR}/bin/python" ] || [ ! -f "${VENV_DIR}/bin/activate" ]; then
+        echo "Virtual environment ${VENV_DIR} is incomplete after creation attempt."
+        echo "Remove or move ${VENV_DIR} and rerun after fixing the Python venv tooling."
+        exit 1
     fi
 
     # shellcheck disable=SC1091
     source "${VENV_DIR}/bin/activate"
 fi
 
+ACTIVE_PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+ACTIVE_PYTHON_MAJOR="$(python -c 'import sys; print(sys.version_info.major)')"
+ACTIVE_PYTHON_MINOR="$(python -c 'import sys; print(sys.version_info.minor)')"
+require_supported_python "${ACTIVE_PYTHON_VERSION}" "${ACTIVE_PYTHON_MAJOR}" "${ACTIVE_PYTHON_MINOR}"
+
 if ! python -m pip --version >/dev/null 2>&1; then
     python -m ensurepip --upgrade
 fi
 
 # Keep the JAX pin close to the original repo version when possible, but use
-# the nearest Compute Canada build when the exact upstream pin is unavailable.
-DEFAULT_JAX_VERSION="${JAX_VERSION:-0.4.27}"
+# a newer upstream wheel on Python 3.12, where jaxlib 0.4.27 is unavailable.
+if [ -n "${JAX_VERSION:-}" ]; then
+    DEFAULT_JAX_VERSION="${JAX_VERSION}"
+elif [ "${ACTIVE_PYTHON_MINOR}" -ge 12 ]; then
+    DEFAULT_JAX_VERSION="0.4.34"
+else
+    DEFAULT_JAX_VERSION="0.4.27"
+fi
+
 DEFAULT_TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
 DEFAULT_FLAX_VERSION="${FLAX_VERSION:-0.8.5}"
 DEFAULT_OPTAX_VERSION="${OPTAX_VERSION:-0.2.2}"
