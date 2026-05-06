@@ -48,6 +48,11 @@ def restore_eval_checkpoint(workdir, use_ema=False):
         return state
 
     restored = checkpoints.restore_checkpoint(workdir, target=None)
+    if restored is None:
+        raise ValueError(
+            f"Could not restore a Flax checkpoint from {workdir}. "
+            "Pass a real checkpoint directory/checkpoint_* directory, or a .pt/.pth file."
+        )
     step = restored.get("step", 0)
     params = restored.get("params")
     ema_params = restored.get("ema_params")

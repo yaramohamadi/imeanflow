@@ -26,6 +26,7 @@ from utils.lr_utils import lr_schedules
 from utils.preview_util import (
     format_preview_guidance_label,
     generate_preview_samples_first_device,
+    make_uint8_image_grid,
     make_side_by_side_preview_panel,
     make_stacked_grid_panel,
 )
@@ -185,7 +186,13 @@ def _restore_eval_state(config, model, image_size, use_ema):
         (".pt", ".pth", ".pth.tar")
     )
     if is_torch_ckpt or config.get("partial_load", False):
-        state = create_eval_state(random.key(config.training.seed), config, model, image_size)
+        state = create_eval_state(
+            random.key(config.training.seed),
+            config,
+            model,
+            image_size,
+            model_label="plain DiT",
+        )
         state = restore_partial_checkpoint(
             state,
             load_path,
@@ -301,6 +308,24 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str) -> EvalState:
         },
         devices=sample_devices,
     )
+    num_preview_images = int(config.fid.get("num_images_to_log", 16))
+    preview_grid_size = int(num_preview_images**0.5)
+    num_preview_images = preview_grid_size**2
+    if num_preview_images > 0:
+        preview = generate_preview_samples_first_device(
+            state,
+            p_sample_step,
+            latent_manager,
+            use_ema,
+            num_samples=num_preview_images,
+            param_dtype=get_sampling_param_dtype(config),
+            sample_local_device_count=sample_local_device_count,
+            **kwargs,
+        )
+        writer.write_images(
+            step,
+            {"image_grid": make_uint8_image_grid(preview, preview_grid_size)},
+        )
     result = evaluator(state, p_sample_step, step, not use_ema, **kwargs)
     _write_eval_metrics_csv(
         workdir,
@@ -357,7 +382,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     model = _build_plain_dit(config, eval_mode=False)
     lr_fn = lr_schedules(config, steps_per_epoch)
     ema_fn = ema_schedules(config)
-    state = create_train_state(rng, config, model, image_size, lr_fn)
+    state = create_train_state(
+        rng,
+        config,
+        model,
+        image_size,
+        lr_fn,
+        model_label="plain DiT",
+    )
     state = _load_initial_state(state, config)
 
     step = int(state.step)

@@ -303,17 +303,17 @@ class Writer:
         if jax.process_index() != 0:
             return
 
+        if not os.path.exists(f"{self.workdir}/images/"):
+            os.makedirs(f"{self.workdir}/images/")
+        pil_images = {k: self._to_pil_image(v) for k, v in image_dict.items()}
+        for k, img in pil_images.items():
+            img.save(f"{self.workdir}/images/{step}_{k}.png")
+
         if self._maybe_resume_wandb():
             self._safe_wandb_log(
-                {k: wandb.Image(self._to_pil_image(v)) for k, v in image_dict.items()},
+                {k: wandb.Image(img) for k, img in pil_images.items()},
                 step,
             )
-        else:
-            if not os.path.exists(f"{self.workdir}/images/"):
-                os.makedirs(f"{self.workdir}/images/")
-            for k, v in image_dict.items():
-                img = self._to_pil_image(v)
-                img.save(f"{self.workdir}/images/{step}_{k}.png")
 
     def write_image_grid(self, step, images, grid_size, key="image_grid"):
         if jax.process_index() != 0:
@@ -329,12 +329,12 @@ class Writer:
             y = (i // grid_size) * images[0].height
             grid_image.paste(img, (x, y))
 
+        if not os.path.exists(f"{self.workdir}/image_grids/"):
+            os.makedirs(f"{self.workdir}/image_grids/")
+        grid_image.save(f"{self.workdir}/image_grids/{key}_{step}.png")
+
         if self._maybe_resume_wandb():
             self._safe_wandb_log({key: wandb.Image(grid_image)}, step)
-        else:
-            if not os.path.exists(f"{self.workdir}/image_grids/"):
-                os.makedirs(f"{self.workdir}/image_grids/")
-            grid_image.save(f"{self.workdir}/image_grids/{key}_{step}.png")
 
     def close(self):
         if jax.process_index() != 0:

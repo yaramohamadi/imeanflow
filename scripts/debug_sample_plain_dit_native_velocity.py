@@ -88,6 +88,16 @@ def parse_args():
         default="epsilon",
         choices=("epsilon", "velocity"),
     )
+    parser.add_argument(
+        "--native-velocity-derivative-mode",
+        default="finite_difference",
+        choices=("finite_difference", "analytic"),
+    )
+    parser.add_argument(
+        "--native-velocity-sigma-clamp",
+        type=float,
+        default=1e-6,
+    )
     parser.add_argument("--omega", type=float, default=None)
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument(
@@ -185,6 +195,10 @@ def main():
     config.sampling.num_steps = args.num_steps
     config.sampling.method = args.method
     config.sampling.native_velocity_cfg_space = args.native_velocity_cfg_space
+    config.sampling.native_velocity_derivative_mode = (
+        args.native_velocity_derivative_mode
+    )
+    config.sampling.native_velocity_sigma_clamp = args.native_velocity_sigma_clamp
     config.fid.sample_device_batch_size = args.device_batch_size
     if args.dataset_root is not None:
         config.dataset.root = args.dataset_root
@@ -241,6 +255,14 @@ def main():
     log_for_0(
         "sampling.native_velocity_cfg_space: %s",
         config.sampling.native_velocity_cfg_space,
+    )
+    log_for_0(
+        "sampling.native_velocity_derivative_mode: %s",
+        config.sampling.native_velocity_derivative_mode,
+    )
+    log_for_0(
+        "sampling.native_velocity_sigma_clamp: %.6g",
+        float(config.sampling.native_velocity_sigma_clamp),
     )
     log_for_0("sampling.num_steps: %d", args.num_steps)
     log_for_0("sampling.omega: %.4f", float(config.sampling.omega))
@@ -328,6 +350,16 @@ def main():
             method=np.asarray(args.method),
             num_steps=np.asarray(args.num_steps, dtype=np.int32),
             omega=np.asarray(float(config.sampling.omega), dtype=np.float32),
+            native_velocity_cfg_space=np.asarray(
+                str(config.sampling.native_velocity_cfg_space)
+            ),
+            native_velocity_derivative_mode=np.asarray(
+                str(config.sampling.native_velocity_derivative_mode)
+            ),
+            native_velocity_sigma_clamp=np.asarray(
+                float(config.sampling.native_velocity_sigma_clamp),
+                dtype=np.float32,
+            ),
         )
         log_for_0("Saved grid to %s", grid_path)
         log_for_0("Saved latents to %s", latents_path)

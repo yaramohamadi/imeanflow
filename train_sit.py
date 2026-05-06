@@ -276,6 +276,7 @@ def _restore_eval_state(config, model, image_size, use_ema):
             config,
             model,
             image_size,
+            model_label="plain SiT",
         )
         state = restore_partial_checkpoint(
             state,
@@ -292,6 +293,7 @@ def _restore_eval_state(config, model, image_size, use_ema):
         config,
         model,
         image_size,
+        model_label="plain SiT",
     )
     state = state.replace(ema_params=state.params)
     state = restore_checkpoint(state, load_path)
@@ -627,7 +629,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     model = _build_plain_sit(config, eval_mode=False)
     lr_fn = lr_schedules(config, steps_per_epoch)
     ema_fn = ema_schedules(config)
-    state = create_train_state(rng, config, model, image_size, lr_fn)
+    state = create_train_state(
+        rng,
+        config,
+        model,
+        image_size,
+        lr_fn,
+        model_label="plain SiT",
+    )
     state = _load_initial_state(state, config)
 
     step = int(state.step)
