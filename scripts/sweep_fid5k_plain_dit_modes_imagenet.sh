@@ -71,6 +71,24 @@ run_eval() {
         --config.sampling.native_velocity_derivative_mode=finite_difference
       )
       ;;
+    transport_velocity_aligned)
+      extra_args=(
+        --config.sampling.method=transport_velocity
+        --config.sampling.transport_velocity_cfg_space=velocity
+        --config.sampling.transport_velocity_time_map=noise_ratio
+        --config.sampling.transport_velocity_eps=1e-3
+        --config.sampling.transport_velocity_scale_input=True
+      )
+      ;;
+    transport_velocity_noalign|transport_velocity_flipped_linear)
+      extra_args=(
+        --config.sampling.method=transport_velocity
+        --config.sampling.transport_velocity_cfg_space=velocity
+        --config.sampling.transport_velocity_time_map=flipped_linear
+        --config.sampling.transport_velocity_eps=1e-3
+        --config.sampling.transport_velocity_scale_input=True
+      )
+      ;;
     *)
       echo "Unknown mode: $mode" >&2
       exit 4
@@ -130,7 +148,7 @@ run_eval() {
 
 for mode in "${MODES[@]}"; do
   case "$mode" in
-    p_sample|native_velocity_analytic|native_velocity_data)
+    p_sample|native_velocity_analytic|native_velocity_data|transport_velocity_aligned|transport_velocity_noalign|transport_velocity_flipped_linear)
       ;;
     *)
       echo "Invalid mode in MODES: $mode" >&2
