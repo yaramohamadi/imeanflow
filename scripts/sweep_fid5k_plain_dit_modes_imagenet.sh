@@ -38,7 +38,9 @@ fi
 
 mkdir -p "$WORKDIR_ROOT"
 SUMMARY_CSV="$WORKDIR_ROOT/summary.csv"
-echo "mode,num_steps,fid,is,eval_metrics_csv,workdir,checkpoint_path,fid_cache_ref" > "$SUMMARY_CSV"
+if [[ ! -f "$SUMMARY_CSV" ]]; then
+  echo "mode,num_steps,fid,is,eval_metrics_csv,workdir,checkpoint_path,fid_cache_ref" > "$SUMMARY_CSV"
+fi
 
 run_eval() {
   local mode="$1"
