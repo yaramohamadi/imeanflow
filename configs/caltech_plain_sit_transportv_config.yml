@@ -50,12 +50,9 @@ training:
     fid_per_step: 0
     fid_schedule:
         - from_step: 0
-          until_step: 20000
-          every_steps: 5000
-        - from_step: 20000
           every_steps: 2500
     metric_num_steps:
-        - 4
+        - 16
     preview_guidance_scales:
         - 1.0
         - 1.5
@@ -64,6 +61,7 @@ training:
         - 1
         - 2
         - 4
+        - 16
     grad_accum_steps: 1
     save_best_fid_only: True
     best_fid_checkpoint_dir: best_fid
@@ -81,7 +79,7 @@ fid:
     sample_device_batch_size: 32
     sample_log_every: 1
     sample_first_device_only: False
-    num_samples: 10000
+    num_samples: 5000
     cache_ref: '/home/ens/AT74470/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
     num_images_to_log: 16
 
@@ -91,7 +89,7 @@ fd_dino:
     cache_ref: '/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz'
 
 sampling:
-    num_steps: 4
+    num_steps: 16
     method: heun
     plain_sit_native_prediction_sampling: False
     flip_time: False

@@ -76,7 +76,6 @@ def create_train_state(
 ):
     rng, rng_init = random.split(rng)
 
-    del config
     _, params = initialized(rng_init, image_size, model, model_label=model_label)
     use_ema = config.training.get("use_ema", True)
     ema_params = deepcopy(params)
