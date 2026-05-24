@@ -315,10 +315,10 @@ def _sample_with_transport_velocity(
     time_map = str(
         config.sampling.get("transport_velocity_time_map", "noise_ratio")
     ).lower()
-    if time_map not in {"noise_ratio", "flipped_linear", "linear"}:
+    if time_map not in {"noise_ratio", "flipped_linear", "linear", "diff2flow"}:
         raise ValueError(
             "transport_velocity_time_map must be 'noise_ratio', "
-            f"'flipped_linear', or 'linear', got {time_map!r}."
+            f"'flipped_linear', 'linear', or 'diff2flow', got {time_map!r}."
         )
 
     scale_input = bool(config.sampling.get("transport_velocity_scale_input", True))
@@ -328,6 +328,12 @@ def _sample_with_transport_velocity(
         jnp.maximum(ddpm_alpha, eps)
     )
     ddpm_time_scale = jnp.asarray(max(diffusion_steps - 1, 1), dtype=jnp.float32)
+    ddpm_indices = jnp.arange(diffusion_steps, dtype=jnp.float32)
+    diff2flow_t_fm = ddpm_alpha / jnp.maximum(ddpm_alpha + ddpm_sigma, eps)
+    diff2flow_t_fm_asc = diff2flow_t_fm[::-1]
+    ddpm_indices_asc = ddpm_indices[::-1]
+    ddpm_alpha_asc = ddpm_alpha[::-1]
+    ddpm_sigma_asc = ddpm_sigma[::-1]
 
     def mapped_ddpm_timestep(t_linear, alpha_t, sigma_t):
         if time_map == "noise_ratio":
@@ -347,6 +353,21 @@ def _sample_with_transport_velocity(
             diffusion_steps - 1,
         )
 
+    def diff2flow_alignment(x_t, t_linear):
+        t_query = jnp.clip(
+            t_linear,
+            diff2flow_t_fm_asc[0],
+            diff2flow_t_fm_asc[-1],
+        )
+        tau_model = jnp.interp(t_query, diff2flow_t_fm_asc, ddpm_indices_asc)
+        alpha_tau = jnp.interp(t_query, diff2flow_t_fm_asc, ddpm_alpha_asc)
+        sigma_tau = jnp.interp(t_query, diff2flow_t_fm_asc, ddpm_sigma_asc)
+        # Diff2Flow aligns both the DDPM time and the DDPM state before the
+        # source epsilon model is queried, rather than only matching a timestep.
+        model_x = _broadcast_schedule_value(alpha_tau + sigma_tau, x_t) * x_t
+        model_t = jnp.full((x_t.shape[0],), tau_model, dtype=jnp.float32)
+        return model_x, model_t, alpha_tau, sigma_tau
+
     def prepare_model_input(x_t, alpha_t, sigma_t):
         if not scale_input:
             return x_t
@@ -365,9 +386,18 @@ def _sample_with_transport_velocity(
         alpha_t = t_cur
         sigma_t = 1.0 - t_cur
         dt = t_next - t_cur
-        model_x = prepare_model_input(x_t, alpha_t, sigma_t)
-        model_t_idx = mapped_ddpm_timestep(t_cur, alpha_t, sigma_t)
-        model_t = jnp.full((x_t.shape[0],), model_t_idx, dtype=jnp.int32)
+        if time_map == "diff2flow":
+            model_x, model_t, velocity_alpha, velocity_sigma = diff2flow_alignment(
+                x_t, t_cur
+            )
+            velocity_x = model_x
+        else:
+            model_x = prepare_model_input(x_t, alpha_t, sigma_t)
+            model_t_idx = mapped_ddpm_timestep(t_cur, alpha_t, sigma_t)
+            model_t = jnp.full((x_t.shape[0],), model_t_idx, dtype=jnp.int32)
+            velocity_x = x_t
+            velocity_alpha = alpha_t
+            velocity_sigma = sigma_t
 
         if cfg_space == "velocity":
             cond_eps, uncond_eps = _conditional_unconditional_eps_predictions(
@@ -378,10 +408,16 @@ def _sample_with_transport_velocity(
                 labels,
             )
             cond_v = eps_to_linear_velocity(
-                x_t, cond_eps.astype(jnp.float32), alpha_t, sigma_t
+                velocity_x,
+                cond_eps.astype(jnp.float32),
+                velocity_alpha,
+                velocity_sigma,
             )
             uncond_v = eps_to_linear_velocity(
-                x_t, uncond_eps.astype(jnp.float32), alpha_t, sigma_t
+                velocity_x,
+                uncond_eps.astype(jnp.float32),
+                velocity_alpha,
+                velocity_sigma,
             )
             v_hat = uncond_v + cfg_scale.astype(jnp.float32) * (cond_v - uncond_v)
         else:
@@ -393,7 +429,12 @@ def _sample_with_transport_velocity(
                 labels,
                 cfg_scale,
             ).astype(jnp.float32)
-            v_hat = eps_to_linear_velocity(x_t, eps_hat, alpha_t, sigma_t)
+            v_hat = eps_to_linear_velocity(
+                velocity_x,
+                eps_hat,
+                velocity_alpha,
+                velocity_sigma,
+            )
 
         return x_t + _broadcast_schedule_value(dt, x_t) * v_hat
 

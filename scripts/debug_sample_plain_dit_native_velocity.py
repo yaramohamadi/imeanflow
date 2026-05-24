@@ -109,8 +109,12 @@ def parse_args():
     parser.add_argument(
         "--transport-velocity-time-map",
         default="noise_ratio",
-        choices=("noise_ratio", "flipped_linear", "linear"),
-        help="How linear transport time is mapped to the source DiT DDPM timestep.",
+        choices=("noise_ratio", "flipped_linear", "linear", "diff2flow"),
+        help=(
+            "How linear transport time is mapped to the source DiT DDPM timestep. "
+            "'diff2flow' also remaps the FM state into the matched DDPM state "
+            "before calling the source epsilon model."
+        ),
     )
     parser.add_argument(
         "--transport-velocity-eps",

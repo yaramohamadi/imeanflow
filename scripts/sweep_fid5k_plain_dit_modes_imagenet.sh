@@ -80,6 +80,15 @@ run_eval() {
         --config.sampling.transport_velocity_scale_input=True
       )
       ;;
+    transport_velocity_diff2flow)
+      extra_args=(
+        --config.sampling.method=transport_velocity
+        --config.sampling.transport_velocity_cfg_space=velocity
+        --config.sampling.transport_velocity_time_map=diff2flow
+        --config.sampling.transport_velocity_eps=1e-3
+        --config.sampling.transport_velocity_scale_input=True
+      )
+      ;;
     transport_velocity_noalign|transport_velocity_flipped_linear)
       extra_args=(
         --config.sampling.method=transport_velocity
@@ -148,7 +157,7 @@ run_eval() {
 
 for mode in "${MODES[@]}"; do
   case "$mode" in
-    p_sample|native_velocity_analytic|native_velocity_data|transport_velocity_aligned|transport_velocity_noalign|transport_velocity_flipped_linear)
+    p_sample|native_velocity_analytic|native_velocity_data|transport_velocity_aligned|transport_velocity_diff2flow|transport_velocity_noalign|transport_velocity_flipped_linear)
       ;;
     *)
       echo "Invalid mode in MODES: $mode" >&2
