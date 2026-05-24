@@ -234,6 +234,29 @@ def _build_plain_sit(config, *, eval_mode=False):
         output_prediction_space=str(
             config.model.get("sit_output_prediction_space", "velocity")
         ),
+        velocity_map_mode=str(
+            config.model.get("sit_velocity_map_mode", "transport")
+        ),
+        input_alignment_mode=str(
+            config.model.get("sit_input_alignment_mode", "none")
+        ),
+        native_velocity_derivative_mode=str(
+            config.model.get(
+                "sit_native_velocity_derivative_mode", "finite_difference"
+            )
+        ),
+        native_diffusion_steps=int(
+            config.model.get(
+                "sit_native_diffusion_steps",
+                config.diffusion.get("diffusion_steps", 1000),
+            )
+        ),
+        native_noise_schedule=str(
+            config.model.get(
+                "sit_native_noise_schedule",
+                config.diffusion.get("noise_schedule", "linear"),
+            )
+        ),
         wrapper_eps=float(config.model.get("sit_wrapper_eps", 1e-6)),
         wrapped_loss_weight=str(config.model.get("sit_wrapped_loss_weight", "none")),
         model_time_scale=float(config.model.get("sit_model_time_scale", 1.0)),

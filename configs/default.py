@@ -126,6 +126,11 @@ def get_config():
     model.split_consistency_boundary_epsilon_min = 1e-6
     model.output_prediction_space = "epsilon"
     model.sit_output_prediction_space = "velocity"
+    model.sit_velocity_map_mode = "transport"
+    model.sit_input_alignment_mode = "none"
+    model.sit_native_velocity_derivative_mode = "finite_difference"
+    model.sit_native_diffusion_steps = 1000
+    model.sit_native_noise_schedule = "linear"
     model.sit_wrapper_eps = 1e-6
     model.sit_wrapped_loss_weight = "none"
     model.sit_model_time_scale = 1.0
