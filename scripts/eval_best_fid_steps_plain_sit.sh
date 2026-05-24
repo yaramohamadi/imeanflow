@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
 Usage: CONFIG_MODE=plain_sit_finetune bash scripts/eval_best_fid_steps_plain_sit.sh <best_fid_dir_or_run_dir> [num_steps...] [-- extra config overrides...]
@@ -40,7 +43,11 @@ if [[ ${#STEPS[@]} -eq 0 ]]; then
 fi
 
 CONFIG_MODE="${CONFIG_MODE:-plain_sit_finetune}"
-PYTHON="${PYTHON:-python3}"
+DEFAULT_PYTHON="${REPO_ROOT}/.venv/bin/python"
+if [[ ! -x "${DEFAULT_PYTHON}" ]]; then
+  DEFAULT_PYTHON="python3"
+fi
+PYTHON="${PYTHON:-${DEFAULT_PYTHON}}"
 USE_WANDB="${USE_WANDB:-True}"
 WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-}"
 
@@ -94,10 +101,10 @@ for NUM_STEPS in "${STEPS[@]}"; do
     XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
     XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false} \
     PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
-    $PYTHON \
-      main_sit.py \
+    "$PYTHON" \
+      "${REPO_ROOT}/main_sit.py" \
       --workdir="$EVAL_WORKDIR" \
-      --config=configs/load_config.py:${CONFIG_MODE} \
+      --config="${REPO_ROOT}/configs/load_config.py:${CONFIG_MODE}" \
       "${EXTRA_CONFIG_ARGS[@]}" \
       --config.eval_only=True \
       --config.partial_load=False \

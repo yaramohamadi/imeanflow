@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
 Usage: bash scripts/run_caltech_plain_sit_ditinit_taylor.sh <run_label> [extra main_sit.py args...]
@@ -21,9 +24,13 @@ shift
 EXTRA_ARGS=("$@")
 
 CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_ditinit}"
-PYTHON="${PYTHON:-.venv/bin/python}"
+DEFAULT_PYTHON="${REPO_ROOT}/.venv/bin/python"
+if [[ ! -x "${DEFAULT_PYTHON}" ]]; then
+  DEFAULT_PYTHON="python3"
+fi
+PYTHON="${PYTHON:-${DEFAULT_PYTHON}}"
 USE_WANDB="${USE_WANDB:-True}"
-LOG_DIR="${LOG_DIR:-files/logs}"
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/files/logs}"
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES_VALUE:-0,1}}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
@@ -51,9 +58,9 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
   XLA_FLAGS="${XLA_FLAGS_VALUE}" \
   XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}" \
   PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}" \
-  "${PYTHON}" main_sit.py \
+  "${PYTHON}" "${REPO_ROOT}/main_sit.py" \
     --workdir="${WORKDIR}" \
-    --config="configs/load_config.py:${CONFIG_MODE}" \
+    --config="${REPO_ROOT}/configs/load_config.py:${CONFIG_MODE}" \
     --config.logging.use_wandb="${USE_WANDB}" \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${WORKDIR}/output.log"
@@ -64,5 +71,5 @@ if [[ "${RUN_FINAL_BEST_FID_EVAL}" == "True" ]]; then
     PYTHON="${PYTHON}" \
     USE_WANDB="${FINAL_EVAL_USE_WANDB}" \
     WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-caltech101_plain_sit_ditinit_${RUN_LABEL}}" \
-    bash scripts/eval_best_fid_steps_plain_sit.sh "${WORKDIR}" "${FINAL_EVAL_STEP_ARRAY[@]}"
+    bash "${SCRIPT_DIR}/eval_best_fid_steps_plain_sit.sh" "${WORKDIR}" "${FINAL_EVAL_STEP_ARRAY[@]}"
 fi

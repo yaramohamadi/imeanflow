@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
 Usage: bash scripts/run_caltech_plain_sit_ddpmv_taylor.sh <run_label> [extra main_sit.py args...]
@@ -22,4 +24,4 @@ shift
 export CONFIG_MODE="${CONFIG_MODE:-caltech_plain_sit_ddpmv}"
 export WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-caltech101_plain_sit_ddpmv_${RUN_LABEL}}"
 
-bash scripts/run_caltech_plain_sit_ditinit_taylor.sh "$RUN_LABEL" "$@"
+bash "${SCRIPT_DIR}/run_caltech_plain_sit_ditinit_taylor.sh" "$RUN_LABEL" "$@"
