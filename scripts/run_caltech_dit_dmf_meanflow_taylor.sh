@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
 Usage: DATASET_NAME=caltech101 ENABLE_DOGFIT=True VC_TARGET_SOURCE=ema bash scripts/run_caltech_dit_dmf_meanflow_taylor.sh <run_label> [extra main.py args...]
@@ -13,9 +16,9 @@ Examples:
 This script:
   1) runs the DiT_DMF meanflow path locally on Taylor
   2) keeps the SiT_DMF-style single-head encoder/decoder conditioning structure
-  3) optionally enables DogFit, with plain-DiT noise predictions wrapped into velocity for v_u
+  3) optionally enables DogFit, or runs a no-DogFit target-side DiT adaptation config
   4) lets DogFit choose whether v_c comes from the EMA or online target model
-  5) runs final best_fid evaluation at 1, 2, and 250 steps on the online model only
+  5) runs final best_fid evaluation on the online model only
 EOF
   exit 1
 fi
@@ -25,9 +28,13 @@ shift
 EXTRA_ARGS=("$@")
 
 CONFIG_MODE="${CONFIG_MODE:-caltech_dit_dmf_dogfit_meanflow}"
-PYTHON="${PYTHON:-.venv/bin/python}"
+DEFAULT_PYTHON="${REPO_ROOT}/.venv/bin/python"
+if [[ ! -x "${DEFAULT_PYTHON}" ]]; then
+  DEFAULT_PYTHON="python3"
+fi
+PYTHON="${PYTHON:-${DEFAULT_PYTHON}}"
 USE_WANDB="${USE_WANDB:-True}"
-LOG_DIR="${LOG_DIR:-files/logs}"
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/files/logs}"
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES_VALUE:-0,1}}"
 DATASET_NAME="${DATASET_NAME:-caltech101}"
 ENABLE_DOGFIT="${ENABLE_DOGFIT:-True}"
@@ -36,7 +43,7 @@ SOURCE_VELOCITY_MAP_MODE="${SOURCE_VELOCITY_MAP_MODE:-transport}"
 SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE="${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE:-finite_difference}"
 PYTHONUNBUFFERED_VALUE="${PYTHONUNBUFFERED:-1}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
-FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 16 250}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-False}"
 XLA_FLAGS_VALUE="${XLA_FLAGS_VALUE:---xla_gpu_strict_conv_algorithm_picker=false --xla_gpu_enable_command_buffer=}"
 
@@ -157,9 +164,9 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
   XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}" \
   PYTHONUNBUFFERED="${PYTHONUNBUFFERED_VALUE}" \
   PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}" \
-  "${PYTHON}" main.py \
+  "${PYTHON}" "${REPO_ROOT}/main.py" \
     --workdir="${WORKDIR}" \
-    --config="configs/load_config.py:${CONFIG_MODE}" \
+    --config="${REPO_ROOT}/configs/load_config.py:${CONFIG_MODE}" \
     --config.dataset.root="${DATASET_ROOT}" \
     --config.dataset.num_classes="${DATASET_NUM_CLASSES}" \
     --config.dataset.num_classes_from_data="False" \
@@ -176,7 +183,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
     --config.training.fid_use_online_only="True" \
     --config.logging.use_wandb="${USE_WANDB}" \
     --config.logging.wandb_name="${JOBNAME}" \
-    --config.logging.wandb_notes="${DATASET_LABEL} DiT_DMF meanflow (${RUN_FLAVOR}, v_c=${VC_LABEL}, source velocity map=${SOURCE_VELOCITY_MAP_MODE}, source native derivative=${SOURCE_NATIVE_VELOCITY_DERIVATIVE_MODE}, plain-DiT noise->velocity source only when DogFit is enabled)" \
     "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "${WORKDIR}/output.log"
 
@@ -195,6 +201,6 @@ if [[ "${RUN_FINAL_BEST_FID_EVAL}" == "True" ]]; then
     FID_CACHE_REF="${FID_CACHE_REF}" \
     FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF}" \
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}" \
-    bash scripts/eval_best_fid_steps.sh "${WORKDIR}" "${FINAL_EVAL_STEP_ARRAY[@]}"
+    bash "${SCRIPT_DIR}/eval_best_fid_steps.sh" "${WORKDIR}" "${FINAL_EVAL_STEP_ARRAY[@]}"
   echo "=== FINAL BEST_FID EVAL DONE ===" | tee -a "${WORKDIR}/output.log"
 fi

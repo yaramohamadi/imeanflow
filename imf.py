@@ -87,6 +87,15 @@ class iMeanFlow(nn.Module):
     source_model_time_flip: bool = False
     source_native_diffusion_steps: int = 1000
     source_native_beta_schedule: str = "linear"
+    target_output_prediction_space: str = "velocity"
+    target_velocity_map_mode: str = "transport"
+    target_input_alignment_mode: str = "none"
+    target_native_velocity_derivative_mode: str = "finite_difference"
+    target_native_diffusion_steps: int = 1000
+    target_native_beta_schedule: str = "linear"
+    target_wrapper_eps: float = 1e-6
+    target_model_time_scale: float = 1.0
+    target_model_time_flip: bool = False
     use_auxiliary_v_head: bool = True
     use_context_guidance_conditioning: bool = False
     use_adaln_guidance_scale_conditioning: bool = False
@@ -126,6 +135,7 @@ class iMeanFlow(nn.Module):
         """
         Setup improved MeanFlow model.
         """
+        self._validate_target_wrapper_configuration()
         net_fn = getattr(imfDiT, self.model_str)
         net_kwargs = dict(
             name="net",
@@ -147,6 +157,36 @@ class iMeanFlow(nn.Module):
             )
             net_kwargs["time_conditioning_mode"] = self.time_conditioning_mode
         self.net: imfDiT.imfDiT = net_fn(**net_kwargs)
+        if self._needs_target_native_diffusion_schedule():
+            native_betas = get_named_beta_schedule(
+                self.target_native_beta_schedule,
+                self.target_native_diffusion_steps,
+            )
+            native_alphas = 1.0 - native_betas
+            native_alphas_cumprod = jnp.asarray(
+                native_alphas.cumprod(), dtype=jnp.float32
+            )
+            self.target_native_alpha = jnp.sqrt(native_alphas_cumprod)
+            self.target_native_sigma = jnp.sqrt(
+                jnp.maximum(1.0 - native_alphas_cumprod, 1e-12)
+            )
+            self.target_native_time_scale = jnp.asarray(
+                max(self.target_native_diffusion_steps - 1, 1), dtype=jnp.float32
+            )
+            self.target_native_tau = (
+                jnp.arange(self.target_native_diffusion_steps, dtype=jnp.float32)
+                / self.target_native_time_scale
+            )
+            diff2flow_t_fm = self.target_native_alpha / jnp.maximum(
+                self.target_native_alpha + self.target_native_sigma,
+                self.target_wrapper_eps,
+            )
+            self.target_diff2flow_t_fm_asc = diff2flow_t_fm[::-1]
+            self.target_native_indices_asc = jnp.arange(
+                self.target_native_diffusion_steps, dtype=jnp.float32
+            )[::-1]
+            self.target_native_alpha_asc = self.target_native_alpha[::-1]
+            self.target_native_sigma_asc = self.target_native_sigma[::-1]
         if (
             self.use_dogfit
             or self._uses_src_reg_training_mode()
@@ -276,6 +316,93 @@ class iMeanFlow(nn.Module):
             and not self._uses_sit_adaln_guidance_scale_conditioning()
         )
 
+    def _uses_target_side_dit_adaptation(self):
+        return (
+            self.target_output_prediction_space != "velocity"
+            or self.target_input_alignment_mode != "none"
+            or self.target_model_time_flip
+            or float(self.target_model_time_scale) != 1.0
+        )
+
+    def _needs_target_native_diffusion_schedule(self):
+        return self.target_output_prediction_space == "noise" and (
+            self.target_velocity_map_mode == "dit_native"
+            or self.target_input_alignment_mode == "diff2flow"
+        )
+
+    def _validate_target_wrapper_configuration(self):
+        if self.target_output_prediction_space not in {"velocity", "data", "noise"}:
+            raise ValueError(
+                "iMeanFlow target_output_prediction_space must be one of "
+                "['velocity', 'data', 'noise'], got "
+                f"{self.target_output_prediction_space!r}."
+            )
+        if self.target_velocity_map_mode not in {"transport", "dit_native"}:
+            raise ValueError(
+                "iMeanFlow target_velocity_map_mode must be one of "
+                "['transport', 'dit_native'], got "
+                f"{self.target_velocity_map_mode!r}."
+            )
+        if self.target_input_alignment_mode not in {"none", "diff2flow"}:
+            raise ValueError(
+                "iMeanFlow target_input_alignment_mode must be one of "
+                "['none', 'diff2flow'], got "
+                f"{self.target_input_alignment_mode!r}."
+            )
+        if self.target_native_velocity_derivative_mode not in {
+            "finite_difference",
+            "analytic",
+        }:
+            raise ValueError(
+                "iMeanFlow target_native_velocity_derivative_mode must be one of "
+                "['finite_difference', 'analytic'], got "
+                f"{self.target_native_velocity_derivative_mode!r}."
+            )
+        if self._uses_target_side_dit_adaptation() and not self._uses_dmf_single_head_backbone():
+            raise ValueError(
+                "Target-side DiT adaptation is currently only supported for "
+                f"single-head DMF backbones, got model_str={self.model_str!r}."
+            )
+        if self.target_output_prediction_space == "velocity":
+            if self.target_velocity_map_mode != "transport":
+                raise ValueError(
+                    "Wrapped target_velocity_map_mode only applies to native "
+                    "noise/data outputs, got "
+                    f"target_velocity_map_mode={self.target_velocity_map_mode!r}."
+                )
+            if self.target_input_alignment_mode != "none":
+                raise ValueError(
+                    "Target-side input alignment requires a native noise wrapper, got "
+                    f"target_output_prediction_space={self.target_output_prediction_space!r}."
+                )
+        if (
+            self.target_output_prediction_space == "data"
+            and self.target_velocity_map_mode != "transport"
+        ):
+            raise ValueError(
+                "Target-side data outputs only support "
+                "target_velocity_map_mode='transport', got "
+                f"{self.target_velocity_map_mode!r}."
+            )
+        if self.target_input_alignment_mode == "diff2flow":
+            if self.target_output_prediction_space != "noise":
+                raise ValueError(
+                    "Target-side Diff2Flow alignment currently requires "
+                    "target_output_prediction_space='noise', got "
+                    f"{self.target_output_prediction_space!r}."
+                )
+            if self.target_velocity_map_mode != "transport":
+                raise ValueError(
+                    "Target-side Diff2Flow alignment currently requires "
+                    "target_velocity_map_mode='transport', got "
+                    f"{self.target_velocity_map_mode!r}."
+                )
+            if self.target_model_time_flip or float(self.target_model_time_scale) != 1.0:
+                raise ValueError(
+                    "Target-side Diff2Flow alignment already defines the DiT time map; "
+                    "leave target_model_time_flip=False and target_model_time_scale=1.0."
+                )
+
     def _resolve_source_params(self, source_params):
         if source_params is None:
             raise ValueError("source_params must be provided for source-model calls.")
@@ -295,6 +422,231 @@ class iMeanFlow(nn.Module):
         if value.ndim == 1:
             return value.reshape((bz,))
         return value.reshape((bz, -1))[:, 0]
+
+    def _broadcast_scalar(self, value, ref, dtype=None):
+        value = jnp.asarray(value, dtype=dtype)
+        return value.reshape((value.shape[0],) + (1,) * (ref.ndim - 1))
+
+    def _map_target_model_time(self, t):
+        t_model = t.astype(self.dtype)
+        if self.target_model_time_flip:
+            t_model = 1.0 - t_model
+        return t_model * jnp.asarray(self.target_model_time_scale, dtype=self.dtype)
+
+    def _target_diff2flow_schedule_values(self, t):
+        t_query = jnp.clip(
+            t.astype(jnp.float32),
+            self.target_diff2flow_t_fm_asc[0],
+            self.target_diff2flow_t_fm_asc[-1],
+        )
+        tau_model = jnp.interp(
+            t_query,
+            self.target_diff2flow_t_fm_asc,
+            self.target_native_indices_asc,
+        )
+        alpha_tau = jnp.interp(
+            t_query,
+            self.target_diff2flow_t_fm_asc,
+            self.target_native_alpha_asc,
+        )
+        sigma_tau = jnp.interp(
+            t_query,
+            self.target_diff2flow_t_fm_asc,
+            self.target_native_sigma_asc,
+        )
+        return t_query, tau_model, alpha_tau, sigma_tau
+
+    def _prepare_target_prediction_context(self, x, t, r):
+        bz = x.shape[0]
+        x = x.astype(self.dtype)
+        t_scalar = self._batch_scalar(t, bz, dtype=self.dtype)
+        r_scalar = self._batch_scalar(r, bz, dtype=self.dtype)
+        context = {
+            "model_x": x,
+            "model_t": self._map_target_model_time(t_scalar),
+            "model_r": self._map_target_model_time(r_scalar),
+            "velocity_x": x,
+            "velocity_alpha": None,
+            "velocity_sigma": None,
+        }
+        if self.target_input_alignment_mode != "diff2flow":
+            return context
+
+        _, t_tau_model, alpha_tau, sigma_tau = self._target_diff2flow_schedule_values(
+            t_scalar
+        )
+        _, r_tau_model, _, _ = self._target_diff2flow_schedule_values(r_scalar)
+        velocity_x = self._broadcast_scalar(alpha_tau + sigma_tau, x, dtype=jnp.float32) * x.astype(
+            jnp.float32
+        )
+        context["model_x"] = velocity_x.astype(self.dtype)
+        context["model_t"] = t_tau_model.astype(self.dtype)
+        context["model_r"] = r_tau_model.astype(self.dtype)
+        context["velocity_x"] = velocity_x.astype(self.dtype)
+        context["velocity_alpha"] = alpha_tau.astype(jnp.float32)
+        context["velocity_sigma"] = sigma_tau.astype(jnp.float32)
+        return context
+
+    def _run_target_backbone(self, x, t, r, y, omega, t_min, t_max):
+        bz = x.shape[0]
+        if self._uses_sit_guidance_context_conditioning():
+            return self.net(
+                x.astype(self.dtype),
+                t.reshape(bz).astype(self.dtype),
+                r.reshape(bz).astype(self.dtype),
+                y,
+                self._batch_scalar(omega, bz, dtype=self.dtype),
+                self._batch_scalar(t_min, bz, dtype=self.dtype),
+                self._batch_scalar(t_max, bz, dtype=self.dtype),
+            )
+        if self._uses_sit_adaln_guidance_scale_conditioning():
+            return self.net(
+                x.astype(self.dtype),
+                t.reshape(bz).astype(self.dtype),
+                r.reshape(bz).astype(self.dtype),
+                y,
+                self._batch_scalar(omega, bz, dtype=self.dtype),
+            )
+        return self.net(
+            x.astype(self.dtype),
+            t.reshape(bz).astype(self.dtype),
+            r.reshape(bz).astype(self.dtype),
+            y,
+        )
+
+    def _target_noise_to_data(self, raw_output, x_t, alpha_t, sigma_t):
+        alpha_b = self._broadcast_scalar(alpha_t, x_t, dtype=self.dtype)
+        sigma_b = self._broadcast_scalar(sigma_t, x_t, dtype=self.dtype)
+        return (x_t - sigma_b * raw_output) / jnp.maximum(alpha_b, self.target_wrapper_eps)
+
+    def _target_data_to_transport_velocity(self, raw_output, x_t, t):
+        t_scalar = self._batch_scalar(t, x_t.shape[0], dtype=jnp.float32)
+        alpha_t = self._broadcast_scalar(t_scalar, x_t, dtype=self.dtype)
+        sigma_t = self._broadcast_scalar(1.0 - t_scalar, x_t, dtype=self.dtype)
+        sigma_safe = jnp.where(
+            jnp.abs(sigma_t) > self.target_wrapper_eps,
+            sigma_t,
+            jnp.where(sigma_t >= 0.0, self.target_wrapper_eps, -self.target_wrapper_eps),
+        )
+        x0_hat = (x_t - alpha_t * raw_output) / sigma_safe
+        return raw_output - x0_hat
+
+    def _target_noise_to_transport_velocity(
+        self,
+        raw_output,
+        x_t,
+        t,
+        *,
+        alpha_override=None,
+        sigma_override=None,
+    ):
+        if alpha_override is not None and sigma_override is not None:
+            x1_hat = self._target_noise_to_data(
+                raw_output,
+                x_t,
+                alpha_override,
+                sigma_override,
+            )
+            return x1_hat - raw_output
+
+        t_scalar = self._batch_scalar(t, x_t.shape[0], dtype=jnp.float32)
+        x1_hat = self._target_noise_to_data(
+            raw_output,
+            x_t,
+            t_scalar,
+            1.0 - t_scalar,
+        )
+        return x1_hat - raw_output
+
+    def _target_noise_to_dit_native_velocity(self, raw_output, x_t, t):
+        diffusion_steps = max(int(self.target_native_diffusion_steps), 1)
+        time_scale = self.target_native_time_scale
+        model_time_scale = jnp.asarray(self.target_model_time_scale, dtype=jnp.float32)
+        tau = jnp.asarray(t, dtype=jnp.float32) * (model_time_scale / time_scale)
+        dtau_dt = model_time_scale / time_scale
+        if self.target_model_time_flip:
+            tau = 1.0 - tau
+            dtau_dt = -dtau_dt
+        tau = jnp.clip(tau, 0.0, 1.0)
+
+        schedule_pos = jnp.clip(
+            jnp.rint(tau * time_scale).astype(jnp.int32),
+            0,
+            diffusion_steps - 1,
+        )
+        alpha_scalar = self.target_native_alpha[schedule_pos]
+        sigma_scalar = self.target_native_sigma[schedule_pos]
+
+        if self.target_native_velocity_derivative_mode == "analytic":
+            if self.target_native_beta_schedule != "linear":
+                raise ValueError(
+                    "iMeanFlow analytic target native velocity derivatives currently "
+                    "require target_native_beta_schedule='linear', got "
+                    f"{self.target_native_beta_schedule!r}."
+                )
+            beta_start = jnp.asarray(1e-4, dtype=jnp.float32)
+            beta_end = jnp.asarray(2e-2, dtype=jnp.float32)
+            beta_tau = time_scale * (beta_start + (beta_end - beta_start) * tau)
+            sigma_safe = jnp.maximum(sigma_scalar, self.target_wrapper_eps)
+            alpha_dot_tau = -0.5 * beta_tau * alpha_scalar
+            sigma_dot_tau = 0.5 * beta_tau * (alpha_scalar ** 2) / sigma_safe
+        else:
+            next_pos = jnp.where(schedule_pos > 0, schedule_pos - 1, schedule_pos + 1)
+            alpha_next = self.target_native_alpha[next_pos]
+            sigma_next = self.target_native_sigma[next_pos]
+            tau_next = self.target_native_tau[next_pos]
+            tau_cur = self.target_native_tau[schedule_pos]
+            dt = tau_next - tau_cur
+            dt = jnp.where(
+                jnp.abs(dt) > self.target_wrapper_eps,
+                dt,
+                jnp.where(dt >= 0.0, self.target_wrapper_eps, -self.target_wrapper_eps),
+            )
+            alpha_dot_tau = (alpha_next - alpha_scalar) / dt
+            sigma_dot_tau = (sigma_next - sigma_scalar) / dt
+
+        alpha_b = self._broadcast_scalar(alpha_scalar, x_t, dtype=self.dtype)
+        sigma_b = self._broadcast_scalar(sigma_scalar, x_t, dtype=self.dtype)
+        alpha_dot_b = self._broadcast_scalar(alpha_dot_tau * dtau_dt, x_t, dtype=self.dtype)
+        sigma_dot_b = self._broadcast_scalar(sigma_dot_tau * dtau_dt, x_t, dtype=self.dtype)
+        x1_hat = (x_t - sigma_b * raw_output) / jnp.maximum(alpha_b, self.target_wrapper_eps)
+        return alpha_dot_b * x1_hat + sigma_dot_b * raw_output
+
+    def _compute_target_wrapped_velocity(self, raw_output, x_t, t, context=None):
+        if self.target_output_prediction_space == "velocity":
+            return raw_output
+        if self.target_output_prediction_space == "data":
+            return self._target_data_to_transport_velocity(raw_output, x_t, t)
+        if self.target_velocity_map_mode == "dit_native":
+            return self._target_noise_to_dit_native_velocity(raw_output, x_t, t)
+        if context is not None and context["velocity_alpha"] is not None:
+            return self._target_noise_to_transport_velocity(
+                raw_output,
+                context["velocity_x"].astype(self.dtype),
+                t,
+                alpha_override=context["velocity_alpha"],
+                sigma_override=context["velocity_sigma"],
+            )
+        return self._target_noise_to_transport_velocity(raw_output, x_t, t)
+
+    def _predict_target_velocity(self, x, t, r, omega, t_min, t_max, y):
+        context = self._prepare_target_prediction_context(x, t, r)
+        raw_output = self._run_target_backbone(
+            context["model_x"],
+            context["model_t"],
+            context["model_r"],
+            y,
+            omega,
+            t_min,
+            t_max,
+        )
+        t_scalar = self._batch_scalar(t, x.shape[0], dtype=self.dtype)
+        return self._compute_target_wrapped_velocity(
+            raw_output,
+            x.astype(self.dtype),
+            t_scalar,
+            context=context,
+        )
 
     def _source_predict_backbone_output(self, source_params, x, t, y):
         source_param_tree = self._resolve_source_params(source_params)
@@ -769,55 +1121,8 @@ class iMeanFlow(nn.Module):
             return u, v_boundary
 
         r = t - h
-        if self._uses_sit_guidance_context_conditioning():
-            u = self.net(
-                x,
-                t.reshape(bz),
-                r.reshape(bz),
-                y,
-                omega.reshape(bz),
-                t_min.reshape(bz),
-                t_max.reshape(bz),
-            )
-            v_boundary = self.net(
-                x,
-                t.reshape(bz),
-                t.reshape(bz),
-                y,
-                omega.reshape(bz),
-                t_min.reshape(bz),
-                t_max.reshape(bz),
-            )
-        elif self._uses_sit_adaln_guidance_scale_conditioning():
-            del t_min, t_max
-            u = self.net(
-                x,
-                t.reshape(bz),
-                r.reshape(bz),
-                y,
-                omega.reshape(bz),
-            )
-            v_boundary = self.net(
-                x,
-                t.reshape(bz),
-                t.reshape(bz),
-                y,
-                omega.reshape(bz),
-            )
-        else:
-            del omega, t_min, t_max
-            u = self.net(
-                x,
-                t.reshape(bz),
-                r.reshape(bz),
-                y,
-            )
-            v_boundary = self.net(
-                x,
-                t.reshape(bz),
-                t.reshape(bz),
-                y,
-            )
+        u = self._predict_target_velocity(x, t, r, omega, t_min, t_max, y)
+        v_boundary = self._predict_target_velocity(x, t, t, omega, t_min, t_max, y)
         return u, v_boundary
 
     def v_cond_fn(self, x, t, omega, y):

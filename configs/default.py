@@ -97,6 +97,15 @@ def get_config():
     model.source_model_time_flip = False
     model.source_native_diffusion_steps = 1000
     model.source_native_beta_schedule = "linear"
+    model.target_output_prediction_space = "velocity"
+    model.target_velocity_map_mode = "transport"
+    model.target_input_alignment_mode = "none"
+    model.target_native_velocity_derivative_mode = "finite_difference"
+    model.target_native_diffusion_steps = 1000
+    model.target_native_beta_schedule = "linear"
+    model.target_wrapper_eps = 1e-6
+    model.target_model_time_scale = 1.0
+    model.target_model_time_flip = False
     model.use_auxiliary_v_head = True
     model.use_context_guidance_conditioning = False
     model.use_adaln_guidance_scale_conditioning = False
