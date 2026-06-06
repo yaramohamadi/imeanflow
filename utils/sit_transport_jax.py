@@ -195,10 +195,17 @@ class Transport:
         if isinstance(self.path_sampler, VPCPlan):
             t1 = 1.0 - eps if (not sde or last_step_size == 0.0) else 1.0 - last_step_size
         elif isinstance(self.path_sampler, (ICPlan, GVPCPlan)) and (
-            self.model_type != ModelType.VELOCITY or sde
+            self.model_type != ModelType.VELOCITY or sde or eps > 0.0
         ):
-            t0 = eps if (diffusion_form == "SBDM" and sde) or self.model_type != ModelType.VELOCITY else 0.0
-            t1 = 1.0 - eps if (not sde or last_step_size == 0.0) else 1.0 - last_step_size
+            t0 = eps if (
+                (diffusion_form == "SBDM" and sde)
+                or self.model_type != ModelType.VELOCITY
+                or eps > 0.0
+            ) else 0.0
+            if self.model_type == ModelType.VELOCITY and not sde and eps > 0.0:
+                t1 = 1.0
+            else:
+                t1 = 1.0 - eps if (not sde or last_step_size == 0.0) else 1.0 - last_step_size
 
         if reverse:
             t0, t1 = 1.0 - t0, 1.0 - t1

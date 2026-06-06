@@ -154,7 +154,6 @@ def _create_sampling_transport(config):
         and output_prediction_space != "velocity"
     ):
         min_eps = max(float(config.model.get("sit_wrapper_eps", 1e-6)), 1e-3)
-        prediction = "noise"
         train_eps = min_eps if train_eps is None else max(float(train_eps), min_eps)
         sample_eps = min_eps if sample_eps is None else max(float(sample_eps), min_eps)
 

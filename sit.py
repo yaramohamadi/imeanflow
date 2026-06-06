@@ -193,7 +193,7 @@ class PlainSiT(nn.Module):
 
         return create_transport(
             path_type=self.path_type,
-            prediction="noise",
+            prediction=self.prediction,
             loss_weight=self.loss_weight,
             train_eps=max(train_eps, min_eps),
             sample_eps=max(sample_eps, min_eps),

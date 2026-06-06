@@ -43,10 +43,23 @@ def generate(variable, model, rng, n_sample, config,
         y = jax.random.randint(rng_sample, (n_sample,), 0, num_classes)
 
     meanflow_reverse_time = bool(config.sampling.get("meanflow_reverse_time", False))
+    target_transport_eps = 0.0
+    if (
+        model._uses_dmf_single_head_backbone()
+        and model.target_output_prediction_space == "noise"
+        and model.target_velocity_map_mode == "transport"
+    ):
+        default_eps = max(float(model.target_wrapper_eps), 1e-3)
+        target_transport_eps = float(
+            config.sampling.get(
+                "target_transport_velocity_eps",
+                config.sampling.get("transport_velocity_eps", default_eps),
+            )
+        )
     if model._uses_auxiliary_v_head() or meanflow_reverse_time:
-        t_steps = jnp.linspace(1.0, 0.0, num_steps + 1)
+        t_steps = jnp.linspace(1.0, target_transport_eps, num_steps + 1)
     else:
-        t_steps = jnp.linspace(0.0, 1.0, num_steps + 1)
+        t_steps = jnp.linspace(target_transport_eps, 1.0, num_steps + 1)
 
     def step_fn(i, x_i):
         return model.apply(variable, x_i, y, i, t_steps,
