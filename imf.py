@@ -708,17 +708,14 @@ class iMeanFlow(nn.Module):
         sigma_t, d_sigma_t = self.source_transport.path_sampler.compute_sigma_t(
             t_expanded
         )
-        sigma_safe = jnp.where(
-            jnp.abs(sigma_t) > self.source_wrapper_eps,
-            sigma_t,
-            jnp.where(sigma_t >= 0.0, self.source_wrapper_eps, -self.source_wrapper_eps),
-        )
-        x0_hat = raw_output
-        x1_hat = (x_t - sigma_t * x0_hat) / jnp.maximum(
+        # FIX: Convert noise (epsilon) to data (x1) using DDPM formula
+        # Previously incorrectly treated raw_output as x0 instead of epsilon
+        x1_hat = (x_t - sigma_t * raw_output) / jnp.maximum(
             alpha_t,
             self.source_wrapper_eps,
         )
-        return d_alpha_t * x1_hat + d_sigma_t * x0_hat
+        # Compute transport velocity: v = d_alpha/dt * x1 + d_sigma/dt * epsilon
+        return d_alpha_t * x1_hat + d_sigma_t * raw_output
 
     def _source_noise_to_velocity_dit_native(
         self, raw_output, x_t, t, *, derivative_mode

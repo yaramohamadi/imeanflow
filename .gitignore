@@ -1,6 +1,64 @@
+# Python
 **/__pycache__/
-./tmp
+**/*.pyc
+*.py[cod]
+*.class
+.Python
+*.so
+.venv/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
-.venv
-files
-files\ 
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.backup
+*.backup_*
+tmp/
+.tmp/
+
+# Data and results
+files/
+datasets/
+data/
+results/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.msgpack
+*.h5
+*.hdf5
+
+# Weights and models (keep config but not weights)
+*.safetensors
+weights/
+pretrained/
+
+
+# Wandb
+wandb/
+.wandb/
+
+# Generated files
+*.png
+*.jpg
+*.jpeg
+*.gif
+samples/
