@@ -51,7 +51,7 @@ training:
         - from_step: 0
           every_steps: 2500
     metric_num_steps:
-        - 16
+        - 4
     preview_guidance_scales:
         - 1.0
         - 1.5
@@ -87,7 +87,7 @@ fd_dino:
     cache_ref: '/home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz'
 
 sampling:
-    num_steps: 16
+    num_steps: 4
     method: heun
     plain_sit_native_prediction_sampling: False
     flip_time: False
@@ -101,7 +101,7 @@ logging:
     use_wandb: True
     wandb_name: 'CALTECH_SIT_plain_DiTinit_DDPM-v'
     wandb_project: 'sit_finetune'
-    wandb_entity: 'yara-mohammadi-bahram-1-ecole-superieure-de-technologie'
+    wandb_entity: ''
     wandb_tags:
         - caltech101
         - finetune

@@ -115,6 +115,61 @@ class MetricsTracker:
         return out
 
 
+def _derive_wandb_tags(config):
+    """Build readable, always-correct wandb tags from the live config.
+
+    Avoids the stale hardcoded YAML tag list (which said "caltech101" for every
+    dataset regardless of what was actually trained).
+    """
+    tags = []
+
+    dataset = str(config.dataset.get("name", "") or "").strip()
+    if dataset:
+        tags.append(dataset)
+
+    model_str = str(config.model.get("model_str", "") or "").strip()
+    is_jit = "jit" in model_str.lower()
+
+    # SiT uses an explicit velocity-map mode; JiT is transport-v by construction.
+    velocity_map = str(config.model.get("sit_velocity_map_mode", "") or "").strip()
+    if is_jit:
+        tags.append("transport-v")
+    elif velocity_map == "dit_native":
+        tags.append("ddpm-v")
+    elif velocity_map == "transport":
+        tags.append("transport-v")
+
+    if model_str:
+        tags.append(model_str)
+
+    if is_jit:
+        tags.append("plain-jit")
+        tags.append("jit-init")
+    else:
+        tags.append("plain-sit")
+        tags.append("dit-init")
+
+    try:
+        nfe = int(config.sampling.num_steps)
+        tags.append("nfe%d" % nfe)
+    except Exception:
+        pass
+
+    configured = list(config.logging.get("wandb_tags", []) or [])
+    stale = {"caltech101", "ddpm-v", "transport-v", "plain-sit", "dit-init", "plain-jit", "jit-init", "finetune"}
+    for t in configured:
+        if t not in stale:
+            tags.append(str(t))
+
+    seen = set()
+    out = []
+    for t in tags:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out or None
+
+
 class Writer:
     def __init__(self, config, workdir):
         if jax.process_index() != 0:
@@ -128,7 +183,7 @@ class Writer:
             "project": config.logging.wandb_project,
             "entity": config.logging.wandb_entity if config.logging.wandb_entity else None,
             "notes": config.logging.wandb_notes if config.logging.wandb_notes else None,
-            "tags": config.logging.wandb_tags if config.logging.wandb_tags else None,
+            "tags": _derive_wandb_tags(config),
             "dir": "/tmp",  # avoid writing to workdir
             "settings": wandb.Settings(_service_wait=60),
         }

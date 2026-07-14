@@ -43,6 +43,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
     --config="${REPO_ROOT}/configs/load_config.py:${CONFIG_MODE}" \
     --config.dataset.root="${HOME}/datasets/${DATASET}_processed_latents" \
     --config.dataset.name="${DATASET}" \
+    --config.dataset.num_workers=0 \
     --config.dataset.num_classes=${NUM_CLASSES} \
     --config.model.num_classes=${NUM_CLASSES} \
     --config.fid.cache_ref="${REPO_ROOT}/files/fid_stats/cub-200-2011_processed-fid_stats.npz" \
@@ -55,7 +56,12 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
 echo ""
 echo "Running final evaluation (1, 2, 4, 250 steps)..."
 CONFIG_MODE="${CONFIG_MODE}" PYTHON="${PYTHON}" USE_WANDB=False \
-  bash "${SCRIPT_DIR}/eval_best_fid_steps_plain_sit.sh" "${WORKDIR}" 1 2 4 250
+  bash "${SCRIPT_DIR}/eval_best_fid_steps_plain_sit.sh" "${WORKDIR}" 1 2 250 \
+    -- --config.dataset.num_classes=${NUM_CLASSES} \
+       --config.model.num_classes=${NUM_CLASSES} \
+       --config.dataset.name="${DATASET}" \
+       --config.fid.cache_ref="${REPO_ROOT}/files/fid_stats/cub-200-2011_processed-fid_stats.npz" \
+       --config.fd_dino.cache_ref="${REPO_ROOT}/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz"
 
 echo "=========================================="
 echo "Complete! Results: ${WORKDIR}"
