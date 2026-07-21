@@ -11,6 +11,7 @@ import optax
 from flax import serialization
 
 from afm import (
+    cosine_decay_weight,
     discriminator_adversarial_loss,
     generated_lower_endpoint,
     generator_adversarial_loss,
@@ -18,7 +19,12 @@ from afm import (
     sample_time_pairs,
 )
 from models.afm_discriminator import AFMDiscriminator
-from train_afm import AFMTrainState, _optional_imf_loss, validate_target_labels
+from train_afm import (
+    AFMTrainState,
+    _mask_discriminator_grads,
+    _optional_imf_loss,
+    validate_target_labels,
+)
 
 
 def _toy_discriminator(params, x, time, labels):
@@ -45,6 +51,17 @@ def test_generated_endpoint_shape_and_one_step_formula():
     endpoint = generated_lower_endpoint(x1, u, r, t)
     assert endpoint.shape == x1.shape
     np.testing.assert_allclose(endpoint, x1 - u)
+
+
+def test_cosine_ot_decay_matches_endpoints_and_midpoint():
+    start = float(cosine_decay_weight(0.2, 0.005, 0, 1_000_000))
+    midpoint = float(cosine_decay_weight(0.2, 0.005, 500_000, 1_000_000))
+    end = float(cosine_decay_weight(0.2, 0.005, 1_000_000, 1_000_000))
+    after_end = float(cosine_decay_weight(0.2, 0.005, 2_000_000, 1_000_000))
+    np.testing.assert_allclose(start, 0.2, rtol=1e-6)
+    np.testing.assert_allclose(midpoint, (0.2 + 0.005) / 2, rtol=1e-6)
+    np.testing.assert_allclose(end, 0.005, rtol=1e-6)
+    np.testing.assert_allclose(after_end, 0.005, rtol=1e-6)
 
 
 def test_discriminator_interface_is_endpoint_time_label_only():
@@ -104,6 +121,28 @@ def test_zero_imf_weight_does_not_call_jvp_branch():
 
     assert float(_optional_imf_loss(0.0, forbidden)) == 0.0
     assert float(_optional_imf_loss(1.0, lambda: jnp.asarray(3.0))) == 3.0
+
+
+def test_strict_discriminator_freeze_updates_only_norm_and_head():
+    class DummyDiscriminator:
+        depth = 4
+        aux_head_depth = 1
+
+    grads = {
+        "x_embedder": {"kernel": jnp.ones((2, 2))},
+        "y_embedder": {"embedding": jnp.ones((2, 2))},
+        "shared_blocks_0": {"kernel": jnp.ones((2, 2))},
+        "dis_norm": {"scale": jnp.ones((2,))},
+        "dis_head": {"kernel": jnp.ones((2, 1))},
+    }
+    masked = _mask_discriminator_grads(
+        grads, DummyDiscriminator(), -1, freeze_backbone=True
+    )
+    assert float(jnp.sum(masked["x_embedder"]["kernel"])) == 0.0
+    assert float(jnp.sum(masked["y_embedder"]["embedding"])) == 0.0
+    assert float(jnp.sum(masked["shared_blocks_0"]["kernel"])) == 0.0
+    assert float(jnp.sum(masked["dis_norm"]["scale"])) > 0.0
+    assert float(jnp.sum(masked["dis_head"]["kernel"])) > 0.0
 
 
 def test_label_range_validation():

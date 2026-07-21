@@ -198,6 +198,7 @@ def get_config():
     afm.adam_beta2 = 0.95
     afm.discriminator_init = "generator"
     afm.discriminator_trainable_blocks = -1
+    afm.freeze_discriminator_backbone = False
     afm.discriminator_width_multiplier = 1.0
     afm.discriminator_depth = 0
     afm.use_discriminator_augmentation = False

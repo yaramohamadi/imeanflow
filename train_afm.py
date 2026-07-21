@@ -16,6 +16,7 @@ from jax import lax, random
 import utils.input_pipeline as input_pipeline
 from afm import (
     augment_latents,
+    cosine_decay_weight,
     decayed_anchor_weight,
     discriminator_loss,
     finite_difference_penalty,
@@ -154,9 +155,11 @@ def _make_endpoint_terms(model, params, images, labels, rng, config):
     }
 
 
-def _mask_discriminator_grads(grads, discriminator, trainable_blocks):
-    """Train all D tensors or only its last N transformer blocks plus conditioning/head."""
-    if trainable_blocks < 0:
+def _mask_discriminator_grads(
+    grads, discriminator, trainable_blocks, freeze_backbone=False
+):
+    """Apply full, partial-block, or strict norm-and-head-only D training."""
+    if trainable_blocks < 0 and not freeze_backbone:
         return grads
     state = serialization.to_state_dict(grads)
     shared_depth = discriminator.depth - discriminator.aux_head_depth
@@ -175,6 +178,9 @@ def _mask_discriminator_grads(grads, discriminator, trainable_blocks):
         if isinstance(tree, dict):
             return {key: mask(value, path + (key,)) for key, value in tree.items()}
         top = path[0] if path else ""
+        if freeze_backbone:
+            train = top in {"dis_norm", "dis_head"}
+            return tree if train else jnp.zeros_like(tree)
         block_index = transformer_index(top)
         always_train = top in {
             "dis_norm",
@@ -271,7 +277,10 @@ def discriminator_train_step(
     if distributed:
         grads = lax.pmean(grads, "batch")
     grads = _mask_discriminator_grads(
-        grads, discriminator, int(config.afm.discriminator_trainable_blocks)
+        grads,
+        discriminator,
+        int(config.afm.discriminator_trainable_blocks),
+        freeze_backbone=bool(config.afm.freeze_discriminator_backbone),
     )
     grad_norm = optax.global_norm(grads)
     updates, dis_opt_state = dis_tx.update(
@@ -400,6 +409,12 @@ def generator_train_step(
         else:
             loss_anchor = jnp.asarray(0.0, images.dtype)
 
+        lambda_ot = cosine_decay_weight(
+            float(config.afm.lambda_ot),
+            float(config.afm.get("lambda_ot_end", config.afm.lambda_ot)),
+            state.step,
+            int(config.afm.get("lambda_ot_decay_steps", 0)),
+        )
         total, metrics = generator_loss(
             d_real,
             d_fake,
@@ -407,13 +422,14 @@ def generator_train_step(
             terms["x_t"],
             terms["interval"],
             lambda_adv=float(config.afm.lambda_adv),
-            lambda_ot=float(config.afm.lambda_ot),
+            lambda_ot=lambda_ot,
             lambda_imf=float(config.afm.lambda_imf),
             loss_imf=loss_imf,
             lambda_anchor=anchor_weight,
             loss_anchor=loss_anchor,
             interval_eps=float(config.afm.interval_eps),
         )
+        metrics["lambda_ot"] = lambda_ot
         return total, (metrics, terms)
 
     (loss_value, (metrics, terms)), grads = jax.value_and_grad(
@@ -821,7 +837,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
     start_epoch = _step_value(state, "epoch")
     log_for_0(
         "AFM schedule: warmup=%d, %dD:1G, max_batches=%d; "
-        "lambda_adv=%g lambda_imf=%g lambda_ot=%g lambda_anchor=%g "
+        "lambda_adv=%g lambda_imf=%g lambda_ot=%g->%g/%dsteps lambda_anchor=%g "
         "lambda_gp=%g lambda_cp=%g.",
         warmup,
         d_steps,
@@ -829,6 +845,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         float(config.afm.lambda_adv),
         float(config.afm.lambda_imf),
         float(config.afm.lambda_ot),
+        float(config.afm.get("lambda_ot_end", config.afm.lambda_ot)),
+        int(config.afm.get("lambda_ot_decay_steps", 0)),
         float(config.afm.lambda_anchor),
         float(config.afm.lambda_gp),
         float(config.afm.lambda_cp),

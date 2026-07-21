@@ -184,3 +184,16 @@ def decayed_anchor_weight(initial_weight, generator_step, decay_steps):
         return jnp.asarray(initial_weight, jnp.float32)
     fraction = jnp.maximum(1.0 - generator_step / float(decay_steps), 0.0)
     return jnp.asarray(initial_weight, jnp.float32) * fraction
+
+
+def cosine_decay_weight(initial_weight, final_weight, step, decay_steps):
+    """Cosine-decay a scalar weight, clamping to the final value."""
+    if decay_steps <= 0:
+        return jnp.asarray(final_weight, jnp.float32)
+    progress = jnp.clip(
+        jnp.asarray(step, jnp.float32) / float(decay_steps), 0.0, 1.0
+    )
+    cosine = 0.5 * (1.0 + jnp.cos(jnp.pi * progress))
+    return jnp.asarray(final_weight, jnp.float32) + (
+        jnp.asarray(initial_weight, jnp.float32) - final_weight
+    ) * cosine

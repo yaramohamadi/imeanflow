@@ -117,3 +117,11 @@ bash scripts/train_caltech_afm_posttrain.sh resumed \
   --config.afm.resume_from=/path/to/afm/run
 ```
 
+For the strict frozen-discriminator ablation, keep the copied backbone as a
+fixed feature extractor and update only `dis_norm` and `dis_head`:
+
+```bash
+TARGET_IMF_CHECKPOINT=/path/to/caltech/best_fid AFM_ABLATION=B \
+bash scripts/train_caltech_afm_posttrain.sh frozen_d \
+  --config.afm.freeze_discriminator_backbone=True
+```

@@ -934,6 +934,21 @@ class iMeanFlow(nn.Module):
         fm_mask = jnp.zeros((bz, 1, 1, 1), dtype=bool)
         return t, r, fm_mask
 
+    def sample_caimf_tr(self, bz, interval_eps=1e-3):
+        """Sample a non-degenerate interval for adversarial finite differences."""
+        if self._uses_sit_dmf_time_convention():
+            raise ValueError(
+                "Continuous adversarial iMF currently supports the standard "
+                "iMF-DiT time convention only."
+            )
+        t, r, _ = self.sample_split_tr(bz)
+        eps = jnp.asarray(interval_eps, dtype=self.dtype)
+        t = jnp.maximum(t, eps)
+        r = jnp.minimum(r, t - eps)
+        r = jnp.maximum(r, 0.0)
+        fm_mask = jnp.zeros((bz, 1, 1, 1), dtype=bool)
+        return t, r, fm_mask
+
     def sample_cfg_scale(self, bz, s_max=7.0):
         """
         Sample CFG scale omega from power distribution.
@@ -1134,6 +1149,12 @@ class iMeanFlow(nn.Module):
         u = self._predict_target_velocity(x, t, r, omega, t_min, t_max, y)
         v_boundary = self._predict_target_velocity(x, t, t, omega, t_min, t_max, y)
         return u, v_boundary
+
+    def afm_u_fn(self, x, r, t, omega, t_min, t_max, y):
+        """Direct average-velocity prediction for AFM, without JVP or v loss."""
+        if not self._uses_plain_imf_dit_backbone():
+            raise ValueError("AFM currently supports the plain imfDiT backbone only.")
+        return self.net.predict_u_only(x, t, t - r, omega, t_min, t_max, y)
 
     def v_cond_fn(self, x, t, omega, y):
         """
@@ -1697,6 +1718,155 @@ class iMeanFlow(nn.Module):
         }
 
         return loss, dict_losses
+
+    def forward_caimf_generator_terms(
+        self,
+        images,
+        labels,
+        source_params=None,
+        teacher_params=None,
+        current_step=None,
+        interval_eps=1e-3,
+    ):
+        """Compute iMF loss and finite-interval samples in one generator pass."""
+        if not self._uses_plain_imf_dit_backbone():
+            raise ValueError(
+                "Continuous adversarial iMF currently requires a plain imfDiT backbone."
+            )
+
+        x = images.astype(self.dtype)
+        bz = images.shape[0]
+        t, r, fm_mask = self.sample_caimf_tr(bz, interval_eps=interval_eps)
+
+        e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
+        z_t = (1.0 - t) * x + t * e
+        z_r = (1.0 - r) * x + r * e
+        v_t = e - x
+
+        t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
+        omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
+
+        v_g, v_c = self.guidance_fn(
+            v_t,
+            z_t,
+            t,
+            r,
+            labels,
+            fm_mask,
+            omega,
+            t_min,
+            t_max,
+            source_params=source_params,
+            teacher_params=teacher_params,
+            current_step=current_step,
+        )
+        labels, _ = self.cond_drop(v_t, v_g, labels)
+        v_g = jax.lax.stop_gradient(v_g)
+
+        def u_fn(z_t_value, t_value, r_value):
+            return self.u_fn(
+                z_t_value,
+                t_value,
+                t_value - r_value,
+                model_omega,
+                t_min,
+                t_max,
+                y=labels,
+            )
+
+        u, du_dt, v = jax.jvp(
+            u_fn,
+            (z_t, t, r),
+            (v_c, jnp.ones_like(t), jnp.zeros_like(t)),
+            has_aux=True,
+        )
+        interval = t - r
+        compound_velocity = u + interval * jax.lax.stop_gradient(du_dt)
+
+        def adaptive_weight(loss_value):
+            weight = (loss_value + self.norm_eps) ** self.norm_p
+            return loss_value / jax.lax.stop_gradient(weight)
+
+        loss_u_per_example = jnp.sum(
+            (compound_velocity - v_g) ** 2, axis=(1, 2, 3)
+        )
+        loss_v_per_example = jnp.sum((v - v_g) ** 2, axis=(1, 2, 3))
+        loss_imf = jnp.mean(
+            adaptive_weight(loss_u_per_example)
+            + adaptive_weight(loss_v_per_example)
+        )
+        xhat_r = z_t - interval * u
+
+        return {
+            "loss_imf": loss_imf,
+            "loss_u": jnp.mean((compound_velocity - v_g) ** 2),
+            "loss_v": jnp.mean((v - v_g) ** 2),
+            "u": u,
+            "x_t": z_t,
+            "x_r": z_r,
+            "xhat_r": xhat_r,
+            "t": t.reshape(bz),
+            "r": r.reshape(bz),
+            "labels": labels,
+        }
+
+    def forward_caimf_discriminator_samples(
+        self,
+        images,
+        labels,
+        current_step=None,
+        interval_eps=1e-3,
+    ):
+        """Generate real and reconstructed interval endpoints for a D update."""
+        if not self._uses_plain_imf_dit_backbone():
+            raise ValueError(
+                "Continuous adversarial iMF currently requires a plain imfDiT backbone."
+            )
+
+        x = images.astype(self.dtype)
+        bz = images.shape[0]
+        t, r, fm_mask = self.sample_caimf_tr(bz, interval_eps=interval_eps)
+        e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
+        z_t = (1.0 - t) * x + t * e
+        z_r = (1.0 - r) * x + r * e
+
+        t_min, t_max = self.sample_cfg_interval(bz, fm_mask)
+        omega = self._sample_guidance_scale(bz)
+        model_omega = (
+            self._effective_training_guidance_scale(
+                t, omega, t_min, t_max, current_step=current_step
+            )
+            if self._uses_sit_adaln_guidance_scale_conditioning()
+            else omega
+        )
+        # CAFM applies the same class dropout to discriminator and generator
+        # batches. This also teaches D the null-class condition used by G.
+        labels, _ = self.cond_drop(z_t, z_t, labels)
+        u, _ = self.u_fn(
+            z_t,
+            t,
+            t - r,
+            model_omega,
+            t_min,
+            t_max,
+            y=labels,
+        )
+        xhat_r = z_t - (t - r) * u
+        return {
+            "x_t": z_t,
+            "x_r": z_r,
+            "xhat_r": xhat_r,
+            "t": t.reshape(bz),
+            "r": r.reshape(bz),
+            "labels": labels,
+        }
 
     def forward_imf_jvp_free_src_reg(
         self,
