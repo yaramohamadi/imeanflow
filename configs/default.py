@@ -150,6 +150,64 @@ def get_config():
     model.norm_eps = 0.01
 
     # ------------------------------------------------------------
+    # Continuous adversarial iMF post-training
+    config.caimf = caimf = ml_collections.ConfigDict()
+    caimf.lambda_imf = 1.0
+    caimf.lambda_adv = 1.0
+    caimf.lambda_ot = 0.0
+    caimf.lambda_cp = 0.001
+    caimf.interval_eps = 0.001
+    caimf.gen_learning_rate = 0.00001
+    caimf.dis_learning_rate = 0.00001
+    caimf.adam_beta1 = 0.0
+    caimf.adam_beta2 = 0.95
+    caimf.weight_decay = 0.0
+    caimf.discriminator_warmup_batches = 10000
+    caimf.discriminator_steps_per_cycle = 16
+    caimf.discriminator_updates = True
+    caimf.freeze_discriminator_backbone = False
+    caimf.load_generator_ema = False
+    caimf.max_posttrain_batches = 30000
+
+    # ------------------------------------------------------------
+    # Discrete adversarial flow model (AFM) target post-training
+    config.afm = afm = ml_collections.ConfigDict()
+    afm.ablation = "afm_only"
+    afm.lambda_adv = 1.0
+    afm.lambda_imf = 0.0
+    afm.lambda_ot = 0.0
+    afm.lambda_anchor = 0.0
+    afm.anchor_decay_steps = 30000
+    afm.lambda_gp = 0.0
+    afm.lambda_cp = 0.01
+    afm.fd_epsilon = 0.01
+    afm.gp_batch_fraction = 0.25
+    afm.interval_eps = 0.001
+    afm.min_interval = 0.05
+    afm.p_r_zero = 0.25
+    afm.discriminator_warmup_steps = 5000
+    afm.d_steps_per_g_step = 4
+    afm.discriminator_updates = True
+    afm.generator_learning_rate = 0.00001
+    afm.discriminator_learning_rate = 0.00001
+    afm.generator_lr_warmup_steps = 100
+    afm.discriminator_lr_warmup_steps = 100
+    afm.generator_weight_decay = 0.0
+    afm.discriminator_weight_decay = 0.0
+    afm.adam_beta1 = 0.0
+    afm.adam_beta2 = 0.95
+    afm.discriminator_init = "generator"
+    afm.discriminator_trainable_blocks = -1
+    afm.discriminator_width_multiplier = 1.0
+    afm.discriminator_depth = 0
+    afm.use_discriminator_augmentation = False
+    afm.discriminator_augmentation_probability = 0.0
+    afm.load_generator_ema = False
+    afm.max_posttrain_batches = 155000
+    afm.max_abs_discriminator_logit = 100.0
+    afm.resume_from = ""
+
+    # ------------------------------------------------------------
     # Sampling
     config.sampling = sampling = ml_collections.ConfigDict()
     sampling.num_steps = 1
