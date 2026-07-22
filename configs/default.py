@@ -213,6 +213,7 @@ def get_config():
     logging.wandb_project = ""
     logging.wandb_entity = ""
     logging.wandb_notes = ""
+    logging.wandb_group = ""
     logging.wandb_tags = []
     logging.wandb_max_retries = 3
     logging.wandb_retry_cooldown_seconds = 300

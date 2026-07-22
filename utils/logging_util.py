@@ -129,6 +129,7 @@ def _derive_wandb_tags(config):
 
     model_str = str(config.model.get("model_str", "") or "").strip()
     is_jit = "jit" in model_str.lower()
+    is_imf = "imf" in model_str.lower()
 
     # SiT uses an explicit velocity-map mode; JiT is transport-v by construction.
     velocity_map = str(config.model.get("sit_velocity_map_mode", "") or "").strip()
@@ -142,7 +143,10 @@ def _derive_wandb_tags(config):
     if model_str:
         tags.append(model_str)
 
-    if is_jit:
+    if is_imf:
+        tags.append("plain-imf")
+        tags.append("imf-init")
+    elif is_jit:
         tags.append("plain-jit")
         tags.append("jit-init")
     else:
@@ -156,7 +160,7 @@ def _derive_wandb_tags(config):
         pass
 
     configured = list(config.logging.get("wandb_tags", []) or [])
-    stale = {"caltech101", "ddpm-v", "transport-v", "plain-sit", "dit-init", "plain-jit", "jit-init", "finetune"}
+    stale = {"caltech101", "ddpm-v", "transport-v", "plain-sit", "dit-init", "plain-jit", "jit-init", "plain-imf", "imf-init", "finetune"}
     for t in configured:
         if t not in stale:
             tags.append(str(t))
@@ -183,6 +187,7 @@ class Writer:
             "project": config.logging.wandb_project,
             "entity": config.logging.wandb_entity if config.logging.wandb_entity else None,
             "notes": config.logging.wandb_notes if config.logging.wandb_notes else None,
+            "group": config.logging.get("wandb_group", "") or None,
             "tags": _derive_wandb_tags(config),
             "dir": "/tmp",  # avoid writing to workdir
             "settings": wandb.Settings(_service_wait=60),
