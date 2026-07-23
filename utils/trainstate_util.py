@@ -24,8 +24,8 @@ from utils.imf_param_util import (
 #######################################################
 
 
-def initialized(key, image_size, model):
-    input_shape = (1, image_size, image_size, 4)
+def initialized(key, image_size, model, input_channels=4):
+    input_shape = (1, image_size, image_size, input_channels)
     x = jnp.ones(input_shape)
     t = jnp.ones((1,), dtype=int)
     y = jnp.ones((1,), dtype=int)
@@ -79,7 +79,8 @@ class EvalState:
 
 
 def create_train_state(
-    rng, config: ml_collections.ConfigDict, model, image_size, lr_fn
+    rng, config: ml_collections.ConfigDict, model, image_size, lr_fn,
+    input_channels=4,
 ):
     """
     Create initial training state.
@@ -89,7 +90,7 @@ def create_train_state(
 
     rng, rng_init = random.split(rng)
 
-    _, params = initialized(rng_init, image_size, model)
+    _, params = initialized(rng_init, image_size, model, input_channels=input_channels)
     use_ema = config.training.get("use_ema", True)
     ema_params = deepcopy(params)
     if use_ema:
