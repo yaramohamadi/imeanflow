@@ -345,6 +345,13 @@ class imfDiT(nn.Module):
         u_tokens = u_seq[:, self.prefix_tokens :]
         return self.unpatchify(self.u_final_layer(u_tokens))
 
+    def predict_u_only(self, x, t, h, w, t_min, t_max, y):
+        """Run only the shared trunk and u branch, skipping the auxiliary v head."""
+        del t  # iMF-DiT conditions on interval h=t-r rather than absolute t.
+        seq = self._build_sequence(x, h, w, t_min, t_max, y)
+        seq = self._run_shared_blocks(seq)
+        return self._decode_u(seq)
+
     def _decode_v(self, seq):
         if not self.use_auxiliary_v_head:
             raise ValueError("_decode_v requires use_auxiliary_v_head=True.")
