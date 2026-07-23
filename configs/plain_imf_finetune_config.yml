@@ -32,7 +32,7 @@ training:
     checkpoint_per_epoch: 1
 
     num_epochs: 200
-    max_train_steps: 30000
+    max_train_steps: 40000
     batch_size: 16
     use_ema: False
     learning_rate: 0.0001
@@ -40,7 +40,7 @@ training:
 
     adam_b2: 0.95
     ema_type: const
-    ema_val: 0.9999
+    ema_val: 0.9998
 
     sample_per_step: 5000
     fid_per_step: 0
