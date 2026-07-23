@@ -83,7 +83,7 @@ for entry in "${DATASETS[@]}"; do
       --config.dataset.num_workers=16 \
       --config.dataset.prefetch_factor=4 \
       --config.dataset.pin_memory=True \
-      --config.training.max_train_steps=30000 \
+      --config.training.max_train_steps=40000 \
       --config.training.use_ema=False \
       --config.fid.num_samples=5000 \
       2>&1 | tee -a $REPO/files/logs/jit_${DS}_launch.log
