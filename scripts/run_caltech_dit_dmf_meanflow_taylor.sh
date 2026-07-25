@@ -118,10 +118,13 @@ case "${ENABLE_DOGFIT,,}" in
     ;;
   0|false|no|n)
     MODEL_USE_DOGFIT="False"
-    TRAIN_USE_EMA="False"
+    # Objective-side EMA is opt-in via env even without DogFit: honor
+    # TRAIN_USE_EMA / USE_EMA_VC if the caller set them (default False).
+    TRAIN_USE_EMA="${TRAIN_USE_EMA:-False}"
     CAPTURE_SOURCE_FROM_LOAD="False"
-    USE_EMA_VC="False"
+    USE_EMA_VC="${USE_EMA_VC:-False}"
     VC_LABEL="online"
+    if [[ "${USE_EMA_VC}" == "True" ]]; then VC_LABEL="emavc"; fi
     RUN_FLAVOR="plain"
     ;;
   *)

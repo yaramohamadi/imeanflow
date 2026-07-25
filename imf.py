@@ -1439,12 +1439,27 @@ class iMeanFlow(nn.Module):
             return v
 
         del omega
-        return self.net.apply(
+        # Objective-EMA teacher for the DMF single-head backbone. The online
+        # conditioned/boundary velocity for this config is produced by
+        # _predict_target_velocity (u_fn fallthrough, r=t): it maps the model
+        # time via _map_target_model_time (flip 1-t + x999) and wraps the raw
+        # epsilon output via _compute_target_wrapped_velocity (dit_native).
+        # Mirror that here with the EMA params so v_c is in the SAME space as
+        # the online target (was: raw t + raw epsilon -> garbage v_c).
+        context = self._prepare_target_prediction_context(x, t, t)
+        raw_output = self.net.apply(
             {"params": teacher_param_tree},
-            x,
-            t_batch,
-            t_batch,
+            context["model_x"],
+            context["model_t"].reshape(bz).astype(self.dtype),
+            context["model_r"].reshape(bz).astype(self.dtype),
             y,
+        )
+        t_scalar = self._batch_scalar(t, bz, dtype=self.dtype)
+        return self._compute_target_wrapped_velocity(
+            raw_output,
+            x.astype(self.dtype),
+            t_scalar,
+            context=context,
         )
 
     def source_v_uncond_fn(self, source_params, x, t):
@@ -1556,6 +1571,13 @@ class iMeanFlow(nn.Module):
             v_u = jax.lax.stop_gradient(v_u)
         else:
             v_c, v_u = self.v_fn(z_t, t, y=y)
+            if self.use_ema_vc:
+                # EMA-teacher conditioned target (objective-side EMA) for the
+                # guided, non-dogfit path. v_c is the meanflow regression target
+                # (jvp tangent); sourcing it from the EMA teacher stabilises it.
+                v_c = jax.lax.stop_gradient(
+                    self.teacher_v_cond_fn(teacher_params, z_t, t, jnp.ones_like(w), y=y)
+                )
 
         if self._uses_sit_cfg_channel_rule():
             guided_first_three = (

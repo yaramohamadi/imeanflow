@@ -66,7 +66,7 @@ training:
         - 2
         - 4
         - 16
-    debug_log_during_train: True
+    debug_log_during_train: False
     debug_log_images: True
     debug_num_images: 4
     debug_velocity_decode_scale: 0.1
@@ -94,7 +94,7 @@ fd_dino:
     cache_ref: /home/ens/AT74470/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
 
 sampling:
-    num_steps: 16
+    num_steps: 4
     omega: 1.5
     t_min: 0.0
     t_max: 1.0

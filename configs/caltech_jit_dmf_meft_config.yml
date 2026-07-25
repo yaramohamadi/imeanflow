@@ -55,10 +55,12 @@ training:
     warmup_epochs: 5
 
     adam_b2: 0.95
+    grad_clip_norm: 0.0
     ema_type: 'const'
 
     sample_per_step: 2500
     fid_per_step: 0
+    force_fid_per_step: 0
     preview_num_steps:
         - 1
         - 4
