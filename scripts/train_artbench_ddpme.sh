@@ -43,6 +43,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   "${PYTHON}" "${REPO_ROOT}/main_sit.py" \
     --workdir="${WORKDIR}" \
     --config="${REPO_ROOT}/configs/load_config.py:${CONFIG_MODE}" \
+    --config.training.batch_size=16 \
+    --config.training.grad_accum_steps=2 \
     --config.load_from="${DIT_WEIGHTS}" \
     --config.dataset.root="${DATA_ROOT}/artbench-10_processed_latents" \
     --config.dataset.name="${DATASET}" \

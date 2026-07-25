@@ -135,11 +135,16 @@ def create_train_state(
     if bool(config.training.get("print_model_params", False)):
         print_params(params["net"])
 
-    tx = optax.adamw(
+    _grad_clip_norm = float(config.training.get("grad_clip_norm", 0.0))
+    _adamw = optax.adamw(
         learning_rate=lr_fn,
         weight_decay=0,
         b2=config.training.adam_b2,
     )
+    if _grad_clip_norm > 0.0:
+        tx = optax.chain(optax.clip_by_global_norm(_grad_clip_norm), _adamw)
+    else:
+        tx = _adamw
     state = TrainState.create(
         apply_fn=partial(model.apply, method=model.forward),
         params=params,

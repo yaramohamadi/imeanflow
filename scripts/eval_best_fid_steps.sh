@@ -37,6 +37,9 @@ MODEL_STR="${MODEL_STR:-}"
 MODEL_USE_DOGFIT="${MODEL_USE_DOGFIT:-}"
 TARGET_USE_NULL_CLASS="${TARGET_USE_NULL_CLASS:-}"
 CLASS_DROPOUT_PROB="${CLASS_DROPOUT_PROB:-}"
+TARGET_OUTPUT_PREDICTION_SPACE="${TARGET_OUTPUT_PREDICTION_SPACE:-}"
+TARGET_VELOCITY_MAP_MODE="${TARGET_VELOCITY_MAP_MODE:-}"
+USE_EMA_VC="${USE_EMA_VC:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
 DATASET_NUM_CLASSES="${DATASET_NUM_CLASSES:-}"
 FID_CACHE_REF="${FID_CACHE_REF:-}"
@@ -103,6 +106,17 @@ for NUM_STEPS in "${STEPS[@]}"; do
   fi
   if [[ -n "$CLASS_DROPOUT_PROB" ]]; then
     EXTRA_CONFIG_ARGS+=("--config.model.class_dropout_prob=${CLASS_DROPOUT_PROB}")
+  fi
+  # Prediction-space / velocity-map / ema-vc must match TRAINING exactly, else the
+  # model output is decoded through the wrong convention and FID collapses to noise.
+  if [[ -n "$TARGET_OUTPUT_PREDICTION_SPACE" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.model.target_output_prediction_space=${TARGET_OUTPUT_PREDICTION_SPACE}")
+  fi
+  if [[ -n "$TARGET_VELOCITY_MAP_MODE" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.model.target_velocity_map_mode=${TARGET_VELOCITY_MAP_MODE}")
+  fi
+  if [[ -n "$USE_EMA_VC" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.model.use_ema_vc=${USE_EMA_VC}")
   fi
   if [[ -n "$DATASET_ROOT" ]]; then
     EXTRA_CONFIG_ARGS+=("--config.dataset.root=${DATASET_ROOT}")

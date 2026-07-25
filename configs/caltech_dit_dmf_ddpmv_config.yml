@@ -47,6 +47,7 @@ training:
     warmup_epochs: 5
 
     adam_b2: 0.95
+    grad_clip_norm: 0.0
     ema_type: const
     ema_val: 0.9998
 
