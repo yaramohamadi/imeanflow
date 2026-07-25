@@ -48,7 +48,13 @@ training:
     ema_val: 0.9999
     log_per_step: 100
     checkpoint_per_epoch: 1
-    sample_per_step: 0
+    # Save a preview panel at initialization and every 5,000 batch steps.
+    sample_per_step: 5000
+    preview_num_steps:
+        - 1
+        - 2
+        - 4
+    preview_num_images: 16
     fid_per_step: 0
     # CA-iMF batch_step counts both discriminator and generator batches.
     # Evaluate the unchanged source generator at the end of D warm-up, then
@@ -57,8 +63,9 @@ training:
     fid_schedule:
         - from_step: 10000
           every_steps: 2500
+    # Training-time selection is based on the 4-NFE metric only. The final
+    # best-checkpoint evaluation separately reports 1 and 2 NFE.
     metric_num_steps:
-        - 1
         - 4
     save_best_fid_only: False
     save_best_fid_eval_state_only: True

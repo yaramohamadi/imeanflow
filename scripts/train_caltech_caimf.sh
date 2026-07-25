@@ -12,6 +12,8 @@ DATASET_ROOT="${DATASET_ROOT:-/home/ens/Zdehghani/datasets/caltech-101_processed
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 LAMBDA_OT="${LAMBDA_OT:-0.0}"
 LAMBDA_CP="${LAMBDA_CP:-0.001}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2}"
 export CUDA_VISIBLE_DEVICES
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -76,7 +78,7 @@ echo "Dataset: $DATASET_ROOT"
 echo "Experiment: $EXPERIMENT (lambda_imf=$LAMBDA_IMF, lambda_adv=$LAMBDA_ADV, lambda_ot=$LAMBDA_OT, lambda_cp=$LAMBDA_CP)"
 echo "Visible GPUs: $CUDA_VISIBLE_DEVICES"
 
-exec "$PYTHON" main_caimf.py \
+"$PYTHON" main_caimf.py \
   --config=configs/load_config.py:caltech_caimf_posttrain \
   --workdir="$WORKDIR" \
   --config.load_from="$IMF_CHECKPOINT" \
@@ -88,3 +90,28 @@ exec "$PYTHON" main_caimf.py \
   --config.caimf.discriminator_updates="$DISCRIMINATOR_UPDATES" \
   --config.logging.wandb_name="caltech_${ENTRY_MODE}_caimf_exp${EXPERIMENT}" \
   "$@"
+
+case "${RUN_FINAL_BEST_FID_EVAL,,}" in
+  1|true|yes|y|on)
+    read -r -a FINAL_EVAL_STEP_ARRAY <<< "$FINAL_EVAL_STEPS"
+    echo "CA-iMF training finished. Evaluating best-FID checkpoint at steps: ${FINAL_EVAL_STEP_ARRAY[*]}"
+    CONFIG_MODE=caltech_caimf_posttrain \
+      PYTHON="$PYTHON" \
+      USE_WANDB=False \
+      WANDB_NAME_PREFIX="caltech_${ENTRY_MODE}_caimf_exp${EXPERIMENT}" \
+      bash scripts/eval_best_fid_steps_plain_imf.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- \
+      --config.dataset.root="$DATASET_ROOT" \
+      --config.dataset.class_mapping_root="" \
+      --config.fid.cache_ref="$REPO_ROOT/files/fid_stats/caltech-101-fid_stats.npz" \
+      --config.fd_dino.cache_ref="$REPO_ROOT/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz" \
+      --config.training.final_eval_write_images=True \
+      --config.logging.use_wandb=False
+    ;;
+  0|false|no|n|off)
+    echo "Skipping final best-FID evaluation."
+    ;;
+  *)
+    echo "ERROR: RUN_FINAL_BEST_FID_EVAL must be boolean-like, got '$RUN_FINAL_BEST_FID_EVAL'." >&2
+    exit 2
+    ;;
+esac

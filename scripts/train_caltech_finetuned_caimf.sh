@@ -28,6 +28,8 @@ CAIMF_EXPERIMENT="${CAIMF_EXPERIMENT:-1}"
 LAMBDA_OT="${LAMBDA_OT:-0.0}"
 LAMBDA_CP="${LAMBDA_CP:-0.001}"
 LOG_ROOT="${LOG_ROOT:-$REPO/files/logs/caimf_target_ft}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2}"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "ERROR: Python executable not found: $PYTHON" >&2
@@ -88,7 +90,7 @@ echo "lambda_imf=$LAMBDA_IMF lambda_adv=$LAMBDA_ADV lambda_ot=$LAMBDA_OT lambda_
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
 
 cd "$REPO"
-exec "$PYTHON" main_caimf.py \
+"$PYTHON" main_caimf.py \
   --workdir="$WORKDIR" \
   --config=configs/load_config.py:caltech_finetuned_caimf_posttrain \
   --config.load_from="$CALTECH_IMF_CHECKPOINT" \
@@ -101,3 +103,28 @@ exec "$PYTHON" main_caimf.py \
   --config.logging.wandb_name="caltech_ft_caimf_exp${CAIMF_EXPERIMENT}_${RUN_LABEL}" \
   "$@" \
   2>&1 | tee -a "$WORKDIR/output.log"
+
+case "${RUN_FINAL_BEST_FID_EVAL,,}" in
+  1|true|yes|y|on)
+    read -r -a FINAL_EVAL_STEP_ARRAY <<< "$FINAL_EVAL_STEPS"
+    echo "CA-iMF training finished. Evaluating best-FID checkpoint at steps: ${FINAL_EVAL_STEP_ARRAY[*]}"
+    CONFIG_MODE=caltech_finetuned_caimf_posttrain \
+      PYTHON="$PYTHON" \
+      USE_WANDB=False \
+      WANDB_NAME_PREFIX="caltech_ft_caimf_exp${CAIMF_EXPERIMENT}_${RUN_LABEL}" \
+      bash scripts/eval_best_fid_steps_plain_imf.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- \
+      --config.dataset.root="$DATASET_ROOT" \
+      --config.dataset.class_mapping_root="" \
+      --config.fid.cache_ref="$REPO/files/fid_stats/caltech-101-fid_stats.npz" \
+      --config.fd_dino.cache_ref="$REPO/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz" \
+      --config.training.final_eval_write_images=True \
+      --config.logging.use_wandb=False
+    ;;
+  0|false|no|n|off)
+    echo "Skipping final best-FID evaluation."
+    ;;
+  *)
+    echo "ERROR: RUN_FINAL_BEST_FID_EVAL must be boolean-like, got '$RUN_FINAL_BEST_FID_EVAL'." >&2
+    exit 2
+    ;;
+esac

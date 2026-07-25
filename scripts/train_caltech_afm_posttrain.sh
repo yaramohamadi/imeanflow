@@ -23,6 +23,8 @@ DATASET_ROOT="${DATASET_ROOT:-/home/ens/Zdehghani/datasets/caltech-101_processed
 CLASS_MAPPING_ROOT="${CLASS_MAPPING_ROOT:-/home/ens/Zdehghani/datasets/caltech-101_images/train}"
 AFM_ABLATION="${AFM_ABLATION:-B}"
 LOG_ROOT="${LOG_ROOT:-$REPO/files/logs/afm}"
+RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
+FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2}"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "ERROR: Python executable not found: $PYTHON" >&2
@@ -86,7 +88,7 @@ echo "Ablation: $ABLATION"
 echo "lambda_imf=$LAMBDA_IMF lambda_adv=$LAMBDA_ADV lambda_ot=$LAMBDA_OT lambda_anchor=$LAMBDA_ANCHOR"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
 
-exec "$PYTHON" main_afm.py \
+"$PYTHON" main_afm.py \
   --workdir="$WORKDIR" \
   --config=configs/load_config.py:caltech_afm_posttrain \
   --config.load_from="$TARGET_IMF_CHECKPOINT" \
@@ -101,3 +103,27 @@ exec "$PYTHON" main_afm.py \
   "$@" \
   2>&1 | tee -a "$WORKDIR/output.log"
 
+case "${RUN_FINAL_BEST_FID_EVAL,,}" in
+  1|true|yes|y|on)
+    read -r -a FINAL_EVAL_STEP_ARRAY <<< "$FINAL_EVAL_STEPS"
+    echo "AFM training finished. Evaluating best-FID checkpoint at steps: ${FINAL_EVAL_STEP_ARRAY[*]}"
+    CONFIG_MODE=caltech_afm_posttrain \
+      PYTHON="$PYTHON" \
+      USE_WANDB=False \
+      WANDB_NAME_PREFIX="caltech_afm_${ABLATION}_${RUN_LABEL}" \
+      bash scripts/eval_best_fid_steps_plain_imf.sh "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- \
+      --config.dataset.root="$DATASET_ROOT" \
+      --config.dataset.class_mapping_root="" \
+      --config.fid.cache_ref="$REPO/files/fid_stats/caltech-101-fid_stats.npz" \
+      --config.fd_dino.cache_ref="$REPO/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz" \
+      --config.training.final_eval_write_images=True \
+      --config.logging.use_wandb=False
+    ;;
+  0|false|no|n|off)
+    echo "Skipping final best-FID evaluation."
+    ;;
+  *)
+    echo "ERROR: RUN_FINAL_BEST_FID_EVAL must be boolean-like, got '$RUN_FINAL_BEST_FID_EVAL'." >&2
+    exit 2
+    ;;
+esac
