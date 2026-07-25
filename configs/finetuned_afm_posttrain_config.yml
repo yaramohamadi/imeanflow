@@ -1,0 +1,109 @@
+dataset:
+    root: /scratch/zahradt/datasets/caltech-101_processed_latents
+    class_mapping_root: ''
+    num_classes: 101
+    num_classes_from_data: True
+
+model:
+    model_str: imfDiT_XL_2
+    num_classes: 101
+    training_mode: imf_jvp
+    cfg_beta: 1.0
+    class_dropout_prob: 0.1
+    use_dogfit: False
+    target_use_null_class: True
+    use_auxiliary_v_head: True
+    guidance_scale_strategy: sampled
+    max_sampled_guidance_scale: 8.0
+
+afm:
+    ablation: afm_only
+    lambda_adv: 1.0
+    lambda_imf: 0.0
+    lambda_ot: 0.0
+    lambda_ot_end: 0.0
+    lambda_ot_decay_steps: 0
+    lambda_anchor: 0.0
+    anchor_decay_steps: 30000
+    lambda_gp: 0.0
+    lambda_cp: 0.01
+    fd_epsilon: 0.01
+    gp_batch_fraction: 0.25
+    interval_eps: 0.001
+    min_interval: 0.05
+    p_r_zero: 0.25
+    discriminator_warmup_steps: 5000
+    d_steps_per_g_step: 4
+    discriminator_updates: True
+    generator_learning_rate: 0.00001
+    discriminator_learning_rate: 0.00001
+    generator_lr_warmup_steps: 100
+    discriminator_lr_warmup_steps: 100
+    generator_weight_decay: 0.0
+    discriminator_weight_decay: 0.0
+    adam_beta1: 0.0
+    adam_beta2: 0.95
+    discriminator_init: generator
+    discriminator_trainable_blocks: -1
+    freeze_discriminator_backbone: False
+    discriminator_width_multiplier: 1.0
+    discriminator_depth: 0
+    use_discriminator_augmentation: False
+    discriminator_augmentation_probability: 0.0
+    load_generator_ema: False
+    max_posttrain_batches: 155000
+    max_abs_discriminator_logit: 100.0
+    resume_from: ''
+
+training:
+    num_epochs: 1000
+    batch_size: 4
+    grad_accum_steps: 1
+    use_ema: True
+    ema_val: 0.99
+    log_per_step: 100
+    checkpoint_per_epoch: 1
+    sample_per_step: 0
+    fid_per_step: 0
+    fid_schedule:
+        - from_step: 5000
+          every_steps: 2500
+    metric_num_steps:
+        - 1
+        - 4
+    save_best_fid_only: False
+    save_best_fid_eval_state_only: True
+    best_fid_checkpoint_dir: best_fid
+    seed: 42
+
+fid:
+    cache_ref: /home/zahradt/links/projects/def-hadi87/zahradt/imeanflow/files/fid_stats/caltech-101-fid_stats.npz
+    device_batch_size: 2
+    sample_device_batch_size: 2
+    sample_log_every: 25
+    sample_first_device_only: False
+    num_samples: 10000
+
+fd_dino:
+    arch: vitb14
+    cache_ref: /home/zahradt/links/projects/def-hadi87/zahradt/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
+
+sampling:
+    num_classes: 101
+    num_steps: 4
+    omega: 7.5
+    t_min: 0.4
+    t_max: 0.65
+
+logging:
+    use_wandb: False
+    wandb_project: afm_finetuned_imf
+    wandb_name: finetuned_afm_posttrain
+    wandb_entity: yara-mohammadi-bahram-1-ecole-superieure-de-technologie
+    wandb_tags:
+        - afm
+        - target-finetuned-source
+        - posttrain
+
+load_from: ''
+partial_load: True
