@@ -62,3 +62,12 @@ wandb/
 *.jpeg
 *.gif
 samples/
+
+# scratch/backups/venvs
+*.bak
+*.bak2
+*.tffix
+*.bak_evalfix
+*.bak_shmfix
+*.bak_jittag
+.venv.bak/
