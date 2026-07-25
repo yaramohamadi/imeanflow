@@ -37,6 +37,11 @@ from utils.sample_util import (
     get_sample_devices,
     get_sample_local_device_count,
     has_controllable_sampling_guidance,
+    get_sampling_param_dtype,
+)
+from utils.preview_util import (
+    generate_preview_samples_first_device,
+    make_side_by_side_preview_panel,
 )
 from utils.trainstate_util import EvalState, create_train_state
 from utils.vae_util import LatentManager
@@ -556,6 +561,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
     p_metric_sample_steps = {}
     sample_kwargs = None
     latent_manager = None
+    p_preview_sample_steps = {}
+    preview_num_images = int(config.training.get("preview_num_images", 16))
+    preview_grid_size = int(np.sqrt(max(preview_num_images, 1)))
+    preview_num_images = preview_grid_size * preview_grid_size
     best_fid_by_steps = {}
     best_fd_dino_by_steps = {}
     best_fid_ckpt_dir = os.path.join(
@@ -602,6 +611,13 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
             num_steps: build_p_sample_step(num_steps)
             for num_steps in metric_num_steps
         }
+        preview_steps = tuple(
+            int(step)
+            for step in config.training.get("preview_num_steps", (1, 2, 4))
+        )
+        p_preview_sample_steps = {
+            step: build_p_sample_step(step) for step in preview_steps if step >= 1
+        }
         best_fid_by_steps = {
             num_steps: float("inf") for num_steps in metric_num_steps
         }
@@ -625,6 +641,35 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
             metric_mode,
         )
 
+    def write_preview(state_value, step_value):
+        if (
+            not metric_evaluation_enabled
+            or not p_preview_sample_steps
+            or preview_num_images <= 0
+        ):
+            return
+        preview_state = state_value if distributed else jax_utils.replicate(
+            state_value, devices=get_sample_devices(config)
+        )
+        preview_images = {}
+        for num_steps, p_preview_step in p_preview_sample_steps.items():
+            preview_images[num_steps] = generate_preview_samples_first_device(
+                preview_state,
+                p_preview_step,
+                latent_manager,
+                ema=use_ema_for_metrics,
+                num_samples=preview_num_images,
+                param_dtype=get_sampling_param_dtype(config),
+                sample_local_device_count=get_sample_local_device_count(config),
+                **sample_kwargs,
+            )
+        writer.write_images(
+            step_value,
+            {"image_grid": make_side_by_side_preview_panel(
+                preview_images, preview_grid_size
+            )},
+        )
+
     warmup = int(ca_cfg.discriminator_warmup_batches)
     dis_steps = int(ca_cfg.discriminator_steps_per_cycle)
     discriminator_updates = bool(ca_cfg.discriminator_updates)
@@ -644,6 +689,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         float(ca_cfg.lambda_ot),
     )
 
+    if metric_evaluation_enabled and int(config.training.get("sample_per_step", 0)) > 0:
+        write_preview(state, 0)
+
     for epoch in range(int(config.training.num_epochs)):
         if jax.process_count() > 1:
             train_loader.sampler.set_epoch(epoch)
@@ -659,6 +707,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
             else:
                 state, metrics = p_gen_step(state, batch)
             current_step = step_value(state)
+
+            sample_period = int(config.training.get("sample_per_step", 0))
+            if (
+                sample_period > 0
+                and current_step > 0
+                and current_step % sample_period == 0
+            ):
+                write_preview(state, current_step)
 
             if phase not in compiled_phases:
                 jax.tree_util.tree_leaves(metrics)[0].block_until_ready()

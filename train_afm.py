@@ -55,6 +55,11 @@ from utils.sample_util import (
     get_sample_devices,
     get_sample_local_device_count,
     has_controllable_sampling_guidance,
+    get_sampling_param_dtype,
+)
+from utils.preview_util import (
+    generate_preview_samples_first_device,
+    make_side_by_side_preview_panel,
 )
 from utils.trainstate_util import EvalState, create_train_state
 from utils.vae_util import LatentManager
@@ -778,6 +783,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
     p_sample_steps = {}
     sample_kwargs = None
     latent_manager = None
+    p_preview_sample_steps = {}
+    preview_num_images = int(config.training.get("preview_num_images", 16))
+    preview_grid_size = int(np.sqrt(max(preview_num_images, 1)))
+    preview_num_images = preview_grid_size * preview_grid_size
     best_fid = {}
     best_fdd = {}
     best_dir = os.path.join(workdir, config.training.best_fid_checkpoint_dir)
@@ -812,6 +821,13 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
         metric_steps = _get_metric_num_steps(config)
         p_sample_steps = {step: build_sample_step(step) for step in metric_steps}
+        preview_steps = tuple(
+            int(step)
+            for step in config.training.get("preview_num_steps", (1, 2, 4))
+        )
+        p_preview_sample_steps = {
+            step: build_sample_step(step) for step in preview_steps if step >= 1
+        }
         best_fid = {step: float("inf") for step in metric_steps}
         best_fdd = {step: float("inf") for step in metric_steps}
         controllable = has_controllable_sampling_guidance(config.model)
@@ -822,6 +838,31 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
                 "t_max": float(config.sampling.t_max),
             },
             devices=sample_devices,
+        )
+
+    def write_preview(state_value, step_value):
+        if not metric_enabled or not p_preview_sample_steps or preview_num_images <= 0:
+            return
+        preview_state = state_value if distributed else jax_utils.replicate(
+            state_value, devices=get_sample_devices(config)
+        )
+        preview_images = {}
+        for num_steps, p_preview_step in p_preview_sample_steps.items():
+            preview_images[num_steps] = generate_preview_samples_first_device(
+                preview_state,
+                p_preview_step,
+                latent_manager,
+                ema=use_ema_metrics,
+                num_samples=preview_num_images,
+                param_dtype=get_sampling_param_dtype(config),
+                sample_local_device_count=get_sample_local_device_count(config),
+                **sample_kwargs,
+            )
+        writer.write_images(
+            step_value,
+            {"image_grid": make_side_by_side_preview_panel(
+                preview_images, preview_grid_size
+            )},
         )
 
     warmup = int(config.afm.discriminator_warmup_steps)
@@ -852,6 +893,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         float(config.afm.lambda_cp),
     )
 
+    if metric_enabled and int(config.training.get("sample_per_step", 0)) > 0:
+        write_preview(state, 0)
+
     for epoch in range(start_epoch, int(config.training.num_epochs)):
         if jax.process_count() > 1:
             train_loader.sampler.set_epoch(epoch)
@@ -867,6 +911,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
                 p_dis_step(state, batch) if do_d else p_gen_step(state, batch)
             )
             current_step = _step_value(state)
+
+            sample_period = int(config.training.get("sample_per_step", 0))
+            if (
+                sample_period > 0
+                and current_step > 0
+                and current_step % sample_period == 0
+            ):
+                write_preview(state, current_step)
             if phase not in compiled:
                 jax.tree_util.tree_leaves(metrics)[0].block_until_ready()
                 log_for_0("Initial %s step compiled in %.2fs.", phase, timer.elapse_with_reset())
