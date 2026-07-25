@@ -100,7 +100,7 @@ logging:
     use_wandb: True
     wandb_name: ''
     wandb_project: 'plain_imf_finetune'
-    wandb_entity: 'yara-mohammadi-bahram-1-ecole-superieure-de-technologie'
+    wandb_entity: ''
     wandb_tags:
         - finetune
         - plain-imf

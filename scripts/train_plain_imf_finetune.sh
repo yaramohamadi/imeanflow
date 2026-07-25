@@ -53,7 +53,8 @@ CONFIG_MODE="${CONFIG_MODE:-plain_imf_finetune}"
 PYTHON="${PYTHON:-python3}"
 USE_WANDB="${USE_WANDB:-True}"
 LOG_DIR="${LOG_DIR:-files/logs}"
-LOAD_FROM="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOAD_FROM="${LOAD_FROM:-${REPO_ROOT}/files/weights/iMF-XL-2-full}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2 250}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-False}"
@@ -63,6 +64,8 @@ GUIDANCE_SCALE="${GUIDANCE_SCALE:-7.5}"
 SAMPLING_T_MIN="${SAMPLING_T_MIN:-0.4}"
 SAMPLING_T_MAX="${SAMPLING_T_MAX:-0.65}"
 TRAINING_MODE="${TRAINING_MODE:-imf_jvp}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"
 SPLIT_MIDPOINT_STRATEGY="${SPLIT_MIDPOINT_STRATEGY:-uniform}"
 SPLIT_MIDPOINT_EPS="${SPLIT_MIDPOINT_EPS:-0.001}"
 SPLIT_SOURCE_FIRST_PROB="${SPLIT_SOURCE_FIRST_PROB:-0.0}"
@@ -78,33 +81,33 @@ DATASET_LABEL=""
 case "${DATASET_NAME}" in
   caltech101|caltech-101)
     DATASET_LABEL="caltech101"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/caltech-101_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/caltech-101-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/${USER}/datasets/caltech-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/caltech-101-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-${REPO_ROOT}/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
     ;;
   artbench10|artbench-10)
     DATASET_LABEL="artbench10"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/artbench-10_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/artbench-10_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/${USER}/datasets/artbench-10_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/artbench-10_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-${REPO_ROOT}/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
     ;;
   cub200|cub-200|cub-200-2011)
     DATASET_LABEL="cub200"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/cub-200-2011_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/cub-200-2011_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/${USER}/datasets/cub-200-2011_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-${REPO_ROOT}/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
     ;;
   food101|food-101)
     DATASET_LABEL="food101"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/food-101_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/food-101_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/${USER}/datasets/food-101_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/food-101_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-${REPO_ROOT}/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
     ;;
   stanfordcars|stanford-cars|cars)
     DATASET_LABEL="stanfordcars"
-    DATASET_ROOT="${DATASET_ROOT:-/scratch/ymbahram/datasets/stanford-cars_processed_latents}"
-    FID_CACHE_REF="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/stanford_cars_processed-fid_stats.npz}"
-    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-/scratch/ymbahram/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
+    DATASET_ROOT="${DATASET_ROOT:-/scratch/${USER}/datasets/stanford-cars_processed_latents}"
+    FID_CACHE_REF="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
+    FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-${REPO_ROOT}/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
     ;;
   *)
     echo "ERROR: unknown DATASET_NAME='$DATASET_NAME'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
@@ -252,7 +255,11 @@ ensure_dataset_root
 ensure_cuda_ptxas
 
 TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3} \
-  XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false} \
+  HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1} \
+  WANDB_MODE=${WANDB_MODE:-offline} \
+  XLA_PYTHON_CLIENT_ALLOCATOR=${XLA_PYTHON_CLIENT_ALLOCATOR:-platform} \
+  XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PYTHON_CLIENT_PREALLOCATE:-false} \
+  XLA_FLAGS=${XLA_FLAGS:---xla_gpu_strict_conv_algorithm_picker=false --xla_gpu_enable_command_buffer=} \
   PYTHONWARNINGS=${PYTHONWARNINGS:-ignore} \
   "$PYTHON" \
     main.py \

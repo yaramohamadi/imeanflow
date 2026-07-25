@@ -807,9 +807,9 @@ class FlaxSiT(nn.Module):
                 get_2d_sincos_pos_embed(
                     self.hidden_size,
                     int(self.input_size / self.patch_size),
-                ).reshape((1, num_patches, self.hidden_size))
+                ).reshape((num_patches, self.hidden_size))
             ),
-            (1, num_patches, self.hidden_size),
+            (num_patches, self.hidden_size),
         )
 
         block_kwargs = dict(
@@ -923,10 +923,10 @@ class imfSiT_MF(nn.Module):
             "pos_embed",
             lambda key, shape: jnp.array(
                 get_2d_sincos_pos_embed(self.hidden_size, int(self.input_size / self.patch_size)).reshape(
-                    (1, num_patches, self.hidden_size)
+                    (num_patches, self.hidden_size)
                 )
             ),
-            (1, num_patches, self.hidden_size),
+            (num_patches, self.hidden_size),
         )
 
         self.rope_freqs = precompute_rope_freqs(
@@ -1127,9 +1127,9 @@ class imfSiT_DMF(nn.Module):
                 get_2d_sincos_pos_embed(
                     self.hidden_size,
                     int(self.input_size / self.patch_size),
-                ).reshape((1, num_patches, self.hidden_size))
+                ).reshape((num_patches, self.hidden_size))
             ),
-            (1, num_patches, self.hidden_size),
+            (num_patches, self.hidden_size),
         )
         if self.use_context_guidance_conditioning:
             token_initializer = nn.initializers.normal(

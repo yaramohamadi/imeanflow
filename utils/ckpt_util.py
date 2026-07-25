@@ -430,10 +430,84 @@ def _convert_torch_sit_state_dict_to_flax_dmf(
     return {"net": state}
 
 
-def _convert_torch_jit_state_dict_to_flax(source_dict):
-    """Convert a JiT PyTorch state_dict into the Flax JiT parameter tree."""
-    state = {}
+def _assign_jit_block(state, source_dict, source_prefix, flax_prefix):
+    """Copy one JiT transformer block from a torch state_dict into ``state``."""
+    _set_param(
+        state,
+        f"{flax_prefix}/norm1/kernel",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.norm1.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/q_norm/kernel",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.q_norm.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/k_norm/kernel",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.k_norm.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/qkv/_flax_linear/kernel",
+        _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.qkv.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/qkv/_flax_linear/bias",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.qkv.bias")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/proj/_flax_linear/kernel",
+        _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.proj.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/attn/proj/_flax_linear/bias",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.proj.bias")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/norm2/kernel",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.norm2.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/mlp/w12/_flax_linear/kernel",
+        _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w12.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/mlp/w12/_flax_linear/bias",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w12.bias")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/mlp/w3/_flax_linear/kernel",
+        _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w3.weight")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/mlp/w3/_flax_linear/bias",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w3.bias")),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/adaLN_modulation/_flax_linear/kernel",
+        _transpose_linear(
+            _source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.weight")
+        ),
+    )
+    _set_param(
+        state,
+        f"{flax_prefix}/adaLN_modulation/_flax_linear/bias",
+        _to_numpy(_source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.bias")),
+    )
 
+
+def _assign_jit_common_state(source_dict, state):
+    """Copy JiT embedders / patch-embed / final-layer shared by JiT variants."""
     if _source_has_key(source_dict, "pos_embed"):
         _set_param(state, "pos_embed", _to_numpy(_source_get(source_dict, "pos_embed")))
     if _source_has_key(source_dict, "in_context_posemb"):
@@ -496,90 +570,6 @@ def _convert_torch_jit_state_dict_to_flax(source_dict):
             _to_numpy(_source_get(source_dict, "x_embedder.proj2.bias")),
         )
 
-    block_indices = sorted(
-        {
-            int(key.split(".")[1])
-            for key in _source_keys_without_net_prefix(source_dict)
-            if key.startswith("blocks.")
-        }
-    )
-    for i in block_indices:
-        source_prefix = f"blocks.{i}"
-        flax_prefix = f"blocks_{i}"
-
-        _set_param(
-            state,
-            f"{flax_prefix}/norm1/kernel",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.norm1.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/q_norm/kernel",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.q_norm.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/k_norm/kernel",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.k_norm.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/qkv/_flax_linear/kernel",
-            _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.qkv.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/qkv/_flax_linear/bias",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.qkv.bias")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/proj/_flax_linear/kernel",
-            _transpose_linear(_source_get(source_dict, f"{source_prefix}.attn.proj.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/attn/proj/_flax_linear/bias",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.attn.proj.bias")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/norm2/kernel",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.norm2.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/mlp/w12/_flax_linear/kernel",
-            _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w12.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/mlp/w12/_flax_linear/bias",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w12.bias")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/mlp/w3/_flax_linear/kernel",
-            _transpose_linear(_source_get(source_dict, f"{source_prefix}.mlp.w3.weight")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/mlp/w3/_flax_linear/bias",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.mlp.w3.bias")),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/adaLN_modulation/_flax_linear/kernel",
-            _transpose_linear(
-                _source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.weight")
-            ),
-        )
-        _set_param(
-            state,
-            f"{flax_prefix}/adaLN_modulation/_flax_linear/bias",
-            _to_numpy(_source_get(source_dict, f"{source_prefix}.adaLN_modulation.1.bias")),
-        )
-
     if _source_has_key(source_dict, "final_layer.norm_final.weight"):
         _set_param(
             state,
@@ -607,6 +597,44 @@ def _convert_torch_jit_state_dict_to_flax(source_dict):
             _to_numpy(_source_get(source_dict, "final_layer.adaLN_modulation.1.bias")),
         )
 
+
+def _jit_source_block_indices(source_dict):
+    return sorted(
+        {
+            int(key.split(".")[1])
+            for key in _source_keys_without_net_prefix(source_dict)
+            if key.startswith("blocks.")
+        }
+    )
+
+
+def _convert_torch_jit_state_dict_to_flax_dmf(source_dict, encoder_depth=24):
+    """Convert a JiT PyTorch state_dict into the decoupled single-head Flax JiT tree.
+
+    The pretrained JiT block stack is split into a ``encoder_depth``-block encoder
+    (``encoder_blocks_i``) and the remaining decoder blocks (``decoder_blocks_j``),
+    matching :class:`models.jit.imfJiT_DMF`.
+    """
+    state = {}
+    _assign_jit_common_state(source_dict, state)
+
+    for i in _jit_source_block_indices(source_dict):
+        source_prefix = f"blocks.{i}"
+        if i < encoder_depth:
+            flax_prefix = f"encoder_blocks_{i}"
+        else:
+            flax_prefix = f"decoder_blocks_{i - encoder_depth}"
+        _assign_jit_block(state, source_dict, source_prefix, flax_prefix)
+
+    return {"net": state}
+
+
+def _convert_torch_jit_state_dict_to_flax(source_dict):
+    """Convert a JiT PyTorch state_dict into the Flax JiT parameter tree."""
+    state = {}
+    _assign_jit_common_state(source_dict, state)
+    for i in _jit_source_block_indices(source_dict):
+        _assign_jit_block(state, source_dict, f"blocks.{i}", f"blocks_{i}")
     return {"net": state}
 
 
@@ -631,6 +659,32 @@ def _target_uses_jit_layout(target_state):
         and isinstance(final_layer, dict)
         and "norm_final" in final_layer
     )
+
+
+def _target_uses_dmf_jit_layout(target_state):
+    """Detect the decoupled single-head pixel-space JiT (imfJiT_DMF) layout.
+
+    Distinguished from the plain JiT layout by the encoder/decoder block split,
+    and from the DMF SiT layout by the JiT-style bottleneck patch-embed (proj1).
+    """
+    if not isinstance(target_state, dict):
+        return False
+    net_state = target_state.get("net")
+    if not isinstance(net_state, dict):
+        return False
+    x_embedder = net_state.get("x_embedder")
+    return (
+        isinstance(x_embedder, dict)
+        and "proj1" in x_embedder
+        and "encoder_blocks_0" in net_state
+    )
+
+
+def _infer_dmf_jit_encoder_depth(target_state):
+    if not _target_uses_dmf_jit_layout(target_state):
+        return None
+    net_state = target_state["net"]
+    return sum(1 for key in net_state if key.startswith("encoder_blocks_"))
 
 
 def _target_uses_exact_sit_layout(target_state):
@@ -667,6 +721,12 @@ def load_checkpoint_params(workdir, prefer_ema=True, target_state=None, target_m
     if os.path.isfile(workdir) and workdir.endswith((".pt", ".pth", ".pth.tar")):
         source_tree = _load_torch_checkpoint_state_dict(workdir, prefer_ema=prefer_ema)
         log_for_0("Loaded PyTorch checkpoint from {}".format(workdir))
+        if _target_uses_dmf_jit_layout(target_state):
+            encoder_depth = _infer_dmf_jit_encoder_depth(target_state)
+            return _convert_torch_jit_state_dict_to_flax_dmf(
+                source_tree,
+                encoder_depth=24 if encoder_depth is None else encoder_depth,
+            )
         if _target_uses_jit_layout(target_state):
             return _convert_torch_jit_state_dict_to_flax(source_tree)
         if _target_uses_exact_sit_layout(target_state):

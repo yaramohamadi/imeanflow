@@ -104,6 +104,7 @@ DEFAULT_OPTAX_VERSION="${OPTAX_VERSION:-0.2.2}"
 DEFAULT_CHEX_VERSION="${CHEX_VERSION:-0.1.86}"
 DEFAULT_ORBAX_CHECKPOINT_VERSION="${ORBAX_CHECKPOINT_VERSION:-0.6.4}"
 DEFAULT_CLU_VERSION="${CLU_VERSION:-0.0.11}"
+DEFAULT_TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-4.49.0}"
 
 if [ "${IS_COMPUTE_CANADA}" -eq 1 ]; then
     GPU_JAX_VERSION="${GPU_JAX_VERSION:-0.4.28}"
@@ -126,6 +127,7 @@ else
     CHEX_VERSION="${CHEX_VERSION:-${DEFAULT_CHEX_VERSION}}"
     ORBAX_CHECKPOINT_VERSION="${ORBAX_CHECKPOINT_VERSION:-${DEFAULT_ORBAX_CHECKPOINT_VERSION}}"
     CLU_VERSION="${CLU_VERSION:-${DEFAULT_CLU_VERSION}}"
+    TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-${DEFAULT_TRANSFORMERS_VERSION}}"
 fi
 
 # Python 3.12 cannot use the original TensorFlow 2.15 pin from this repo.
@@ -221,13 +223,52 @@ else
         "tensorstore==0.1.67" \
         "timm" \
         "tqdm" \
-        "transformers" \
+        "transformers==${TRANSFORMERS_VERSION}" \
         "wandb"
 
     # Some upstream wheels have broad JAX requirements and may pull in a newer
     # CPU-only jaxlib during the dependency install above. Re-apply the
     # requested JAX platform pin so GPU jobs do not silently fall back to CPU.
     install_jax
+fi
+
+# The upstream JAX 0.4.x CUDA extra leaves CUDA 12 component versions
+# open-ended. On machines such as Taylor, that can install CUDA 12.9 wheels
+# even when the NVIDIA driver only supports CUDA 12.8. The mismatch breaks
+# cuDNN-backed FID/Inception evaluation even when the training step still runs.
+# Keep a driver-compatible CUDA 12.4 stack by default; set
+# PIN_CUDA12_COMPAT_STACK=0 to opt out.
+if [ "${IS_COMPUTE_CANADA}" -eq 0 ] && \
+   [ "${JAX_PLATFORM}" = "gpu" ] && \
+   [ "${PIN_CUDA12_COMPAT_STACK:-1}" -eq 1 ]; then
+    # Un-suffixed NVIDIA wheels are CUDA 13 packages. They share Python
+    # package directories with the -cu12 wheels and can overwrite their files.
+    python -m pip uninstall -y \
+        nvidia-cublas \
+        nvidia-cuda-cupti \
+        nvidia-cuda-nvrtc \
+        nvidia-cuda-runtime \
+        nvidia-cufft \
+        nvidia-cufile \
+        nvidia-curand \
+        nvidia-cusolver \
+        nvidia-cusparse \
+        nvidia-nvjitlink \
+        nvidia-nvtx || true
+
+    python -m pip install --upgrade \
+        "nvidia-cublas-cu12==12.4.5.8" \
+        "nvidia-cuda-cupti-cu12==12.4.127" \
+        "nvidia-cuda-nvcc-cu12==12.4.131" \
+        "nvidia-cuda-nvrtc-cu12==12.4.127" \
+        "nvidia-cuda-runtime-cu12==12.4.127" \
+        "nvidia-cudnn-cu12==8.9.7.29" \
+        "nvidia-cufft-cu12==11.2.1.3" \
+        "nvidia-curand-cu12==10.3.5.147" \
+        "nvidia-cusolver-cu12==11.6.1.9" \
+        "nvidia-cusparse-cu12==12.3.1.170" \
+        "nvidia-nccl-cu12==2.21.5" \
+        "nvidia-nvjitlink-cu12==12.4.127"
 fi
 
 # PyTorch GPU wheels can pull in a newer cuDNN runtime that conflicts with the

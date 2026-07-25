@@ -28,11 +28,11 @@ Env knobs:
   CONTINUE_ON_FAILURE=False           # set True to continue after a dataset fails
   ASSET_CHECK=True                    # verify dataset/stat/weight paths before running or submitting
   SUBMIT_SLURM=False                  # True submits; DryRun writes sbatch files without submitting; False runs locally
-  SLURM_ACCOUNT=def-hadi87
+  SLURM_ACCOUNT=rrg-josedolz
   SLURM_GRES=gpu:h100:1               # override if your cluster uses a different H100 GRES name
   SLURM_MEM=64G
   SLURM_CPUS_PER_TASK=8
-  SLURM_MAIL_USER=yara.mohammadi-bahram@livia.etsmtl.ca
+  SLURM_MAIL_USER=zahra.dehghani.t@gmail.com                    # optional; unset disables email notifications
   SLURM_MAIL_TYPE=BEGIN,END,FAIL
   SLURM_TIME=...                     # optional single time for all jobs
   SLURM_TIME_SIT=11:00:00
@@ -66,11 +66,11 @@ mkdir -p "$SWEEP_LOG_DIR"
 MANIFEST="$SWEEP_LOG_DIR/sweep_manifest.tsv"
 printf "dataset\tbackbone\trun_label\twandb_project\twandb_name\tslurm_time\tstatus\n" > "$MANIFEST"
 
-SLURM_ACCOUNT="${SLURM_ACCOUNT:-def-hadi87}"
+SLURM_ACCOUNT="${SLURM_ACCOUNT:-rrg-josedolz}"
 SLURM_GRES="${SLURM_GRES:-gpu:h100:1}"
 SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-8}"
-SLURM_MAIL_USER="${SLURM_MAIL_USER:-yara.mohammadi-bahram@livia.etsmtl.ca}"
+SLURM_MAIL_USER="${SLURM_MAIL_USER:-zahra.dehghani.t@gmail.com}"
 SLURM_MAIL_TYPE="${SLURM_MAIL_TYPE:-BEGIN,END,FAIL}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.10.13}"
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.2}"
@@ -118,29 +118,29 @@ set_dataset_assets_for_check() {
   local dataset="$1"
   case "${dataset}" in
     caltech101|caltech-101)
-      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/ymbahram/datasets/caltech-101_processed_latents}"
-      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/caltech-101-fid_stats.npz}"
-      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-/scratch/ymbahram/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
+      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/${USER}/datasets/caltech-101_processed_latents}"
+      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/caltech-101-fid_stats.npz}"
+      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-${REPO_ROOT}/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz}"
       ;;
     artbench10|artbench-10)
-      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/ymbahram/datasets/artbench-10_processed_latents}"
-      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/artbench-10_processed-fid_stats.npz}"
-      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-/scratch/ymbahram/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
+      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/${USER}/datasets/artbench-10_processed_latents}"
+      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/artbench-10_processed-fid_stats.npz}"
+      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-${REPO_ROOT}/files/fdd_stats/artbench-10-fd_dino-vitb14_stats.npz}"
       ;;
     cub200|cub-200|cub-200-2011)
-      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/ymbahram/datasets/cub-200-2011_processed_latents}"
-      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/cub-200-2011_processed-fid_stats.npz}"
-      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-/scratch/ymbahram/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
+      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/${USER}/datasets/cub-200-2011_processed_latents}"
+      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/cub-200-2011_processed-fid_stats.npz}"
+      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-${REPO_ROOT}/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz}"
       ;;
     food101|food-101)
-      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/ymbahram/datasets/food-101_processed_latents}"
-      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/food-101_processed-fid_stats.npz}"
-      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-/scratch/ymbahram/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
+      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/${USER}/datasets/food-101_processed_latents}"
+      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/food-101_processed-fid_stats.npz}"
+      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-${REPO_ROOT}/files/fdd_stats/food-101-fd_dino-vitb14_stats.npz}"
       ;;
     stanfordcars|stanford-cars|cars)
-      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/ymbahram/datasets/stanford-cars_processed_latents}"
-      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-/scratch/ymbahram/fid_stats/stanford_cars_processed-fid_stats.npz}"
-      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-/scratch/ymbahram/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
+      DATASET_ROOT_FOR_CHECK="${DATASET_ROOT:-/scratch/${USER}/datasets/stanford-cars_processed_latents}"
+      FID_CACHE_REF_FOR_CHECK="${FID_CACHE_REF:-${REPO_ROOT}/files/fid_stats/stanford_cars_processed-fid_stats.npz}"
+      FD_DINO_CACHE_REF_FOR_CHECK="${FD_DINO_CACHE_REF-${REPO_ROOT}/files/fdd_stats/stanford-cars-fd_dino-vitb14_stats.npz}"
       ;;
     *)
       echo "ERROR: unknown DATASET_NAME='$dataset'. Known: caltech101, artbench10, cub200, food101, stanfordcars." >&2
@@ -195,7 +195,7 @@ check_assets_for_job() {
       LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
       ;;
     imf)
-      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
+      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-${REPO_ROOT}/files/weights/iMF-XL-2-full}"
       ;;
   esac
   check_required_path "$backbone initial checkpoint" "$LOAD_FROM_FOR_CHECK" || missing=1
@@ -242,7 +242,7 @@ write_dataset_job() {
       LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/DiT-XL-2-256x256.pt}"
       ;;
     imf)
-      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-/scratch/ymbahram/weights/iMF-XL-2-full}"
+      LOAD_FROM_FOR_CHECK="${LOAD_FROM:-${REPO_ROOT}/files/weights/iMF-XL-2-full}"
       ;;
   esac
 

@@ -3,7 +3,20 @@ import jax
 import jax.numpy as jnp
 
 from models import imfDiT
+from models import jit as imfJiT
 from utils.dit_diffusion import get_named_beta_schedule
+
+
+def _resolve_backbone_ctor(model_str):
+    """Resolve a backbone constructor by name.
+
+    Additive dispatch: pixel-space JiT backbones (names starting with
+    ``imfJiT``) live in ``models/jit.py``; everything else (DiT/SiT) resolves
+    from ``models.imfDiT`` exactly as before.
+    """
+    if model_str.startswith("imfJiT"):
+        return getattr(imfJiT, model_str)
+    return getattr(imfDiT, model_str)
 from utils.imf_param_util import is_v_only_param_tree
 from utils.sit_transport_jax import create_transport
 
@@ -149,7 +162,7 @@ class iMeanFlow(nn.Module):
         Setup improved MeanFlow model.
         """
         self._validate_target_wrapper_configuration()
-        net_fn = getattr(imfDiT, self.model_str)
+        net_fn = _resolve_backbone_ctor(self.model_str)
         net_kwargs = dict(
             name="net",
             num_classes=self.num_classes,
@@ -214,7 +227,7 @@ class iMeanFlow(nn.Module):
             source_model_str = (
                 self.source_model_str if self.source_model_str else self.model_str
             )
-            source_net_fn = getattr(imfDiT, source_model_str)
+            source_net_fn = _resolve_backbone_ctor(source_model_str)
             source_net_kwargs = dict(
                 name="source_net",
                 num_classes=source_num_classes,

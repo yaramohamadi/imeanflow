@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Dict, Optional
 
@@ -48,32 +49,34 @@ def build_jax_dinov2(
             "The default dgm-eval path uses standard bicubic resize."
         )
 
-    from transformers import FlaxDinov2Model
+    # NOTE: transformers.FlaxDinov2Model was never shipped in any stock
+    # `transformers` release (DINOv2 was only ported to PyTorch), so the former
+    # Flax path could not load in this env. We instead run a pure-JAX
+    # reimplementation of the DINOv2-base forward that loads the official HF
+    # weights and matches torch's pooler_output to ~1e-5. This keeps the existing
+    # 768-dim reference FD-DINO stats valid and avoids a torch-CUDA wheel whose
+    # bundled cuDNN would clash with JAX's cuDNN in-process.
+    if arch != "vitb14":
+        raise NotImplementedError(
+            f"JAX-native DINOv2 currently supports only 'vitb14' (dinov2-base); "
+            f"got {arch}. Bake weights for other sizes to extend."
+        )
+    from . import dinov2_jax
 
     resolved_model_name = model_name or DINOV2_MODEL_NAMES[arch]
-    logging.info("Initializing Flax DINOv2 model '%s'", resolved_model_name)
-    model = FlaxDinov2Model.from_pretrained(
-        resolved_model_name,
-        dtype=jnp.float32,
+    weights_path = os.environ.get(
+        "DINOV2_JAX_WEIGHTS",
+        os.path.join("files", "weights", "dinov2_base_hf.safetensors"),
     )
-    params = model.params
+    posembed_path = os.environ.get(
+        "DINOV2_JAX_POSEMBED",
+        os.path.join("files", "weights", "dinov2_base_posembed_224.npy"),
+    )
+    logging.info(
+        "Initializing JAX-native DINOv2 '%s' from %s", resolved_model_name, weights_path
+    )
+    params, dino_fn = dinov2_jax.build_forward(weights_path, posembed_path)
 
-    def dinov2_apply_one(model_params, pixel_value):
-        outputs = model(
-            pixel_values=pixel_value[jnp.newaxis, ...],
-            params=model_params,
-            train=False,
-        )
-        if outputs.pooler_output is not None:
-            return outputs.pooler_output[0]
-        return outputs.last_hidden_state[0, 0]
-
-    def dinov2_apply(model_params, pixel_values):
-        return jax.vmap(lambda pixel_value: dinov2_apply_one(model_params, pixel_value))(
-            pixel_values
-        )
-
-    dino_fn = jax.jit(dinov2_apply)
     fake_x = jnp.zeros((batch_size, 3, DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), dtype=jnp.float32)
     logging.info("Start compiling DINOv2 function...")
     t_start = time.time()
@@ -83,7 +86,7 @@ def build_jax_dinov2(
     return {
         "params": params,
         "fn": dino_fn,
-        "model": model,
+        "model": None,
         "arch": arch,
         "model_name": resolved_model_name,
         "clean_resize": clean_resize,

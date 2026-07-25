@@ -250,6 +250,37 @@ def get_image_metric_evaluator(config, writer, latent_manager):
     dino_net = None
     fd_dino_stats_ref = None
     if fd_dino_enabled:
+        # FD-DINO is optional.  Do not abort an otherwise valid FID/IS run
+        # merely because the local auxiliary DINO weights were not installed.
+        # Resolve defaults relative to the repository, since callers may start
+        # from a different working directory (screen/slurm jobs commonly do).
+        weights_path = os.environ.get(
+            "DINOV2_JAX_WEIGHTS",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "files", "weights", "dinov2_base_hf.safetensors"),
+        )
+        posembed_path = os.environ.get(
+            "DINOV2_JAX_POSEMBED",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "files", "weights", "dinov2_base_posembed_224.npy"),
+        )
+        if not (os.path.isfile(weights_path) and os.path.isfile(posembed_path)):
+            if os.environ.get("REQUIRE_FD_DINO", "0").lower() in {"1", "true", "yes"}:
+                raise FileNotFoundError(
+                    "FD-DINO is enabled but its local weights are missing. "
+                    f"Expected {weights_path} and {posembed_path}."
+                )
+            log_for_0(
+                "FD-DINO disabled: missing local weights (%s, %s). "
+                "FID and IS evaluation will continue.",
+                weights_path,
+                posembed_path,
+            )
+            fd_dino_enabled = False
+        else:
+            # Pass absolute paths into the loader so evaluation is independent
+            # of the process working directory.
+            os.environ.setdefault("DINOV2_JAX_WEIGHTS", weights_path)
+            os.environ.setdefault("DINOV2_JAX_POSEMBED", posembed_path)
+    if fd_dino_enabled:
         dino_net = dino_util.build_jax_dinov2(
             arch=fd_dino_config.get("arch", "vitb14"),
             model_name=fd_dino_config.get("model_name", None),

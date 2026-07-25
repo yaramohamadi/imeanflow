@@ -798,15 +798,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
     ########### Create train and sample pmap ###########
 
     if single_device_training:
-        p_train_step = partial(
-            train_step_with_vae_single_device,
-            rng_init=rng,
-            ema_fn=ema_fn,
-            lr_fn=lr_fn,
-            latent_manager=latent_manager,
-            use_ema=use_ema,
-            grad_accum_steps=grad_accum_steps,
-            v_only_teacher_source_copies=v_only_teacher_source_copies,
+        p_train_step = jax.jit(
+            partial(
+                train_step_with_vae_single_device,
+                rng_init=rng,
+                ema_fn=ema_fn,
+                lr_fn=lr_fn,
+                latent_manager=latent_manager,
+                use_ema=use_ema,
+                grad_accum_steps=grad_accum_steps,
+                v_only_teacher_source_copies=v_only_teacher_source_copies,
+            ),
+            donate_argnums=(0,),
         )
         p_debug_step = partial(
             debug_step_with_vae_single_device,

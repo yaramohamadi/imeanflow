@@ -446,6 +446,191 @@ class JiT(nn.Module):
         return self.unpatchify(x)
 
 
+class imfJiT_DMF(nn.Module):
+    """Decoupled single-head pixel-space JiT for MeanFlow transfer (MeFT).
+
+    This mirrors :class:`JiT` but splits the transformer stack into an encoder
+    (conditioned on ``t``) and a decoder (conditioned on ``r``), matching the
+    Decoupled MeanFlow (DMF) single-head interface used by the DiT/SiT MeFT
+    backbones in ``models/imfDiT.py``. The forward signature is intentionally
+    identical to ``imfSiT_DMF.__call__``:
+
+        ``(x, t, r, y, omega=None, t_min=None, t_max=None)``
+
+    Input and output tensors are BHWC images in pixel space. The pretrained
+    JiT network predicts clean images (data space); the :class:`iMeanFlow`
+    wrapper converts this raw data prediction into transport velocity, so this
+    backbone stays a drop-in data-space predictor.
+    """
+
+    input_size: int = 256
+    patch_size: int = 16
+    in_channels: int = 3
+    hidden_size: int = 1280
+    encoder_depth: int = 24
+    decoder_depth: int = 8
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    attn_drop: float = 0.0
+    proj_drop: float = 0.0
+    num_classes: int = 1000
+    use_null_class: bool = True
+    bottleneck_dim: int = 256
+    in_context_len: int = 32
+    in_context_start: int = 10
+    time_conditioning_mode: str = "split"
+    # Guidance-conditioning knobs are accepted for interface parity with
+    # ``imfSiT_DMF`` (imf.py forwards them to every DMF backbone). Only the
+    # disabled/plain configuration is supported for the JiT MeFT path.
+    use_context_guidance_conditioning: bool = False
+    use_adaln_guidance_scale_conditioning: bool = False
+    adaln_guidance_scale_init: str = "timestep"
+    use_adaln_condition_mixing: bool = False
+    decoder_only_guidance_conditioning: bool = False
+    eval: bool = False
+
+    def setup(self):
+        if self.time_conditioning_mode not in {"split", "both"}:
+            raise ValueError(
+                "time_conditioning_mode must be one of ['split', 'both']."
+            )
+        if (
+            self.use_context_guidance_conditioning
+            or self.use_adaln_guidance_scale_conditioning
+            or self.use_adaln_condition_mixing
+            or self.decoder_only_guidance_conditioning
+        ):
+            raise NotImplementedError(
+                "imfJiT_DMF currently supports only the plain (no guidance "
+                "conditioning) configuration."
+            )
+
+        self.out_channels = self.in_channels
+        self.depth = self.encoder_depth + self.decoder_depth
+
+        self.t_embedder = JiTTimestepEmbedder(self.hidden_size)
+        # Class embedder: +1 slot for the null class used by CFG dropout.
+        num_label_slots = self.num_classes + (1 if self.use_null_class else 0)
+        self.y_embedder = JiTLabelEmbedder(num_label_slots - 1, self.hidden_size)
+        self.x_embedder = BottleneckPatchEmbed(
+            img_size=self.input_size,
+            patch_size=self.patch_size,
+            in_chans=self.in_channels,
+            pca_dim=self.bottleneck_dim,
+            embed_dim=self.hidden_size,
+            bias=True,
+        )
+
+        num_patches = (self.input_size // self.patch_size) ** 2
+        self.pos_embed = self.param(
+            "pos_embed",
+            lambda key, shape: jnp.asarray(
+                get_2d_sincos_pos_embed(
+                    self.hidden_size,
+                    int(num_patches**0.5),
+                ).reshape(shape),
+                dtype=jnp.float32,
+            ),
+            (1, num_patches, self.hidden_size),
+        )
+
+        if self.in_context_len > 0:
+            self.in_context_posemb = self.param(
+                "in_context_posemb",
+                nn.initializers.normal(stddev=0.02),
+                (1, self.in_context_len, self.hidden_size),
+            )
+
+        half_head_dim = self.hidden_size // self.num_heads // 2
+        hw_seq_len = self.input_size // self.patch_size
+        self.feat_rope = vision_rope_frequencies(
+            dim=half_head_dim,
+            pt_seq_len=hw_seq_len,
+            num_cls_token=0,
+        )
+        self.feat_rope_incontext = vision_rope_frequencies(
+            dim=half_head_dim,
+            pt_seq_len=hw_seq_len,
+            num_cls_token=self.in_context_len,
+        )
+
+        def _make_block(i):
+            drop_active = self.depth // 4 * 3 > i >= self.depth // 4
+            return JiTBlock(
+                self.hidden_size,
+                self.num_heads,
+                mlp_ratio=self.mlp_ratio,
+                attn_drop=self.attn_drop if drop_active else 0.0,
+                proj_drop=self.proj_drop if drop_active else 0.0,
+                eval=self.eval,
+            )
+
+        self.encoder_blocks = [_make_block(i) for i in range(self.encoder_depth)]
+        self.decoder_blocks = [
+            _make_block(self.encoder_depth + i) for i in range(self.decoder_depth)
+        ]
+        self.final_layer = JiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+
+    def unpatchify(self, x):
+        channels = self.out_channels
+        p = self.patch_size
+        h = w = int(x.shape[1] ** 0.5)
+        if h * w != x.shape[1]:
+            raise ValueError(f"Cannot unpatchify sequence length {x.shape[1]}.")
+        x = x.reshape((x.shape[0], h, w, p, p, channels))
+        x = jnp.einsum("nhwpqc->nhpwqc", x)
+        return x.reshape((x.shape[0], h * p, w * p, channels))
+
+    def __call__(self, x, t, r, y, omega=None, t_min=None, t_max=None):
+        del omega, t_min, t_max  # unused in the plain JiT MeFT configuration
+
+        if y is None:
+            y = jnp.zeros((x.shape[0],), dtype=jnp.int32)
+        y = y.astype(jnp.int32)
+        y_emb = self.y_embedder(y)
+
+        t_emb = self.t_embedder(t)
+        r_emb = self.t_embedder(r)
+        if self.time_conditioning_mode == "both":
+            shared = t_emb + r_emb
+            encoder_c = shared + y_emb
+            decoder_c = shared + y_emb
+        else:
+            encoder_c = t_emb + y_emb
+            decoder_c = r_emb + y_emb
+
+        x = self.x_embedder(x)
+        x = x + self.pos_embed
+
+        blocks = list(self.encoder_blocks) + list(self.decoder_blocks)
+        for i, block in enumerate(blocks):
+            if self.in_context_len > 0 and i == self.in_context_start:
+                in_context_tokens = jnp.repeat(
+                    y_emb[:, None, :],
+                    self.in_context_len,
+                    axis=1,
+                )
+                in_context_tokens = in_context_tokens + self.in_context_posemb
+                x = jnp.concatenate([in_context_tokens, x], axis=1)
+
+            rope = (
+                self.feat_rope
+                if i < self.in_context_start
+                else self.feat_rope_incontext
+            )
+            c = encoder_c if i < self.encoder_depth else decoder_c
+            x = block(x, c, rope)
+
+        if self.in_context_len > 0:
+            x = x[:, self.in_context_len :]
+        x = self.final_layer(x, decoder_c)
+        return self.unpatchify(x)
+
+
 flaxJiT_H_16 = partial(
     JiT,
     depth=32,
@@ -458,6 +643,25 @@ flaxJiT_H_16 = partial(
 )
 
 
+# Decoupled MeanFlow (DMF) single-head pixel-space JiT backbone. Splits the 32
+# pretrained JiT-H/16 blocks into a 24-block encoder + 8-block decoder, mirroring
+# the imfSiT_DMF encoder/decoder ratio while preserving JiT-H hyperparameters.
+imfJiT_DMF_H_16 = partial(
+    imfJiT_DMF,
+    input_size=256,
+    patch_size=16,
+    in_channels=3,
+    hidden_size=1280,
+    num_heads=16,
+    bottleneck_dim=256,
+    in_context_len=32,
+    in_context_start=10,
+    encoder_depth=24,
+    decoder_depth=8,
+)
+
+
 JiT_models = {
     "flaxJiT_H_16": flaxJiT_H_16,
+    "imfJiT_DMF_H_16": imfJiT_DMF_H_16,
 }
