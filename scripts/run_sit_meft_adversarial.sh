@@ -65,7 +65,8 @@ export CUDA_VISIBLE_DEVICES="$GPU_LIST"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 
-exec "$PYTHON_BIN" "$MAIN" \
+set +e
+"$PYTHON_BIN" "$MAIN" \
   --config="$CONFIG_SPEC" \
   --config.load_from="$LOAD_FROM" \
   --config.dataset.name="${DATASET}_latent" \
@@ -77,3 +78,25 @@ exec "$PYTHON_BIN" "$MAIN" \
   --config.fid.cache_ref="$REPO/files/fid_stats/$FID" \
   --config.fd_dino.cache_ref="$REPO/files/fdd_stats/$FDD" \
   --workdir="$WORKDIR"
+TRAIN_STATUS=$?
+set -e
+if [[ "$TRAIN_STATUS" -ne 0 ]]; then
+  exit "$TRAIN_STATUS"
+fi
+
+if [[ "${RUN_FINAL_EVAL:-True}" == "True" ]]; then
+  read -r -a FINAL_EVAL_STEP_ARRAY <<< "${FINAL_EVAL_STEPS:-1 2}"
+  FINAL_EVAL_ARGS=(
+    "--config.dataset.name=${DATASET}_latent"
+    "--config.dataset.root=$DATA_ROOT"
+    "--config.dataset.class_mapping_root="
+    "--config.dataset.num_classes=$NC"
+    "--config.model.num_classes=$NC"
+    "--config.sampling.num_classes=$NC"
+    "--config.fid.cache_ref=$REPO/files/fid_stats/$FID"
+    "--config.fd_dino.cache_ref=$REPO/files/fdd_stats/$FDD"
+  )
+  CONFIG_MODE="$CONFIG_MODE" PYTHON="$PYTHON_BIN" USE_WANDB=False \
+    bash "$REPO/scripts/eval_best_fid_steps_sit_meft_adversarial.sh" \
+      "$WORKDIR" "${FINAL_EVAL_STEP_ARRAY[@]}" -- "${FINAL_EVAL_ARGS[@]}"
+fi

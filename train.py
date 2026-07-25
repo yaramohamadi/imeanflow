@@ -1326,6 +1326,36 @@ def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
                 best_fd_dino = fd_dino
                 best_fd_dino_config = (metric_num_step, omega, t_min, t_max)
 
+            # Keep a small visual artifact beside each final-evaluation run.
+            # AFM/CA-iMF post-training uses this eval-only path and otherwise
+            # has no training preview hook.  The key includes NFE so 1- and
+            # 2-step grids do not overwrite one another.
+            if bool(config.training.get("final_eval_write_images", True)):
+                requested_images = int(
+                    config.training.get("final_eval_num_images", 16)
+                )
+                grid_size = int(np.sqrt(max(requested_images, 1)))
+                preview_num_images = grid_size * grid_size
+                if preview_num_images > 0:
+                    preview_images = generate_preview_samples_first_device(
+                        state,
+                        p_metric_sample_step,
+                        latent_manager,
+                        ema=use_ema,
+                        num_samples=preview_num_images,
+                        param_dtype=get_sampling_param_dtype(config),
+                        sample_local_device_count=sample_local_device_count,
+                        **kwargs,
+                    )
+                    writer.write_images(
+                        step,
+                        {
+                            f"image_grid_steps_{metric_num_step}": _make_uint8_image_grid(
+                                preview_images, grid_size
+                            )
+                        },
+                    )
+
     for row in csv_rows:
         row_config = (
             row["sampling_num_steps"],
