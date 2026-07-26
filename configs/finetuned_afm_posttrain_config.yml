@@ -17,13 +17,13 @@ model:
     max_sampled_guidance_scale: 8.0
 
 afm:
-    ablation: afm_only
+    ablation: afm_anchor
     lambda_adv: 1.0
     lambda_imf: 0.0
     lambda_ot: 0.0
     lambda_ot_end: 0.0
     lambda_ot_decay_steps: 0
-    lambda_anchor: 0.0
+    lambda_anchor: 0.1
     anchor_decay_steps: 30000
     lambda_gp: 0.0
     lambda_cp: 0.01
@@ -51,7 +51,7 @@ afm:
     use_discriminator_augmentation: False
     discriminator_augmentation_probability: 0.0
     load_generator_ema: False
-    max_posttrain_batches: 155000
+    max_posttrain_batches: 40000
     max_abs_discriminator_logit: 100.0
     resume_from: ''
 

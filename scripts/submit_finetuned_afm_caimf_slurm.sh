@@ -12,15 +12,20 @@ Set SUBMIT_SLURM=True to actually submit with sbatch. DryRun only writes sbatch 
 Common knobs:
   METHODS="afm caimf"
   DATASETS="artbench10 caltech101 cub200 food101 stanfordcars"
-  AFM_ABLATION=B
-  CAIMF_EXPERIMENT=1
+  SOURCE_MODE=target_ft             # target_ft or original_imf
+  ORIGINAL_IMF_CHECKPOINT=/path/to/iMF-XL-2
+  AFM_ABLATION=D
+  LAMBDA_ANCHOR=0.1
+  AFM_MAX_POSTTRAIN_BATCHES=40000
+  CAIMF_EXPERIMENT=5
+  CAIMF_MAX_POSTTRAIN_BATCHES=120000
   RUN_FINAL_BEST_FID_EVAL=True
   FINAL_EVAL_STEPS="1 2"
   USE_WANDB=True
   SLURM_ACCOUNT=rrg-josedolz
   SLURM_GRES=gpu:h100:1
-  SLURM_TIME_AFM=24:00:00
-  SLURM_TIME_CAIMF=24:00:00
+  SLURM_TIME_AFM=10:00:00
+  SLURM_TIME_CAIMF=18:00:00
 EOF
   exit 1
 fi
@@ -29,10 +34,24 @@ RUN_LABEL="$1"
 shift
 EXTRA_ARGS=("$@")
 
-REPO="${REPO:-/home/zahradt/links/projects/def-hadi87/zahradt/imeanflow}"
+REPO="${REPO:-/home/zahradt/projects/def-hadi87/zahradt/imeanflow}"
 METHODS="${METHODS:-afm caimf}"
 DATASETS="${DATASETS:-artbench10 caltech101 cub200 food101 stanfordcars}"
 SUBMIT_SLURM="${SUBMIT_SLURM:-DryRun}"
+SOURCE_MODE="${SOURCE_MODE:-target_ft}"
+ORIGINAL_IMF_CHECKPOINT="${ORIGINAL_IMF_CHECKPOINT:-$REPO/files/weights/iMF-XL-2}"
+case "${SOURCE_MODE,,}" in
+  target_ft|target_finetuned)
+    SOURCE_LOAD_GENERATOR_EMA=False
+    ;;
+  original_imf|imagenet_imf|imagenet)
+    SOURCE_LOAD_GENERATOR_EMA=True
+    ;;
+  *)
+    echo "ERROR: SOURCE_MODE must be target_ft or original_imf, got '$SOURCE_MODE'." >&2
+    exit 2
+    ;;
+esac
 NOW="$(date '+%Y%m%d_%H%M%S')"
 SWEEP_LOG_DIR="${SWEEP_LOG_DIR:-$REPO/files/logs/sweeps/finetuned_afm_caimf_${RUN_LABEL}_${NOW}}"
 SLURM_SCRIPT_DIR="$SWEEP_LOG_DIR/slurm"
@@ -42,15 +61,18 @@ SLURM_ACCOUNT="${SLURM_ACCOUNT:-rrg-josedolz}"
 SLURM_GRES="${SLURM_GRES:-gpu:h100:1}"
 SLURM_MEM="${SLURM_MEM:-96G}"
 SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-8}"
-SLURM_TIME_AFM="${SLURM_TIME_AFM:-24:00:00}"
-SLURM_TIME_CAIMF="${SLURM_TIME_CAIMF:-24:00:00}"
+SLURM_TIME_AFM="${SLURM_TIME_AFM:-10:00:00}"
+SLURM_TIME_CAIMF="${SLURM_TIME_CAIMF:-18:00:00}"
 SLURM_MAIL_USER="${SLURM_MAIL_USER:-zahra.dehghani.t@gmail.com}"
 SLURM_MAIL_TYPE="${SLURM_MAIL_TYPE:-END,FAIL}"
-PYTHON_MODULE="${PYTHON_MODULE:-python/3.10.13}"
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.2}"
 USE_WANDB="${USE_WANDB:-False}"
-AFM_ABLATION="${AFM_ABLATION:-B}"
-CAIMF_EXPERIMENT="${CAIMF_EXPERIMENT:-1}"
+AFM_ABLATION="${AFM_ABLATION:-D}"
+LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.1}"
+AFM_MAX_POSTTRAIN_BATCHES="${AFM_MAX_POSTTRAIN_BATCHES:-40000}"
+CAIMF_EXPERIMENT="${CAIMF_EXPERIMENT:-5}"
+CAIMF_MAX_POSTTRAIN_BATCHES="${CAIMF_MAX_POSTTRAIN_BATCHES:-120000}"
 RUN_FINAL_BEST_FID_EVAL="${RUN_FINAL_BEST_FID_EVAL:-True}"
 FINAL_EVAL_STEPS="${FINAL_EVAL_STEPS:-1 2}"
 FINAL_EVAL_USE_WANDB="${FINAL_EVAL_USE_WANDB:-False}"
@@ -109,6 +131,10 @@ dataset_assets() {
       exit 2
       ;;
   esac
+
+  if [[ "$SOURCE_LOAD_GENERATOR_EMA" == "True" ]]; then
+    CHECKPOINT="$ORIGINAL_IMF_CHECKPOINT"
+  fi
 }
 
 check_assets() {
@@ -137,12 +163,17 @@ write_job() {
     afm)
       train_script="scripts/train_finetuned_afm.sh"
       job_time="$SLURM_TIME_AFM"
-      method_env="export AFM_ABLATION=$(printf '%q' "$AFM_ABLATION")"
+      method_env="export AFM_ABLATION=$(printf '%q' "$AFM_ABLATION")
+export LAMBDA_ANCHOR=$(printf '%q' "$LAMBDA_ANCHOR")
+export AFM_MAX_POSTTRAIN_BATCHES=$(printf '%q' "$AFM_MAX_POSTTRAIN_BATCHES")
+export AFM_LOAD_GENERATOR_EMA=$(printf '%q' "$SOURCE_LOAD_GENERATOR_EMA")"
       ;;
     caimf)
       train_script="scripts/train_finetuned_caimf.sh"
       job_time="$SLURM_TIME_CAIMF"
-      method_env="export CAIMF_EXPERIMENT=$(printf '%q' "$CAIMF_EXPERIMENT")"
+      method_env="export CAIMF_EXPERIMENT=$(printf '%q' "$CAIMF_EXPERIMENT")
+export CAIMF_MAX_POSTTRAIN_BATCHES=$(printf '%q' "$CAIMF_MAX_POSTTRAIN_BATCHES")
+export CAIMF_LOAD_GENERATOR_EMA=$(printf '%q' "$SOURCE_LOAD_GENERATOR_EMA")"
       ;;
     *)
       echo "ERROR: unknown method '$method'. Known: afm, caimf." >&2
@@ -198,6 +229,7 @@ write_job() {
 
 echo "Repo: $REPO"
 echo "Run label: $RUN_LABEL"
+echo "Source mode: $SOURCE_MODE"
 echo "Methods: $METHODS"
 echo "Datasets: $DATASETS"
 echo "Submit Slurm: $SUBMIT_SLURM"

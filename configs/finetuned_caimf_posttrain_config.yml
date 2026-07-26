@@ -19,7 +19,7 @@ model:
     max_sampled_guidance_scale: 8.0
 
 caimf:
-    lambda_imf: 0.01
+    lambda_imf: 0.0
     lambda_adv: 1.0
     lambda_ot: 0.0
     lambda_cp: 0.001
@@ -34,7 +34,7 @@ caimf:
     discriminator_updates: True
     freeze_discriminator_backbone: False
     load_generator_ema: False
-    max_posttrain_batches: 155000
+    max_posttrain_batches: 120000
 
 training:
     num_epochs: 1000
