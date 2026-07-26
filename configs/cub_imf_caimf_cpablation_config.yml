@@ -1,0 +1,96 @@
+dataset:
+    root: /opt/dlami/nvme/meanflow/datasets/cub-200-2011_processed_latents
+    num_classes: 200
+    num_classes_from_data: True
+    num_workers: 4
+    prefetch_factor: 2
+    pin_memory: True
+
+model:
+    model_str: imfDiT_XL_2
+    num_classes: 200
+    training_mode: imf_jvp
+    target_use_null_class: True
+    use_auxiliary_v_head: True
+    use_dogfit: False
+    class_dropout_prob: 0.1
+    cfg_beta: 1.0
+    guidance_scale_strategy: sampled
+    max_sampled_guidance_scale: 8.0
+
+caimf:
+    # ---- shared operating point for the CP ablation (identical across variants) ----
+    # PURE-adversarial, matching the project CAIMF definition + the SiT runs so this
+    # ablation is apples-to-apples with the rest of the CAIMF work.
+    lambda_imf: 0.0
+    lambda_adv: 1.0
+    lambda_ot: 0.0
+    lambda_cp: 0.001
+    cp_mode: full            # overridden per-variant on the CLI (--config.caimf.cp_mode=...)
+    interval_eps: 0.001
+    gen_learning_rate: 0.00001
+    dis_learning_rate: 0.00001
+    adam_beta1: 0.0
+    adam_beta2: 0.95
+    weight_decay: 0.0
+    discriminator_warmup_batches: 5000
+    discriminator_steps_per_cycle: 4
+    discriminator_updates: True
+    freeze_discriminator_backbone: False
+    load_generator_ema: False
+    max_posttrain_batches: 155000
+
+training:
+    num_epochs: 1000
+    batch_size: 2
+    grad_accum_steps: 1
+    use_ema: True
+    ema_val: 0.9999
+    log_per_step: 100
+    checkpoint_per_epoch: 1
+    sample_per_step: 0
+    fid_per_step: 0
+    fid_schedule:
+        - from_step: 5000
+          every_steps: 5000
+    metric_num_steps:
+        - 1
+        - 4
+    save_best_fid_only: True
+    save_best_fid_eval_state_only: True
+    best_fid_checkpoint_dir: best_fid
+    save_eval_checkpoint_per_fid: False
+    eval_checkpoint_dir: latest_eval
+    seed: 42
+
+fid:
+    cache_ref: /opt/dlami/nvme/meanflow/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz
+    device_batch_size: 2
+    sample_device_batch_size: 2
+    sample_log_every: 25
+    num_samples: 10000
+
+fd_dino:
+    arch: vitb14
+    cache_ref: /opt/dlami/nvme/meanflow/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz
+
+sampling:
+    num_classes: 200
+    num_steps: 4
+    omega: 7.5
+    t_min: 0.4
+    t_max: 0.65
+
+logging:
+    use_wandb: False
+    wandb_project: caimf_cp_ablation
+    wandb_name: cub_imf_caimf_cpablation
+    wandb_entity: yara-mohammadi-bahram-1-ecole-superieure-de-technologie
+    wandb_tags:
+        - caimf
+        - cp-ablation
+        - cub200
+    wandb_notes: CA-iMF CP-regularization ablation on CUB-200 from target fine-tuned iMF checkpoint.
+
+load_from: ''
+partial_load: True
