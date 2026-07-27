@@ -1,0 +1,98 @@
+dataset:
+    root: /home/ens/Zdehghani/datasets/caltech-101_processed_latents
+    num_classes: 101
+    num_classes_from_data: True
+    num_workers: 4
+    prefetch_factor: 2
+    pin_memory: True
+
+model:
+    model_str: imfDiT_XL_2
+    num_classes: 101
+    training_mode: imf_jvp
+    target_use_null_class: True
+    # Original CAFM consumes instantaneous, not average, velocity.
+    use_auxiliary_v_head: True
+    use_dogfit: False
+    class_dropout_prob: 0.1
+    guidance_scale_strategy: fixed
+    fixed_guidance_scale: 1.0
+
+# The shared field name is retained only for checkpoint/evaluation-harness
+# compatibility. This pipeline uses the original CAFM JVP objective.
+caimf:
+    lambda_imf: 0.0
+    lambda_adv: 1.0
+    # The CAFM paper uses zero OT weight for post-training.
+    lambda_ot: 0.0
+    lambda_cp: 0.001
+    interval_eps: 0.0
+    gen_learning_rate: 0.00001
+    dis_learning_rate: 0.00001
+    adam_beta1: 0.0
+    adam_beta2: 0.95
+    weight_decay: 0.0
+    discriminator_warmup_batches: 10000
+    discriminator_steps_per_cycle: 16
+    discriminator_updates: True
+    freeze_discriminator_backbone: False
+    load_generator_ema: False
+    max_posttrain_batches: 180000
+
+training:
+    num_epochs: 1000
+    batch_size: 2
+    grad_accum_steps: 1
+    use_ema: True
+    # Official CAFM post-training EMA decay.
+    ema_val: 0.99
+    log_per_step: 100
+    checkpoint_per_epoch: 1
+    sample_per_step: 0
+    fid_per_step: 0
+    fid_schedule:
+        - from_step: 10000
+          every_steps: 5000
+    metric_num_steps:
+        - 1
+        - 4
+    save_best_fid_only: False
+    save_best_fid_eval_state_only: True
+    best_fid_checkpoint_dir: best_fid
+    save_eval_checkpoint_per_fid: False
+    eval_checkpoint_dir: latest_eval
+    seed: 42
+
+fid:
+    cache_ref: /home/ens/Zdehghani/imeanflow/files/fid_stats/caltech-101-fid_stats.npz
+    device_batch_size: 2
+    sample_device_batch_size: 2
+    sample_log_every: 25
+    num_samples: 10000
+
+fd_dino:
+    arch: vitb14
+    cache_ref: /home/ens/Zdehghani/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
+
+sampling:
+    num_classes: 101
+    num_steps: 4
+    omega: 7.5
+    t_min: 0.4
+    t_max: 0.65
+
+logging:
+    use_wandb: False
+    wandb_project: cafm_imf_caltech101
+    wandb_name: caltech_finetuned_original_cafm
+    wandb_entity: yara-mohammadi-bahram-1-ecole-superieure-de-technologie
+    wandb_tags:
+        - caltech101
+        - original-cafm
+        - target-finetuned-imf
+        - jvp
+        - posttrain
+    wandb_notes: Original CAFM JVP post-training from a Caltech-finetuned iMF checkpoint
+
+load_from: ''
+partial_load: True
