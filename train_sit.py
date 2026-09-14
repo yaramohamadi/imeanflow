@@ -209,6 +209,13 @@ def infer_num_classes_from_latents(dataset_root):
     return max_label + 1
 
 
+def _optional_float(value):
+    """Coerce a config value to float, keeping None (and "none") as None."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in {"", "none"}):
+        return None
+    return float(value)
+
+
 def _build_plain_sit(config, *, eval_mode=False):
     dtype = (
         get_sampling_param_dtype(config)
@@ -264,6 +271,9 @@ def _build_plain_sit(config, *, eval_mode=False):
         wrapped_loss_weight=str(config.model.get("sit_wrapped_loss_weight", "none")),
         model_time_scale=float(config.model.get("sit_model_time_scale", 1.0)),
         model_time_flip=bool(config.model.get("sit_model_time_flip", False)),
+        gt_on_lambda=_optional_float(config.model.get("sit_gt_on_lambda", None)),
+        gt_on_t_delta=float(config.model.get("sit_gt_on_t_delta", 0.2)),
+        gt_on_target=str(config.model.get("sit_gt_on_target", "data")),
         eval=eval_mode,
     )
 
@@ -286,6 +296,7 @@ def _load_initial_state(state, config):
         return restore_partial_checkpoint(
             state,
             load_path,
+            prefer_ema=bool(config.get("prefer_ema", True)),
             target_model_config=config.model,
         )
     return restore_checkpoint(state, load_path)
@@ -307,6 +318,7 @@ def _restore_eval_state(config, model, image_size, use_ema):
         state = restore_partial_checkpoint(
             state,
             load_path,
+            prefer_ema=bool(config.get("prefer_ema", True)),
             target_model_config=config.model,
         )
         if use_ema:

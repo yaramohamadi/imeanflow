@@ -243,6 +243,8 @@ class Transport:
             "pred": model_output,
             "target": ut,
             "t": t,
+            "xt": xt,
+            "x0": x0,
         }
 
         if self.model_type == ModelType.VELOCITY:

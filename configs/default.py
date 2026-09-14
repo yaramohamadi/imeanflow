@@ -145,6 +145,15 @@ def get_config():
     model.sit_model_time_scale = 1.0
     model.sit_model_time_flip = False
 
+    # Ground-truth-anchored on-policy post-training. `sit_gt_on_lambda` is the
+    # weight on the plain FM anchor: leave it None to keep the plain SiT loss.
+    model.sit_gt_on_lambda = None
+    # t' is drawn from the ordinary FM time distribution squeezed into
+    # [t0, (1 - delta) * t1], keeping the target divisor 1 - t' >= delta.
+    model.sit_gt_on_t_delta = 0.2
+    # "data" = the method (real endpoint); "self" = self-endpoint contrast.
+    model.sit_gt_on_target = "data"
+
     # Training Dynamics
     model.norm_p = 1.0
     model.norm_eps = 0.01
@@ -222,6 +231,10 @@ def get_config():
     # others
     config.load_from = ""
     config.partial_load = False
+    # Set False when the source run had `use_ema: false`, in which case its
+    # `ema_params` are the pre-training initialisation rather than a trained
+    # average and restoring them silently discards the training.
+    config.prefer_ema = True
     config.eval_only = False
 
     return config

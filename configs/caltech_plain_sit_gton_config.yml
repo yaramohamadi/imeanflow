@@ -1,0 +1,149 @@
+# Ground-truth-anchored on-policy post-training of the Caltech-101 plain SiT-XL/2.
+#
+# Starts from the plain (non-MeanFlow) fine-tuned checkpoint whose recorded
+# baseline is FID 25.98 / IS 35.0 / FD-DINO 426.9 at 16 Heun steps, omega 1.5.
+# Everything below the `model.sit_gt_on_*` keys is inherited from
+# caltech_plain_sit_ddpme_config.yml so the post-training arms stay comparable
+# to that baseline.
+#
+# Arms (all launched from this one config):
+#   A  base checkpoint, no post-training  --config.eval_only=True
+#   B  matched-budget ordinary FM control --config.model.sit_gt_on_lambda=1.0
+#   C  the method                          (as written here, lambda = 0.5)
+#   D  self-endpoint contrast             --config.model.sit_gt_on_target=self
+# Arm B keeps lambda=1.0 rather than disabling the branch so that B and C see
+# an identical data order and identical FM examples: at lambda=1 the corrective
+# term has weight zero and contributes exactly no gradient, making B a paired
+# control that costs one wasted forward pass per step.
+
+dataset:
+    root: /home/ymohammadibahram/meanflow/datasets/caltech-101_processed_latents
+    num_classes: 101
+    num_classes_from_data: True
+
+model:
+    model_str: flaxSiT_XL_2
+    num_classes: 101
+    target_use_null_class: True
+    class_dropout_prob: 0.1
+    sit_output_prediction_space: velocity
+    sit_velocity_map_mode: transport
+    sit_input_alignment_mode: none
+    sit_native_velocity_derivative_mode: finite_difference
+    sit_native_diffusion_steps: 1000
+    sit_native_noise_schedule: linear
+    sit_wrapper_eps: 1.0e-3
+    sit_wrapped_loss_weight: none
+    sit_model_time_scale: 999.0
+    sit_model_time_flip: True
+
+    # --- the method ---------------------------------------------------------
+    # loss = lambda * L_FM + (1 - lambda) * L_GT-on
+    sit_gt_on_lambda: 0.5
+    # t' is drawn from the ordinary FM time distribution squeezed into
+    # [t0, (1 - delta) * t1]. The corrective target (x1 - x_hat_t')/(1 - t')
+    # diverges as t' -> 1 (the data end), so the support is truncated rather
+    # than the divisor clamped: truncation leaves the top of the range
+    # unsupervised but keeps the target exact everywhere it is used.
+    # delta = 0.2 caps the coefficient t'/(1 - t') at 4, the first value at
+    # which the correction does not dominate the FM part of the target.
+    sit_gt_on_t_delta: 0.2
+    sit_gt_on_target: data
+
+transport:
+    path_type: Linear
+    prediction: velocity
+    loss_weight: null
+    train_eps: null
+    sample_eps: null
+    objective: sit
+    path_power_k: 1.0
+
+training:
+    log_per_step: 50
+    checkpoint_per_epoch: 1000000
+
+    num_epochs: 200
+    max_train_steps: 3000
+    # 16 x grad_accum 2 = effective batch 32, matching the source run
+    # (device batch 32 OOM'd even on an H100).
+    batch_size: 16
+    grad_accum_steps: 2
+    use_ema: False
+    learning_rate: 0.0001
+    # The inherited 5 warmup epochs would be ~2710 steps, i.e. most of a
+    # 3000-step post-training run.
+    warmup_epochs: 0
+
+    adam_b2: 0.999
+    ema_type: const
+    ema_val: 0.9999
+
+    sample_per_step: 1000
+    fid_per_step: 0
+    # Intermediate FID/IS/FD-DINO during training. Every 1000 steps rather than
+    # 500: on this GPU a 5k-sample eval costs more than 1000 training steps.
+    fid_schedule:
+        - from_step: 0
+          every_steps: 1000
+    # _get_metric_num_steps always prepends sampling.num_steps, so this must
+    # match it or every eval runs twice.
+    metric_num_steps:
+        - 16
+    preview_guidance_scales:
+        - 1.5
+    preview_num_steps:
+        - 16
+    save_best_fid_only: True
+    best_fid_checkpoint_dir: best_fid
+    save_eval_checkpoint_per_fid: True
+    eval_checkpoint_dir: latest_eval
+    half_precision: False
+    half_precision_dtype: float16
+    noise_reconstruction_debug: False
+
+    seed: 42
+
+fid:
+    device_batch_size: 16
+    sample_device_batch_size: 32
+    sample_log_every: 1
+    sample_first_device_only: False
+    num_samples: 5000
+    cache_ref: '/home/ymohammadibahram/meanflow/imeanflow/files/fid_stats/caltech-101-fid_stats.npz'
+    num_images_to_log: 16
+
+fd_dino:
+    arch: vitb14
+    model_name: ''
+    cache_ref: '/home/ymohammadibahram/meanflow/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz'
+
+sampling:
+    num_steps: 16
+    method: heun
+    plain_sit_native_prediction_sampling: False
+    flip_time: False
+    half_precision: False
+    half_precision_dtype: float16
+    omega: 1.5
+    t_min: 0.0
+    t_max: 1.0
+
+logging:
+    use_wandb: True
+    wandb_name: 'CALTECH_SIT_plain_GTon'
+    wandb_project: 'gt_on_policy_fm'
+    wandb_entity: ''
+    wandb_tags:
+        - caltech101
+        - plain-sit
+        - gt-on-policy
+    wandb_notes: 'GT-anchored on-policy post-training: model-induced input state, real data endpoint target'
+
+# Params-only re-export of
+# caltech_plain_SiT_ddpme_taylor_20260729_000702_uazi51/best_fid/checkpoint_17500.
+load_from: '/home/ymohammadibahram/meanflow/imeanflow/files/weights/caltech_plain_sit_ddpme_params_17500/checkpoint_17500'
+partial_load: True
+# The source run had use_ema: false, so its ema_params were the pre-training
+# initialisation. The export drops them, but be explicit.
+prefer_ema: False

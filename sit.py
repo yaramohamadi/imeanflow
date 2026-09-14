@@ -6,7 +6,7 @@ import flax.linen as nn
 
 from models import imfDiT
 from utils.dit_diffusion import create_diffusion
-from utils.sit_transport_jax import create_transport
+from utils.sit_transport_jax import create_transport, mean_flat
 
 
 class PlainSiT(nn.Module):
@@ -37,6 +37,11 @@ class PlainSiT(nn.Module):
     wrapped_loss_weight: str = "none"
     model_time_scale: float = 1.0
     model_time_flip: bool = False
+    # Ground-truth-anchored on-policy post-training. Inactive while
+    # `gt_on_lambda` is None, which leaves the plain SiT loss untouched.
+    gt_on_lambda: float = None
+    gt_on_t_delta: float = 0.2
+    gt_on_target: str = "data"
     eval: bool = False
 
     def setup(self):
@@ -274,6 +279,23 @@ class PlainSiT(nn.Module):
         alpha_b = self._broadcast_scalar(alpha_t, xt)
         sigma_b = self._broadcast_scalar(sigma_t, xt)
         return (xt - sigma_b * raw_output) / jnp.maximum(alpha_b, self.wrapper_eps)
+
+    def _velocity_to_data(self, velocity, xt, t):
+        """Recover the data endpoint x1 implied by a transport velocity at xt.
+
+        Inverts the interpolant pair
+            xt = alpha_t * x1 + sigma_t * x0
+            v  = d_alpha_t * x1 + d_sigma_t * x0
+        for x1. On the linear path this is exactly ``xt + (1 - t) * v``.
+        """
+        alpha_t, sigma_t, d_alpha_t, d_sigma_t = self._compute_transport_schedule(t, xt)
+        denom = d_sigma_t * alpha_t - sigma_t * d_alpha_t
+        denom = jnp.where(
+            jnp.abs(denom) > self.wrapper_eps,
+            denom,
+            jnp.where(denom >= 0.0, self.wrapper_eps, -self.wrapper_eps),
+        )
+        return (d_sigma_t * xt - sigma_t * velocity) / denom
 
     def _data_to_transport_velocity(self, raw_output, xt, t):
         alpha_t, sigma_t, d_alpha_t, d_sigma_t = self._compute_transport_schedule(t, xt)
@@ -530,6 +552,8 @@ class PlainSiT(nn.Module):
         """Compute the official SiT transport loss."""
         if self.objective == "power_meanflow":
             return self.forward_power_meanflow(images, labels)
+        if self.gt_on_lambda is not None:
+            return self.forward_gt_on_policy(images, labels)
 
         x = images.astype(self.dtype)
         labels = labels.astype(jnp.int32)
@@ -555,6 +579,113 @@ class PlainSiT(nn.Module):
             "loss_transport_unweighted": jnp.mean(terms["loss"]),
             "wrapped_loss_weight_mean": jnp.mean(loss_weight),
             "t_mean": jnp.mean(terms["t"]),
+        }
+        return loss, dict_losses
+
+    def forward_gt_on_policy(self, images, labels):
+        """Ground-truth-anchored on-policy loss.
+
+        The input state is model-induced but the regression target is built from
+        the *real* data endpoint, so the objective is corrective rather than
+        self-consistent.
+
+        Stage 2 reuses the ordinary flow-matching example that ``loss_fm``
+        already computes: its velocity prediction inverts to a data estimate
+        ``x1_hat``, which is detached. (Reusing it is exactly the draft's
+        "perform ordinary FM training examples", and it costs no extra forward
+        pass.) Stage 3 re-noises ``x1_hat`` to a fresh time ``t_prime`` and
+        regresses the velocity onto the chord that reaches the real ``x1``.
+
+        Note the repo's time convention is the reverse of the draft's: here
+        ``t=0`` is noise and ``t=1`` is data, so the draft's
+        ``(x_0 - x_hat_t)/(0 - t)`` becomes ``(x1 - x_hat_t)/(1 - t')``.
+        """
+        if self.path_type != "Linear":
+            raise ValueError(
+                "forward_gt_on_policy assumes the linear interpolant so that the "
+                "target chord (x1 - xt) / (1 - t) is the constant velocity "
+                f"reaching x1 at t=1; got path_type={self.path_type!r}."
+            )
+        if not 0.0 < self.gt_on_t_delta < 1.0:
+            raise ValueError(
+                "gt_on_t_delta must lie in (0, 1) so the target divisor stays "
+                f"bounded away from zero; got {self.gt_on_t_delta!r}."
+            )
+        if self.gt_on_target not in {"data", "self"}:
+            raise ValueError(
+                "gt_on_target must be 'data' (the method) or 'self' (the "
+                f"self-endpoint contrast); got {self.gt_on_target!r}."
+            )
+
+        x1 = images.astype(self.dtype)
+        labels = labels.astype(jnp.int32)
+
+        rng_drop, rng_loss, rng_t, rng_eps = jax.random.split(self.make_rng("gen"), 4)
+        labels = self._drop_labels(labels, rng_drop)
+
+        def model_fn(xt, t, y):
+            return self._predict_transport_output(xt, t, y)
+
+        # --- anchor term: the untouched flow-matching loss -------------------
+        terms = self.transport.training_losses(
+            model_fn,
+            x1,
+            rng=rng_loss,
+            model_kwargs={"y": labels},
+        )
+        loss_weight = self._wrapped_velocity_loss_weight(terms["t"])
+        loss_fm = jnp.mean(terms["loss"] * loss_weight)
+
+        # --- stage 2: detached data prediction at the ordinary FM state ------
+        x1_hat = jax.lax.stop_gradient(
+            self._velocity_to_data(terms["pred"], terms["xt"], terms["t"])
+        )
+
+        # --- stage 3: re-noise to a fresh, truncated time --------------------
+        # t_prime is squeezed into [t0, (1 - delta) * t1] rather than drawn full
+        # range and clipped: truncating leaves the top of the range unsupervised
+        # but keeps the target exact everywhere it is used, whereas clamping the
+        # divisor would silently understate the target near the data end.
+        t0, t1 = self.transport.check_interval(
+            self.transport.train_eps, self.transport.sample_eps
+        )
+        t_prime = jax.random.uniform(
+            rng_t, (x1.shape[0],), minval=t0, maxval=t1, dtype=x1.dtype
+        )
+        t_prime = t_prime * (1.0 - self.gt_on_t_delta)
+        eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
+        _, xt_hat, _ = self.transport.path_sampler.plan(t_prime, eps, x1_hat)
+
+        # --- corrective target: the chord to the REAL endpoint ---------------
+        endpoint = x1 if self.gt_on_target == "data" else x1_hat
+        t_b = self._broadcast_scalar(t_prime, xt_hat)
+        # 1 - t_prime >= gt_on_t_delta by construction, so no clamp is needed.
+        u_gt_on = (endpoint - xt_hat) / (1.0 - t_b)
+
+        pred_corr = self._predict_transport_output(xt_hat, t_prime, labels)
+        corr_weight = self._wrapped_velocity_loss_weight(t_prime)
+        loss_corr = jnp.mean(mean_flat((pred_corr - u_gt_on) ** 2) * corr_weight)
+
+        lam = jnp.asarray(self.gt_on_lambda, dtype=jnp.float32)
+        loss = lam * loss_fm + (1.0 - lam) * loss_corr
+
+        # Diagnostics for the step-0 sanity checks: if delta_rms is ~0 the
+        # construction is a no-op, and corr_vs_fm_ratio says whether the
+        # correction dominates the standard FM part of the target.
+        delta_rms = jnp.sqrt(jnp.mean(jnp.square(x1 - x1_hat)))
+        fm_target_rms = jnp.sqrt(jnp.mean(jnp.square(x1 - eps)))
+        corr_coeff = jnp.mean(t_b / (1.0 - t_b))
+        dict_losses = {
+            "loss": loss,
+            "loss_transport": loss_fm,
+            "loss_transport_unweighted": jnp.mean(terms["loss"]),
+            "loss_gt_on": loss_corr,
+            "t_mean": jnp.mean(terms["t"]),
+            "t_prime_mean": jnp.mean(t_prime),
+            "gt_on_delta_rms": delta_rms,
+            "gt_on_fm_target_rms": fm_target_rms,
+            "gt_on_corr_coeff_mean": corr_coeff,
+            "gt_on_corr_vs_fm_ratio": corr_coeff * delta_rms / fm_target_rms,
         }
         return loss, dict_losses
 
