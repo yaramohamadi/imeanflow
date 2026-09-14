@@ -30,12 +30,19 @@ from models import imfDiT
 from models.imfDiT import FlaxSiT
 from sit import PlainSiT
 
+IMAGE_SIZE = 16
+
 # A tiny backbone so the checks run on CPU in seconds.
 imfDiT.flaxSiT_TINY_8 = partial(
-    FlaxSiT, depth=2, hidden_size=64, patch_size=8, num_heads=4, learn_sigma=True
+    FlaxSiT,
+    input_size=IMAGE_SIZE,
+    depth=2,
+    hidden_size=64,
+    patch_size=8,
+    num_heads=4,
+    learn_sigma=True,
 )
 
-IMAGE_SIZE = 16
 CHANNELS = 4
 BATCH = 8
 NUM_CLASSES = 7
