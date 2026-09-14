@@ -620,7 +620,14 @@ class PlainSiT(nn.Module):
         x1 = images.astype(self.dtype)
         labels = labels.astype(jnp.int32)
 
-        rng_drop, rng_loss, rng_t, rng_eps = jax.random.split(self.make_rng("gen"), 4)
+        # Derive rng_drop/rng_loss exactly as `forward` does, and fold the two
+        # extra keys off the base instead of widening the split. That keeps the
+        # anchor term's data, noise and time draws bit-identical to the plain
+        # loss, so the lambda=1 arm is an exact paired control of the method.
+        rng_base = self.make_rng("gen")
+        rng_drop, rng_loss = jax.random.split(rng_base)
+        rng_t = jax.random.fold_in(rng_base, 1)
+        rng_eps = jax.random.fold_in(rng_base, 2)
         labels = self._drop_labels(labels, rng_drop)
 
         def model_fn(xt, t, y):

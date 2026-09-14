@@ -162,13 +162,23 @@ def check_3_forward_runs():
         print(f"      {key} = {float(aux[key]):.6f}")
     assert np.isfinite(gton_loss) and np.isfinite(gton_gnorm)
 
-    # lambda = 1 must reproduce the plain FM loss exactly: same rng, same
-    # transport call, corrective term weighted to zero.
+    # lambda = 1 must reproduce the plain FM loss exactly: the anchor term draws
+    # the same rng, so arm B is a paired control of arm C rather than merely a
+    # matched-budget one.
     anchor = make_model(gt_on_lambda=1.0, gt_on_t_delta=0.2)
     anchor_loss, anchor_aux, _ = loss_of(anchor)
     err = abs(anchor_loss - plain_loss)
     print(f"[3] lambda=1 vs plain forward: |diff| = {err:.3e}")
     assert err < 1e-5, (anchor_loss, plain_loss)
+    # ... and the corrective term is fully weighted out of the total.
+    assert abs(float(anchor_aux["loss"]) - float(anchor_aux["loss_transport"])) < 1e-6
+
+    # The lambda=0.5 arm must see the identical FM example, so its anchor term
+    # matches the plain loss too; only the total differs.
+    _, gton_aux, _ = loss_of(gton)
+    err_fm = abs(float(gton_aux["loss_transport"]) - plain_loss)
+    print(f"[3] lambda=0.5 anchor term vs plain forward: |diff| = {err_fm:.3e}")
+    assert err_fm < 1e-5
 
     self_arm = make_model(gt_on_lambda=0.5, gt_on_target="self")
     self_loss, _, _ = loss_of(self_arm)
