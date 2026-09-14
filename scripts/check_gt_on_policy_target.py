@@ -139,7 +139,11 @@ def check_3_forward_runs():
     def loss_of(model):
         def loss_fn(p):
             return model.apply(
-                {"params": p}, images, labels, rngs=dict(gen=jax.random.key(3))
+                {"params": p},
+                images,
+                labels,
+                rngs=dict(gen=jax.random.key(3)),
+                method=model.forward,
             )
 
         (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
