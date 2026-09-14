@@ -106,9 +106,12 @@ def train_step_with_vae(
         metrics["did_update"] = jnp.array(1.0, dtype=jnp.float32)
         return new_state, metrics
 
-    new_grad_accum = jax.tree_util.tree_map(
-        lambda acc, g: acc + g, state.grad_accum, grads
-    )
+    if state.grad_accum is None:
+        new_grad_accum = grads
+    else:
+        new_grad_accum = jax.tree_util.tree_map(
+            lambda acc, g: acc + g, state.grad_accum, grads
+        )
     new_accum_step = state.grad_accum_step + 1
     should_apply = new_accum_step >= grad_accum_steps
 

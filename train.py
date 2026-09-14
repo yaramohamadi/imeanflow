@@ -904,7 +904,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
         first_value = np.asarray(metric_value)[0]
         return bool(first_value) if np.asarray(first_value).dtype == np.bool_ else float(first_value)
 
-    sampling_uses_ema = use_ema and not v_only_teacher_source_copies
+    sampling_uses_ema = (
+        use_ema
+        and not v_only_teacher_source_copies
+        and not config.training.get("fid_use_online_only", False)
+    )
 
     def log_preview_samples(state_for_logging, step_for_logging):
         num_images = min(int(config.fid.num_images_to_log), int(latent_manager.batch_size))
