@@ -735,7 +735,8 @@ class PlainSiT(nn.Module):
 
         pred_corr = self._predict_transport_output(xt_hat, t_prime, labels)
         corr_weight = self._wrapped_velocity_loss_weight(t_prime)
-        loss_corr = jnp.mean(mean_flat((pred_corr - u_gt_on) ** 2) * corr_weight)
+        per_sample_corr = mean_flat((pred_corr - u_gt_on) ** 2) * corr_weight
+        loss_corr = jnp.mean(per_sample_corr)
 
         lam = jnp.asarray(self.gt_on_lambda, dtype=jnp.float32)
         loss = lam * loss_fm + (1.0 - lam) * loss_corr
@@ -771,6 +772,42 @@ class PlainSiT(nn.Module):
             dict_losses["gt_on_corr_vs_fm_ratio"] = (
                 corr_coeff * dict_losses["gt_on_delta_rms"] / fm_target_rms
             )
+
+        # --- the same quantities, binned by t' -------------------------------
+        # The batch-mean loss above is NOT comparable across steps: the target
+        # carries 1/(1 - t'), so the mean mostly reports which t' were drawn.
+        # These bins separate "the model got worse" from "t' happened to be
+        # higher", and they are what says whether the gradient is dominated by
+        # the top of the truncated range (where the coefficient reaches
+        # 1/delta - 1) rather than spread over it. An empty bin logs NaN, which
+        # the metric importers skip rather than record as zero.
+        # The FM branch is binned on the SAME edges, which is what makes the two
+        # branches comparable at all: the batch means are confounded because the
+        # branches draw their times from different distributions (question #2).
+        n_bins = 4
+        per_sample_ratio = jnp.sqrt(mean_flat(jnp.square(drift / (1.0 - t_b))))
+        per_sample_fm = terms["loss"] * loss_weight
+        edges = jnp.linspace(t0, (1.0 - self.gt_on_t_delta) * t1, n_bins + 1)
+
+        def _binned(times, values, b):
+            in_bin = times >= edges[b]
+            in_bin = in_bin & (
+                times <= edges[b + 1] if b == n_bins - 1 else times < edges[b + 1]
+            )
+            count = jnp.sum(in_bin)
+            total = jnp.sum(jnp.where(in_bin, values, 0.0))
+            mean = jnp.where(count > 0, total / jnp.maximum(count, 1), jnp.nan)
+            return mean, count.astype(jnp.float32)
+
+        for b in range(n_bins):
+            corr_mean, corr_count = _binned(t_prime, per_sample_corr, b)
+            ratio_mean, _ = _binned(t_prime, per_sample_ratio / fm_target_rms, b)
+            fm_mean, fm_count = _binned(terms["t"], per_sample_fm, b)
+            dict_losses[f"gt_on_loss_t{b}"] = corr_mean
+            dict_losses[f"gt_on_corr_over_fm_t{b}"] = ratio_mean
+            dict_losses[f"gt_on_count_t{b}"] = corr_count
+            dict_losses[f"fm_loss_t{b}"] = fm_mean
+            dict_losses[f"fm_count_t{b}"] = fm_count
         return loss, dict_losses
 
     def forward_power_meanflow(self, images, labels):
