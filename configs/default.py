@@ -153,6 +153,11 @@ def get_config():
     model.sit_gt_on_t_delta = 0.2
     # "data" = the method (real endpoint); "self" = self-endpoint contrast.
     model.sit_gt_on_target = "data"
+    # Rollout depth: 0 = cheap endpoint-reconstruction variant (2 forwards/step),
+    # K >= 1 = K detached Euler steps of nominal size `sit_gt_on_rollout_dt`
+    # along the model's own dynamics. The draft studies K in {1, 2, 4}.
+    model.sit_gt_on_rollout_k = 0
+    model.sit_gt_on_rollout_dt = 0.1
 
     # Training Dynamics
     model.norm_p = 1.0

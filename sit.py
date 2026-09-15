@@ -42,6 +42,11 @@ class PlainSiT(nn.Module):
     gt_on_lambda: float = None
     gt_on_t_delta: float = 0.2
     gt_on_target: str = "data"
+    # Rollout depth for the induced state. 0 = the cheap endpoint-reconstruction
+    # variant; K >= 1 = K explicit Euler steps of nominal size `gt_on_rollout_dt`
+    # along the model's own dynamics (the draft's primary construction).
+    gt_on_rollout_k: int = 0
+    gt_on_rollout_dt: float = 0.1
     eval: bool = False
 
     def setup(self):
@@ -599,6 +604,14 @@ class PlainSiT(nn.Module):
         Note the repo's time convention is the reverse of the draft's: here
         ``t=0`` is noise and ``t=1`` is data, so the draft's
         ``(x_0 - x_hat_t)/(0 - t)`` becomes ``(x1 - x_hat_t)/(1 - t')``.
+
+        ``gt_on_rollout_k`` selects where on the draft's compute--fidelity
+        spectrum this sits. ``0`` is the cheap variant above (2 forwards/step).
+        ``K >= 1`` replaces stages 2-3 with K detached Euler steps along the
+        model's own dynamics, ending at the supervision time -- the draft's
+        primary construction, at K+2 forwards/step as implemented (K rollout +
+        1 supervised + the anchor branch's; K+1 would be reachable by dropping
+        the anchor branch at lambda=0, at the cost of the paired data order).
         """
         if self.path_type != "Linear":
             raise ValueError(
@@ -615,6 +628,16 @@ class PlainSiT(nn.Module):
             raise ValueError(
                 "gt_on_target must be 'data' (the method) or 'self' (the "
                 f"self-endpoint contrast); got {self.gt_on_target!r}."
+            )
+        if int(self.gt_on_rollout_k) < 0:
+            raise ValueError(
+                "gt_on_rollout_k is the number of Euler steps and cannot be "
+                f"negative; got {self.gt_on_rollout_k!r}."
+            )
+        if int(self.gt_on_rollout_k) > 0 and not self.gt_on_rollout_dt > 0.0:
+            raise ValueError(
+                "gt_on_rollout_dt must be positive when rolling out; got "
+                f"{self.gt_on_rollout_dt!r}."
             )
 
         x1 = images.astype(self.dtype)
@@ -643,25 +666,66 @@ class PlainSiT(nn.Module):
         loss_weight = self._wrapped_velocity_loss_weight(terms["t"])
         loss_fm = jnp.mean(terms["loss"] * loss_weight)
 
-        # --- stage 2: detached data prediction at the ordinary FM state ------
-        x1_hat = jax.lax.stop_gradient(
-            self._velocity_to_data(terms["pred"], terms["xt"], terms["t"])
-        )
-
-        # --- stage 3: re-noise to a fresh, truncated time --------------------
-        # t_prime is squeezed into [t0, (1 - delta) * t1] rather than drawn full
-        # range and clipped: truncating leaves the top of the range unsupervised
-        # but keeps the target exact everywhere it is used, whereas clamping the
-        # divisor would silently understate the target near the data end.
+        # --- stages 2-3: build the model-induced state ------------------------
+        # The supervision time is squeezed into [t0, (1 - delta) * t1] rather
+        # than drawn full range and clipped: truncating leaves the top of the
+        # range unsupervised but keeps the target exact everywhere it is used,
+        # whereas clamping the divisor would silently understate the target near
+        # the data end. This holds for both constructions below.
         t0, t1 = self.transport.check_interval(
             self.transport.train_eps, self.transport.sample_eps
         )
+        rollout_k = int(self.gt_on_rollout_k)
         t_prime = jax.random.uniform(
             rng_t, (x1.shape[0],), minval=t0, maxval=t1, dtype=x1.dtype
         )
         t_prime = t_prime * (1.0 - self.gt_on_t_delta)
         eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
-        _, xt_hat, _ = self.transport.path_sampler.plan(t_prime, eps, x1_hat)
+
+        if rollout_k == 0:
+            # Cheap variant: the endpoint prediction the FM forward already
+            # produced, re-noised at a fresh time. No extra forward pass.
+            x1_hat = jax.lax.stop_gradient(
+                self._velocity_to_data(terms["pred"], terms["xt"], terms["t"])
+            )
+            _, xt_hat, _ = self.transport.path_sampler.plan(t_prime, eps, x1_hat)
+            induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
+            extra_diagnostics = {
+                "gt_on_delta_rms": jnp.sqrt(jnp.mean(jnp.square(x1 - x1_hat))),
+            }
+        else:
+            # Rollout variant: K explicit Euler steps along the model's own
+            # dynamics, detached. The draft samples the FM time t and lands at
+            # s = t - K*dt (its t runs data->noise); in repo coordinates t runs
+            # noise->data, so the same construction is reparameterised as "draw
+            # the supervision time s, start K nominal steps behind it" -- which
+            # additionally guarantees s <= 1 - delta without clipping the
+            # target. dt shrinks for samples too close to t0 to fit K steps.
+            if self.gt_on_target != "data":
+                raise NotImplementedError(
+                    "gt_on_target='self' is defined only for the cheap variant "
+                    "(rollout_k=0); the draft does not specify a self-endpoint "
+                    "target for the rollout construction, so it is not guessed "
+                    "here."
+                )
+            dt_nominal = jnp.asarray(self.gt_on_rollout_dt, dtype=x1.dtype)
+            t_start = jnp.maximum(t_prime - rollout_k * dt_nominal, t0)
+            dt = (t_prime - t_start) / rollout_k
+            _, x_roll, _ = self.transport.path_sampler.plan(t_start, eps, x1)
+            induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
+            dt_b = self._broadcast_scalar(dt, x_roll)
+            t_cur = t_start
+            for _ in range(rollout_k):
+                v_step = jax.lax.stop_gradient(
+                    self._predict_transport_output(x_roll, t_cur, labels)
+                )
+                x_roll = x_roll + dt_b * v_step
+                t_cur = t_cur + dt
+            xt_hat = jax.lax.stop_gradient(x_roll)
+            extra_diagnostics = {
+                "gt_on_rollout_dt_mean": jnp.mean(dt),
+                "gt_on_rollout_t_start_mean": jnp.mean(t_start),
+            }
 
         # --- corrective target: the chord to the REAL endpoint ---------------
         endpoint = x1 if self.gt_on_target == "data" else x1_hat
@@ -676,10 +740,14 @@ class PlainSiT(nn.Module):
         lam = jnp.asarray(self.gt_on_lambda, dtype=jnp.float32)
         loss = lam * loss_fm + (1.0 - lam) * loss_corr
 
-        # Diagnostics for the step-0 sanity checks: if delta_rms is ~0 the
-        # construction is a no-op, and corr_vs_fm_ratio says whether the
-        # correction dominates the standard FM part of the target.
-        delta_rms = jnp.sqrt(jnp.mean(jnp.square(x1 - x1_hat)))
+        # Diagnostics for the step-0 sanity checks. `drift_rms` is how far the
+        # induced state sits from the interpolant state at the same time with
+        # the same noise: if it is ~0 the construction is a no-op. The
+        # correction the target carries over plain FM is exactly
+        # drift / (1 - t'), so `corr_over_fm_rms` says whether the correction
+        # dominates the standard FM part of the target. Both are defined
+        # identically for the two constructions, so the series are comparable.
+        drift = xt_hat - induced_ref
         fm_target_rms = jnp.sqrt(jnp.mean(jnp.square(x1 - eps)))
         corr_coeff = jnp.mean(t_b / (1.0 - t_b))
         dict_losses = {
@@ -689,11 +757,20 @@ class PlainSiT(nn.Module):
             "loss_gt_on": loss_corr,
             "t_mean": jnp.mean(terms["t"]),
             "t_prime_mean": jnp.mean(t_prime),
-            "gt_on_delta_rms": delta_rms,
             "gt_on_fm_target_rms": fm_target_rms,
             "gt_on_corr_coeff_mean": corr_coeff,
-            "gt_on_corr_vs_fm_ratio": corr_coeff * delta_rms / fm_target_rms,
+            "gt_on_drift_rms": jnp.sqrt(jnp.mean(jnp.square(drift))),
+            "gt_on_corr_over_fm_rms": (
+                jnp.sqrt(jnp.mean(jnp.square(drift / (1.0 - t_b)))) / fm_target_rms
+            ),
         }
+        dict_losses.update(extra_diagnostics)
+        if rollout_k == 0:
+            # Kept for continuity with the arms already recorded, which logged
+            # this product-of-means form rather than the rms above.
+            dict_losses["gt_on_corr_vs_fm_ratio"] = (
+                corr_coeff * dict_losses["gt_on_delta_rms"] / fm_target_rms
+            )
         return loss, dict_losses
 
     def forward_power_meanflow(self, images, labels):

@@ -274,6 +274,8 @@ def _build_plain_sit(config, *, eval_mode=False):
         gt_on_lambda=_optional_float(config.model.get("sit_gt_on_lambda", None)),
         gt_on_t_delta=float(config.model.get("sit_gt_on_t_delta", 0.2)),
         gt_on_target=str(config.model.get("sit_gt_on_target", "data")),
+        gt_on_rollout_k=int(config.model.get("sit_gt_on_rollout_k", 0)),
+        gt_on_rollout_dt=float(config.model.get("sit_gt_on_rollout_dt", 0.1)),
         eval=eval_mode,
     )
 

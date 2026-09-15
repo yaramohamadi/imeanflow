@@ -11,6 +11,9 @@
 #   B  matched-budget ordinary FM control --config.model.sit_gt_on_lambda=1.0
 #   C  the method                          (as written here, lambda = 0.5)
 #   D  self-endpoint contrast             --config.model.sit_gt_on_target=self
+#   E  the objective alone, no FM anchor  --config.model.sit_gt_on_lambda=0.0
+#   F  K-step rollout instead of the cheap variant
+#                                         --config.model.sit_gt_on_rollout_k=1
 # Arm B keeps lambda=1.0 rather than disabling the branch so that B and C see
 # an identical data order and identical FM examples: at lambda=1 the corrective
 # term has weight zero and contributes exactly no gradient, making B a paired
@@ -49,6 +52,14 @@ model:
     # which the correction does not dominate the FM part of the target.
     sit_gt_on_t_delta: 0.2
     sit_gt_on_target: data
+    # Where on the compute-fidelity spectrum the induced state comes from.
+    # 0 = cheap endpoint reconstruction (2 forwards/step); K >= 1 = K detached
+    # Euler steps of nominal size sit_gt_on_rollout_dt (K+2 forwards/step).
+    # The rollout starts K steps behind the supervision time rather than the
+    # draft's forward parameterisation, which is the same construction and
+    # additionally keeps the supervision time inside the truncated range.
+    sit_gt_on_rollout_k: 0
+    sit_gt_on_rollout_dt: 0.1
 
 transport:
     path_type: Linear
