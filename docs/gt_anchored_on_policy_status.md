@@ -88,6 +88,44 @@ no gradient. Verified: λ=1 reproduces the plain SiT loss to `|diff| = 0`.
    existing `gt_on_delta_rms` diagnostic already logs.
 4. `Δt` ablation, gradient-through-rollout, λ sweep.
 
+## Results so far
+
+### Arm A (gate) — passed
+
+FID-5k **28.298** / IS **33.464** / FD-DINO **442.07** at 16 Heun steps, omega 1.5,
+`eval_only`, `loaded 404 tensors, skipped 0 tensors`.
+
+The recorded baseline for this checkpoint is FID **25.98** / IS 35.0 / FD-DINO
+426.9 — but that number is **FID-10k** (`num_samples: 10000` in the original dev5
+run's log; ours is 5000). FID and FD-DINO are both biased upward at smaller sample
+counts and all three metrics move in the consistent direction, so this is the same
+model measured with a quarter of the sample budget, not a load or eval-path fault.
+**Arm A's 28.298 is the reference for arms B/C/D**, which are all FID-5k.
+
+### Step-0 diagnostics with the trained checkpoint (arm B, λ=1)
+
+| quantity | random init | trained ckpt |
+|---|---|---|
+| `gt_on_delta_rms` = `‖x1 − x̂1^θ‖` | 0.85 | **0.557** |
+| `gt_on_fm_target_rms` = `‖x1 − ε'‖` | — | **1.520** |
+| `gt_on_corr_vs_fm_ratio` | 0.52–0.66 | **0.314** |
+| `loss_transport` (FM branch) | — | **0.836** |
+| `loss_gt_on` (corrective branch) | — | **2.021** |
+
+Three readings:
+
+1. **δ=0.2 is safe with room to spare.** The correction is 0.31× the FM part of the
+   target, far below the ≲2 threshold. The δ ∈ {0.1, 0.2, 0.3} ablation can go
+   *down*: δ=0.1 would put the ratio near 0.7, still under 1.
+2. **The construction is not a no-op.** `‖Δ‖ = 0.557` on unit-ish SD-VAE latents, so
+   the re-noised state is materially different from the FM state.
+3. **The premise is visible at step 0:** the corrective loss is ~2.4× the FM loss.
+   Target scale explains almost none of that (total corrective target RMS is only
+   ~5% larger than the FM target's), so the model really is worse at model-induced
+   states than at FM states. Caveat: the two branches also see different time
+   distributions (`t_mean` 0.455 vs `t_prime_mean` 0.325), so this is suggestive of
+   the draft's motivating gap rather than a controlled measurement of it.
+
 ## Diagnostics already logged
 
 `loss_transport`, `loss_gt_on`, `t_mean`, `t_prime_mean`, `gt_on_delta_rms`
