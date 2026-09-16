@@ -24,6 +24,20 @@
 #                    -- same induced states as arm F, no ground truth in the
 #                       target, so F vs this isolates state exposure from
 #                       ground-truth anchoring.
+# Denoising Resampling Forcing (trajectory states instead of a perturbation of
+# the true interpolant). Both arms are lambda=0.0 and share the state
+# construction exactly, so they differ only in the target:
+#   proposal   --config.model.sit_gt_on_state=trajectory
+#              --config.model.sit_gt_on_target=fm_velocity
+#   repair     --config.model.sit_gt_on_state=trajectory
+#              --config.model.sit_gt_on_target=data
+#   traj ablation (how much of the trajectory is eligible)
+#              --config.model.sit_gt_on_traj_index_min=<int>
+# sit_gt_on_traj_steps / _solver / _omega must mirror sampling.num_steps /
+# sampling.method / sampling.omega below, or the rollout visits states that
+# evaluation does not. The 'data' target here is the same chord as arm C, but
+# reached from a genuinely on-policy state rather than a perturbed interpolant.
+#
 # Arm B keeps lambda=1.0 rather than disabling the branch so that B and C see
 # an identical data order and identical FM examples: at lambda=1 the corrective
 # term has weight zero and contributes exactly no gradient, making B a paired

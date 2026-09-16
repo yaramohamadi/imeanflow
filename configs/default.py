@@ -168,6 +168,16 @@ def get_config():
     # along the model's own dynamics. The draft studies K in {1, 2, 4}.
     model.sit_gt_on_rollout_k = 0
     model.sit_gt_on_rollout_dt = 0.1
+    # "perturb" = the constructions above, which perturb the true interpolant.
+    # "trajectory" = Denoising Resampling Forcing: integrate the inference
+    # schedule from pure noise and supervise at one of its steps. The traj_*
+    # keys must mirror sampling.num_steps / method / omega for the training
+    # states to be the ones evaluation actually visits.
+    model.sit_gt_on_state = "perturb"
+    model.sit_gt_on_traj_steps = 16
+    model.sit_gt_on_traj_solver = "heun"
+    model.sit_gt_on_traj_omega = 1.5
+    model.sit_gt_on_traj_index_min = 0
 
     # Training Dynamics
     model.norm_p = 1.0

@@ -64,6 +64,28 @@ class PlainSiT(nn.Module):
     # along the model's own dynamics (the draft's primary construction).
     gt_on_rollout_k: int = 0
     gt_on_rollout_dt: float = 0.1
+    # Where the induced state comes from.
+    # 'perturb'    - the two constructions above. Both start from the *true*
+    #                interpolant built from the real x1 and then perturb it, so
+    #                both have a step size whose zero limit is exactly plain
+    #                flow matching.
+    # 'trajectory' - Denoising Resampling Forcing: initialise at pure noise and
+    #                integrate the *inference* schedule with the *inference*
+    #                solver and guidance, then supervise at one schedule point.
+    #                The state never touches the real x1, so there is no knob
+    #                that collapses the construction back to plain FM -- which
+    #                is the point of the construction.
+    gt_on_state: str = "perturb"
+    # The inference schedule to reproduce. Must match sampling.num_steps /
+    # sampling.method / sampling.omega for the states to be the ones evaluation
+    # actually visits.
+    gt_on_traj_steps: int = 16
+    gt_on_traj_solver: str = "heun"
+    gt_on_traj_omega: float = 1.5
+    # Ablation knob: the smallest schedule index eligible for supervision. 0
+    # makes the whole trajectory eligible; raising it restricts supervision to
+    # the later, more data-like part of the trajectory.
+    gt_on_traj_index_min: int = 0
     eval: bool = False
 
     def setup(self):
@@ -570,6 +592,66 @@ class PlainSiT(nn.Module):
         null_labels = jnp.full(labels.shape, self.num_classes, dtype=jnp.int32)
         return jnp.where(drop_mask, null_labels, labels)
 
+    def _guided_velocity_sg(self, x, t, labels, omega):
+        """The detached, classifier-free-guided velocity the sampler would use.
+
+        Mirrors ``utils/sit_sample_util._guided_velocity`` so that a training
+        rollout visits the same states evaluation does. The two branches are
+        written out rather than selected with ``lax.cond`` because ``omega`` is a
+        static config value here, so the unguided case costs one forward instead
+        of two and the guided case never traces the dead branch.
+        """
+        if float(omega) == 1.0:
+            out = self._predict_transport_output(x, t, labels)
+        else:
+            null_labels = jnp.full(labels.shape, self.num_classes, dtype=jnp.int32)
+            x_cat = jnp.concatenate([x, x], axis=0)
+            t_cat = jnp.concatenate([t, t], axis=0)
+            y_cat = jnp.concatenate([labels, null_labels], axis=0)
+            out_cat = self._predict_transport_output(x_cat, t_cat, y_cat)
+            cond, uncond = jnp.split(out_cat, 2, axis=0)
+            out = uncond + jnp.asarray(omega, dtype=x.dtype) * (cond - uncond)
+        return jax.lax.stop_gradient(out)
+
+    def _rollout_inference_trajectory(self, eps, labels, k_index, times, k_max):
+        """Integrate the inference ODE from pure noise and stop at ``k_index``.
+
+        ``eps`` is the state at schedule index 0 (repo time runs noise -> data,
+        so index 0 is pure noise, exactly as ``sit_sample_util.generate``
+        initialises it). Each sample advances until it has taken its own
+        ``k_index`` steps and is then held fixed, which gives every sample in the
+        batch its own supervision time -- matching plain flow matching's per-
+        sample time draw -- at the cost of always paying ``k_max`` steps rather
+        than the mean. The loop is a Python loop over a static bound so it
+        unrolls: a traced bound would need ``lax.while_loop``, which is not
+        reverse-mode differentiable, and this whole rollout sits inside a
+        function that is differentiated even though every velocity here is
+        detached.
+        """
+        solver = str(self.gt_on_traj_solver).lower()
+        omega = float(self.gt_on_traj_omega)
+        x = eps
+        for j in range(k_max):
+            tau_cur = times[j]
+            tau_next = times[j + 1]
+            dt = tau_next - tau_cur
+            t_cur = jnp.full((x.shape[0],), tau_cur, dtype=x.dtype)
+            drift = self._guided_velocity_sg(x, t_cur, labels, omega)
+            if solver == "heun":
+                x_pred = x + dt * drift
+                t_next = jnp.full((x.shape[0],), tau_next, dtype=x.dtype)
+                drift_next = self._guided_velocity_sg(x_pred, t_next, labels, omega)
+                x_step = x + 0.5 * dt * (drift + drift_next)
+            else:
+                x_step = x + dt * drift
+            # Samples that have already reached their own schedule index stop
+            # advancing, so after the loop every sample sits at times[k_index].
+            # Reshaped by hand rather than with _broadcast_scalar, which casts to
+            # float32 and would hand jnp.where a non-boolean condition.
+            still_going = (k_index > j).reshape((-1,) + (1,) * (x.ndim - 1))
+            x = jnp.where(still_going, x_step, x)
+        return jax.lax.stop_gradient(x)
+
     def forward(self, images, labels):
         """Compute the official SiT transport loss."""
         if self.objective == "power_meanflow":
@@ -648,12 +730,40 @@ class PlainSiT(nn.Module):
                 "gt_on_t_delta must lie in (0, 1) so the target divisor stays "
                 f"bounded away from zero; got {self.gt_on_t_delta!r}."
             )
-        if self.gt_on_target not in {"data", "self", "self_velocity"}:
+        if self.gt_on_target not in {"data", "self", "self_velocity", "fm_velocity"}:
             raise ValueError(
                 "gt_on_target must be 'data' (the method), 'self' (the "
-                "self-endpoint contrast) or 'self_velocity' (local velocity "
-                f"consistency); got {self.gt_on_target!r}."
+                "self-endpoint contrast), 'self_velocity' (local velocity "
+                "consistency) or 'fm_velocity' (the plain FM target x1 - eps at "
+                f"the induced state); got {self.gt_on_target!r}."
             )
+        if self.gt_on_state not in {"perturb", "trajectory"}:
+            raise ValueError(
+                "gt_on_state must be 'perturb' (a perturbation of the true "
+                "interpolant) or 'trajectory' (the model's own inference "
+                f"trajectory from pure noise); got {self.gt_on_state!r}."
+            )
+        if self.gt_on_state == "trajectory":
+            if int(self.gt_on_traj_steps) < 1:
+                raise ValueError(
+                    "gt_on_traj_steps is the inference schedule length and must "
+                    f"be >= 1; got {self.gt_on_traj_steps!r}."
+                )
+            if str(self.gt_on_traj_solver).lower() not in {"euler", "heun"}:
+                raise ValueError(
+                    "gt_on_traj_solver must be 'euler' or 'heun' to match the "
+                    f"evaluation sampler; got {self.gt_on_traj_solver!r}."
+                )
+            if not self.gt_on_traj_omega > 0.0:
+                raise ValueError(
+                    "gt_on_traj_omega is the rollout's guidance scale and must "
+                    f"be positive; got {self.gt_on_traj_omega!r}."
+                )
+            if int(self.gt_on_traj_index_min) < 0:
+                raise ValueError(
+                    "gt_on_traj_index_min is a schedule index and cannot be "
+                    f"negative; got {self.gt_on_traj_index_min!r}."
+                )
         if self.gt_on_mix not in {"lambda", "additive"}:
             raise ValueError(
                 "gt_on_mix must be 'lambda' (convex mix, weight gt_on_lambda) "
@@ -723,7 +833,73 @@ class PlainSiT(nn.Module):
         t_prime = t_prime * (1.0 - self.gt_on_t_delta)
         eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
 
-        if rollout_k == 0:
+        if self.gt_on_state == "trajectory" and self.gt_on_target in {
+            "self",
+            "self_velocity",
+        }:
+            raise NotImplementedError(
+                "gt_on_target={!r} is defined for the 'perturb' constructions "
+                "only: 'self' needs the cheap variant's endpoint estimate and "
+                "'self_velocity' needs the velocity one Euler step back, neither "
+                "of which the trajectory rollout produces. The targets defined "
+                "on trajectory states are 'fm_velocity' (the proposal) and "
+                "'data' (the state-consistent chord).".format(self.gt_on_target)
+            )
+
+        if self.gt_on_state == "trajectory":
+            # Denoising Resampling Forcing: reproduce the inference trajectory
+            # from pure noise and supervise at one of its schedule points. The
+            # supervision time is a schedule point rather than a continuous draw,
+            # so the run differs from plain FM in the time distribution as well
+            # as the state distribution -- the paired control for that is plain
+            # FM restricted to the same discrete times, not the continuous one.
+            num_traj_steps = int(self.gt_on_traj_steps)
+            times = jnp.linspace(t0, t1, num_traj_steps + 1, dtype=x1.dtype)
+            # Static schedule arithmetic in Python so the loop bound is static.
+            step = (t1 - t0) / num_traj_steps
+            t_cap = t1 * (1.0 - self.gt_on_t_delta)
+            k_max = int((t_cap - t0) // step)
+            index_min = int(self.gt_on_traj_index_min)
+            if k_max < 1:
+                raise ValueError(
+                    "The truncation gt_on_t_delta leaves no usable schedule "
+                    f"point: gt_on_traj_steps={num_traj_steps} with "
+                    f"delta={self.gt_on_t_delta} caps the index at {k_max}. "
+                    "Lower delta or raise the schedule length."
+                )
+            if index_min > k_max:
+                raise ValueError(
+                    f"gt_on_traj_index_min={index_min} exceeds the largest index "
+                    f"the truncation allows ({k_max}), so no schedule point is "
+                    "eligible for supervision."
+                )
+            k_index = jax.random.randint(
+                rng_t, (x1.shape[0],), index_min, k_max + 1, dtype=jnp.int32
+            )
+            t_prime = times[k_index]
+            xt_hat = self._rollout_inference_trajectory(
+                eps, labels, k_index, times, k_max
+            )
+            induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
+            # The two candidate targets on this state, and the gap between them.
+            # The gap is the whole disagreement between the proposal and its
+            # state-consistent repair: 'fm_velocity' points along the (x1, eps)
+            # line the state has left, 'data' points from where the state
+            # actually is to x1. Logging it costs no forward pass and says
+            # directly how wrong the proposed target is at the visited state.
+            t_b_traj = self._broadcast_scalar(t_prime, xt_hat)
+            u_chord = (x1 - xt_hat) / (1.0 - t_b_traj)
+            u_fm = x1 - eps
+            extra_diagnostics = {
+                "gt_on_traj_k_mean": jnp.mean(k_index.astype(x1.dtype)),
+                "gt_on_traj_k_max": jnp.asarray(k_max, dtype=x1.dtype),
+                "gt_on_traj_chord_rms": jnp.sqrt(jnp.mean(jnp.square(u_chord))),
+                "gt_on_traj_fm_target_rms": jnp.sqrt(jnp.mean(jnp.square(u_fm))),
+                "gt_on_traj_target_gap_rms": jnp.sqrt(
+                    jnp.mean(jnp.square(u_chord - u_fm))
+                ),
+            }
+        elif rollout_k == 0:
             # Cheap variant: the endpoint prediction the FM forward already
             # produced, re-noised at a fresh time. No extra forward pass.
             x1_hat = jax.lax.stop_gradient(
@@ -771,7 +947,21 @@ class PlainSiT(nn.Module):
 
         # --- corrective target: the chord to the REAL endpoint ---------------
         t_b = self._broadcast_scalar(t_prime, xt_hat)
-        if self.gt_on_target == "self_velocity":
+        if self.gt_on_target == "fm_velocity":
+            # Denoising Resampling Forcing as proposed: the *plain* FM target for
+            # the pair (x1, eps) that started the trajectory, applied unchanged at
+            # the induced state. In repo coordinates (t: noise -> data) this is
+            # x1 - eps, the draft's eps - x0 under its reversed time.
+            #
+            # Note what this target is NOT: it is not the velocity that carries
+            # xt_hat to x1. The state has drifted off the (x1, eps) line, and this
+            # target still points along that line, so it is only consistent with
+            # the state in the limit where the rollout does not drift. The
+            # consistent alternative on the same states is gt_on_target='data',
+            # whose chord (x1 - xt_hat) / (1 - t') is exactly the target obtained
+            # by solving xt_hat = t'*x1 + (1 - t')*eps' for the implied noise.
+            u_gt_on = x1 - eps
+        elif self.gt_on_target == "self_velocity":
             # Local velocity consistency: regress the velocity at the induced
             # state onto the (detached) velocity that produced the step into it.
             # `v_step` is the last loop iterate, i.e. the velocity at the state
