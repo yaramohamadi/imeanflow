@@ -1028,9 +1028,12 @@ class PlainSiT(nn.Module):
             "gt_on_target_rms": jnp.sqrt(jnp.mean(jnp.square(u_gt_on))),
         }
         dict_losses.update(extra_diagnostics)
-        if rollout_k == 0:
+        if self.gt_on_state == "perturb" and rollout_k == 0:
             # Kept for continuity with the arms already recorded, which logged
-            # this product-of-means form rather than the rms above.
+            # this product-of-means form rather than the rms above. Only the
+            # cheap perturb branch defines gt_on_delta_rms -- the trajectory and
+            # schedule branches leave rollout_k at its default 0 and would hit a
+            # KeyError here without the state check.
             dict_losses["gt_on_corr_vs_fm_ratio"] = (
                 corr_coeff * dict_losses["gt_on_delta_rms"] / fm_target_rms
             )
