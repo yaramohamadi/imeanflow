@@ -173,6 +173,10 @@ def get_config():
     # schedule from pure noise and supervise at one of its steps. The traj_*
     # keys must mirror sampling.num_steps / method / omega for the training
     # states to be the ones evaluation actually visits.
+    # "schedule" = the true interpolant at the same schedule times, i.e. the
+    # trajectory arm with the rollout removed. With sit_gt_on_target=
+    # "fm_velocity" it is exactly plain flow matching restricted to the
+    # inference timesteps, which is the control for the time distribution.
     model.sit_gt_on_state = "perturb"
     model.sit_gt_on_traj_steps = 16
     model.sit_gt_on_traj_solver = "heun"

@@ -33,6 +33,12 @@
 #              --config.model.sit_gt_on_target=data
 #   traj ablation (how much of the trajectory is eligible)
 #              --config.model.sit_gt_on_traj_index_min=<int>
+#   time ctrl  --config.model.sit_gt_on_state=schedule
+#              --config.model.sit_gt_on_target=fm_velocity
+#              -- true interpolant at the same schedule times: plain FM with
+#                 only the timestep distribution changed, which is what makes
+#                 the trajectory arm's comparison against continuous-time FM
+#                 interpretable.
 # sit_gt_on_traj_steps / _solver / _omega must mirror sampling.num_steps /
 # sampling.method / sampling.omega below, or the rollout visits states that
 # evaluation does not. The 'data' target here is the same chord as arm C, but

@@ -737,13 +737,15 @@ class PlainSiT(nn.Module):
                 "consistency) or 'fm_velocity' (the plain FM target x1 - eps at "
                 f"the induced state); got {self.gt_on_target!r}."
             )
-        if self.gt_on_state not in {"perturb", "trajectory"}:
+        if self.gt_on_state not in {"perturb", "trajectory", "schedule"}:
             raise ValueError(
                 "gt_on_state must be 'perturb' (a perturbation of the true "
-                "interpolant) or 'trajectory' (the model's own inference "
-                f"trajectory from pure noise); got {self.gt_on_state!r}."
+                "interpolant), 'trajectory' (the model's own inference "
+                "trajectory from pure noise) or 'schedule' (the true "
+                "interpolant at the trajectory's schedule times, the "
+                f"time-matched control); got {self.gt_on_state!r}."
             )
-        if self.gt_on_state == "trajectory":
+        if self.gt_on_state in {"trajectory", "schedule"}:
             if int(self.gt_on_traj_steps) < 1:
                 raise ValueError(
                     "gt_on_traj_steps is the inference schedule length and must "
@@ -833,7 +835,7 @@ class PlainSiT(nn.Module):
         t_prime = t_prime * (1.0 - self.gt_on_t_delta)
         eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
 
-        if self.gt_on_state == "trajectory" and self.gt_on_target in {
+        if self.gt_on_state in {"trajectory", "schedule"} and self.gt_on_target in {
             "self",
             "self_velocity",
         }:
@@ -846,7 +848,7 @@ class PlainSiT(nn.Module):
                 "'data' (the state-consistent chord).".format(self.gt_on_target)
             )
 
-        if self.gt_on_state == "trajectory":
+        if self.gt_on_state in {"trajectory", "schedule"}:
             # Denoising Resampling Forcing: reproduce the inference trajectory
             # from pure noise and supervise at one of its schedule points. The
             # supervision time is a schedule point rather than a continuous draw,
@@ -877,10 +879,20 @@ class PlainSiT(nn.Module):
                 rng_t, (x1.shape[0],), index_min, k_max + 1, dtype=jnp.int32
             )
             t_prime = times[k_index]
-            xt_hat = self._rollout_inference_trajectory(
-                eps, labels, k_index, times, k_max
-            )
             induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
+            if self.gt_on_state == "trajectory":
+                xt_hat = self._rollout_inference_trajectory(
+                    eps, labels, k_index, times, k_max
+                )
+            else:
+                # 'schedule': the analytic interpolant at the *same* schedule
+                # time. With gt_on_target='fm_velocity' this is plain flow
+                # matching restricted to the inference schedule's timesteps and
+                # nothing else -- the paired control that removes the time
+                # distribution as a confound when the trajectory arm is compared
+                # against continuous-time flow matching. It costs no rollout
+                # forwards, and drift is identically zero by construction.
+                xt_hat = induced_ref
             # The two candidate targets on this state, and the gap between them.
             # The gap is the whole disagreement between the proposal and its
             # state-consistent repair: 'fm_velocity' points along the (x1, eps)
