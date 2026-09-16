@@ -116,9 +116,11 @@ def create_models(config, *, retention_weight=0.0):
         compute_adversarial_retention=float(retention_weight) > 0.0,
     )
     model_str = str(config.model.model_str)
-    if not model_str.startswith("imfSiT_DMF_"):
+    # DiT-DMF shares the SiT-DMF backbone class (imfDiT_DMF_XL_2 = imfSiT_DMF_XL_2),
+    # so the same discriminator + adversarial forward apply. Accept both prefixes.
+    if not (model_str.startswith("imfSiT_DMF_") or model_str.startswith("imfDiT_DMF_")):
         raise ValueError(
-            "Expected model.model_str=imfSiT_DMF_* from a MeFT checkpoint; "
+            "Expected model.model_str=imf{SiT,DiT}_DMF_* from a MeFT checkpoint; "
             f"got {model_str!r}."
         )
     net_fn = getattr(imfDiT, model_str)

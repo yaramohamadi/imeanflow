@@ -10,6 +10,7 @@ import ml_collections
 import numpy as np
 import optax
 from flax import jax_utils, serialization, struct
+from flax.training import checkpoints
 from jax import lax, random
 
 from caimf import (
@@ -238,6 +239,7 @@ def discriminator_train_step(
     discriminator,
     dis_tx,
     lambda_cp,
+    cp_mode,
     interval_eps,
     freeze_backbone,
     distributed,
@@ -264,7 +266,7 @@ def discriminator_train_step(
             discriminator, dis_params, samples
         )
         return discriminator_loss(
-            real_logit, fake_logit, potentials, lambda_cp=lambda_cp
+            real_logit, fake_logit, potentials, lambda_cp=lambda_cp, cp_mode=cp_mode
         )
 
     (_, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.dis_params)
@@ -491,6 +493,36 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
     rng = random.key(int(config.training.seed))
     state, gen_tx, dis_tx = _create_state(config, model, discriminator, rng)
 
+    # --- Full-state resume (e.g. 150k -> 300k continuation) --------------
+    # load_from restores generator params ONLY (step reset to 0, fresh
+    # optimizer + freshly-initialized discriminator). caimf.resume_from
+    # instead restores the COMPLETE adversarial CAIMFTrainState -- generator
+    # and EMA params, both optimizer states, the discriminator params/opt,
+    # and the step/gen_step/dis_step counters -- so training continues
+    # exactly where it stopped, preserving the D/G equilibrium and the
+    # post-warmup D:G cadence. Point it at a workdir (latest checkpoint_* is
+    # chosen) or a specific checkpoint_* directory.
+    resume_from = str(ca_cfg.get("resume_from", "") or "")
+    if resume_from:
+        resume_from = os.path.abspath(resume_from)
+        restored = checkpoints.restore_checkpoint(resume_from, state)
+        restored_step = int(np.asarray(restored.step).reshape(-1)[0])
+        if restored_step <= 0:
+            raise ValueError(
+                f"caimf.resume_from={resume_from} restored step "
+                f"{restored_step}; expected a full-state checkpoint (step>0). "
+                "Point it at a periodic checkpoint_* dir, not best_fid/."
+            )
+        state = restored
+        log_for_0(
+            "Resumed FULL CA-iMF state from %s at step %d "
+            "(continuing to max_posttrain_batches=%d).",
+            resume_from,
+            restored_step,
+            int(ca_cfg.max_posttrain_batches),
+        )
+    # ---------------------------------------------------------------------
+
     distributed = jax.local_device_count() > 1
     if distributed:
         state = jax_utils.replicate(state)
@@ -501,6 +533,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         discriminator=discriminator,
         dis_tx=dis_tx,
         lambda_cp=float(ca_cfg.lambda_cp),
+        cp_mode=str(ca_cfg.get("cp_mode", "full")),
         interval_eps=float(ca_cfg.interval_eps),
         freeze_backbone=bool(ca_cfg.freeze_discriminator_backbone),
         distributed=distributed,
@@ -552,8 +585,20 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         return int(value.reshape(-1)[0])
 
     def save_state(state_value):
-        replicated = state_value if distributed else jax_utils.replicate(state_value)
-        save_checkpoint(replicated, workdir)
+        if distributed:
+            save_checkpoint(state_value, workdir)
+        else:
+            # Single device: state has no leading device axis. Replicating
+            # here would allocate a 2nd full copy of the fat adversarial
+            # state on the GPU, on top of resident eval models -> OOM.
+            # device_get pulls to host RAM (no 2nd GPU copy); save directly.
+            host_state = jax.device_get(state_value)
+            step = int(np.asarray(host_state.step).reshape(-1)[0])
+            log_for_0("Saving checkpoint step %d (single-device).", step)
+            checkpoints.save_checkpoint_multiprocess(
+                os.path.abspath(workdir), host_state, step, keep=3
+            )
+            log_for_0("Checkpoint step %d saved.", step)
 
     metric_evaluation_enabled = _metric_evaluation_enabled(config.training)
     image_metric_evaluator = None
@@ -839,6 +884,19 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
                             ),
                         },
                     )
+
+                # cp-ablation eval-path OOM fix: on a single GPU the two
+                # jax_utils.replicate copies (metric_state, checkpoint_state)
+                # of the fat adversarial state stay resident and overflow the
+                # next p_dis_step. Free them before resuming training.
+                if not distributed:
+                    jax.tree_util.tree_map(
+                        lambda x: x.delete()
+                        if hasattr(x, "delete")
+                        else None,
+                        (metric_state, checkpoint_state),
+                    )
+                    del metric_state, checkpoint_state
 
             if current_step >= max_batches:
                 should_stop = True
