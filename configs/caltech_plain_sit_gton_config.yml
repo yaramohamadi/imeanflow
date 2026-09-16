@@ -14,6 +14,16 @@
 #   E  the objective alone, no FM anchor  --config.model.sit_gt_on_lambda=0.0
 #   F  K-step rollout instead of the cheap variant
 #                                         --config.model.sit_gt_on_rollout_k=1
+# Follow-ups on the 1-step rollout (all keep sit_gt_on_rollout_k=1, lambda=0.0):
+#   delta ablation   --config.model.sit_gt_on_t_delta=0.3|0.5
+#   dt ablation      --config.model.sit_gt_on_rollout_dt=0.025|0.05
+#   consistency      --config.model.sit_gt_on_lambda=None
+#                    --config.model.sit_gt_on_aux_weight=0.01|0.1
+#                    --config.model.sit_gt_on_target=self_velocity
+#   target contrast  --config.model.sit_gt_on_target=self_velocity  (lambda=0.0)
+#                    -- same induced states as arm F, no ground truth in the
+#                       target, so F vs this isolates state exposure from
+#                       ground-truth anchoring.
 # Arm B keeps lambda=1.0 rather than disabling the branch so that B and C see
 # an identical data order and identical FM examples: at lambda=1 the corrective
 # term has weight zero and contributes exactly no gradient, making B a paired
@@ -43,6 +53,10 @@ model:
     # --- the method ---------------------------------------------------------
     # loss = lambda * L_FM + (1 - lambda) * L_GT-on
     sit_gt_on_lambda: 0.5
+    # Additive alternative to lambda: loss = L_FM + w * L_corr. Exactly one of
+    # the two may be set, so a run using this must pass
+    # --config.model.sit_gt_on_lambda=None on the command line.
+    sit_gt_on_aux_weight: null
     # t' is drawn from the ordinary FM time distribution squeezed into
     # [t0, (1 - delta) * t1]. The corrective target (x1 - x_hat_t')/(1 - t')
     # diverges as t' -> 1 (the data end), so the support is truncated rather

@@ -37,10 +37,24 @@ class PlainSiT(nn.Module):
     wrapped_loss_weight: str = "none"
     model_time_scale: float = 1.0
     model_time_flip: bool = False
-    # Ground-truth-anchored on-policy post-training. Inactive while
-    # `gt_on_lambda` is None, which leaves the plain SiT loss untouched.
+    # Ground-truth-anchored on-policy post-training. Inactive while both
+    # `gt_on_lambda` and `gt_on_aux_weight` are None, which leaves the plain SiT
+    # loss untouched.
     gt_on_lambda: float = None
+    # Additive mixing, as an alternative to `gt_on_lambda`'s convex mixing:
+    # loss = loss_fm + gt_on_aux_weight * loss_corr. This is the form a *small*
+    # auxiliary weight is naturally expressed in (0.01 keeps the FM term at
+    # weight 1 instead of rescaling the whole loss). Exactly one of the two must
+    # be set.
+    gt_on_aux_weight: float = None
     gt_on_t_delta: float = 0.2
+    # 'data'          - the chord to the real endpoint (the method).
+    # 'self'          - the chord to the model's own endpoint estimate (cheap
+    #                   variant only; the self-endpoint contrast).
+    # 'self_velocity' - the detached velocity at the state one Euler step back,
+    #                   i.e. local velocity consistency (rollout variant only).
+    #                   Same induced states as 'data', different target, which is
+    #                   what isolates state exposure from ground-truth anchoring.
     gt_on_target: str = "data"
     # Rollout depth for the induced state. 0 = the cheap endpoint-reconstruction
     # variant; K >= 1 = K explicit Euler steps of nominal size `gt_on_rollout_dt`
@@ -557,7 +571,7 @@ class PlainSiT(nn.Module):
         """Compute the official SiT transport loss."""
         if self.objective == "power_meanflow":
             return self.forward_power_meanflow(images, labels)
-        if self.gt_on_lambda is not None:
+        if self.gt_on_lambda is not None or self.gt_on_aux_weight is not None:
             return self.forward_gt_on_policy(images, labels)
 
         x = images.astype(self.dtype)
@@ -612,6 +626,13 @@ class PlainSiT(nn.Module):
         primary construction, at K+2 forwards/step as implemented (K rollout +
         1 supervised + the anchor branch's; K+1 would be reachable by dropping
         the anchor branch at lambda=0, at the cost of the paired data order).
+
+        ``gt_on_target`` selects what the induced state is regressed onto, and
+        with the state construction held fixed this is what separates *state
+        exposure* from *ground-truth anchoring*: ``'data'`` uses the chord to the
+        real image, ``'self_velocity'`` uses the detached velocity one Euler step
+        back and carries no ground truth at all. Running the two at the same
+        weight over the same states is the controlled comparison.
         """
         if self.path_type != "Linear":
             raise ValueError(
@@ -624,10 +645,24 @@ class PlainSiT(nn.Module):
                 "gt_on_t_delta must lie in (0, 1) so the target divisor stays "
                 f"bounded away from zero; got {self.gt_on_t_delta!r}."
             )
-        if self.gt_on_target not in {"data", "self"}:
+        if self.gt_on_target not in {"data", "self", "self_velocity"}:
             raise ValueError(
-                "gt_on_target must be 'data' (the method) or 'self' (the "
-                f"self-endpoint contrast); got {self.gt_on_target!r}."
+                "gt_on_target must be 'data' (the method), 'self' (the "
+                "self-endpoint contrast) or 'self_velocity' (local velocity "
+                f"consistency); got {self.gt_on_target!r}."
+            )
+        if (self.gt_on_lambda is None) == (self.gt_on_aux_weight is None):
+            raise ValueError(
+                "exactly one of gt_on_lambda (convex mixing) and "
+                "gt_on_aux_weight (additive mixing) must be set, so that the "
+                "objective the run optimises is unambiguous; got "
+                f"gt_on_lambda={self.gt_on_lambda!r}, "
+                f"gt_on_aux_weight={self.gt_on_aux_weight!r}."
+            )
+        if self.gt_on_aux_weight is not None and self.gt_on_aux_weight < 0.0:
+            raise ValueError(
+                "gt_on_aux_weight is an auxiliary loss weight and cannot be "
+                f"negative; got {self.gt_on_aux_weight!r}."
             )
         if int(self.gt_on_rollout_k) < 0:
             raise ValueError(
@@ -701,12 +736,13 @@ class PlainSiT(nn.Module):
             # the supervision time s, start K nominal steps behind it" -- which
             # additionally guarantees s <= 1 - delta without clipping the
             # target. dt shrinks for samples too close to t0 to fit K steps.
-            if self.gt_on_target != "data":
+            if self.gt_on_target == "self":
                 raise NotImplementedError(
                     "gt_on_target='self' is defined only for the cheap variant "
                     "(rollout_k=0); the draft does not specify a self-endpoint "
                     "target for the rollout construction, so it is not guessed "
-                    "here."
+                    "here. For a self-referential target on rollout states use "
+                    "gt_on_target='self_velocity'."
                 )
             dt_nominal = jnp.asarray(self.gt_on_rollout_dt, dtype=x1.dtype)
             t_start = jnp.maximum(t_prime - rollout_k * dt_nominal, t0)
@@ -728,18 +764,32 @@ class PlainSiT(nn.Module):
             }
 
         # --- corrective target: the chord to the REAL endpoint ---------------
-        endpoint = x1 if self.gt_on_target == "data" else x1_hat
         t_b = self._broadcast_scalar(t_prime, xt_hat)
-        # 1 - t_prime >= gt_on_t_delta by construction, so no clamp is needed.
-        u_gt_on = (endpoint - xt_hat) / (1.0 - t_b)
+        if self.gt_on_target == "self_velocity":
+            # Local velocity consistency: regress the velocity at the induced
+            # state onto the (detached) velocity that produced the step into it.
+            # `v_step` is the last loop iterate, i.e. the velocity at the state
+            # one Euler step behind the supervision time. Deliberately carries no
+            # ground truth: this is the arm that isolates whether exposure to the
+            # model's own nearby states helps on its own. Note the target does
+            # NOT carry the 1/(1 - t') amplification the chord targets do.
+            u_gt_on = v_step
+        else:
+            endpoint = x1 if self.gt_on_target == "data" else x1_hat
+            # 1 - t_prime >= gt_on_t_delta by construction, so no clamp needed.
+            u_gt_on = (endpoint - xt_hat) / (1.0 - t_b)
 
         pred_corr = self._predict_transport_output(xt_hat, t_prime, labels)
         corr_weight = self._wrapped_velocity_loss_weight(t_prime)
         per_sample_corr = mean_flat((pred_corr - u_gt_on) ** 2) * corr_weight
         loss_corr = jnp.mean(per_sample_corr)
 
-        lam = jnp.asarray(self.gt_on_lambda, dtype=jnp.float32)
-        loss = lam * loss_fm + (1.0 - lam) * loss_corr
+        if self.gt_on_aux_weight is not None:
+            aux_w = jnp.asarray(self.gt_on_aux_weight, dtype=jnp.float32)
+            loss = loss_fm + aux_w * loss_corr
+        else:
+            lam = jnp.asarray(self.gt_on_lambda, dtype=jnp.float32)
+            loss = lam * loss_fm + (1.0 - lam) * loss_corr
 
         # Diagnostics for the step-0 sanity checks. `drift_rms` is how far the
         # induced state sits from the interpolant state at the same time with
@@ -764,6 +814,10 @@ class PlainSiT(nn.Module):
             "gt_on_corr_over_fm_rms": (
                 jnp.sqrt(jnp.mean(jnp.square(drift / (1.0 - t_b)))) / fm_target_rms
             ),
+            # The target's own scale, so the chord targets and the
+            # self_velocity target can be compared on the record: they differ by
+            # the 1/(1 - t') amplification, not only in what they point at.
+            "gt_on_target_rms": jnp.sqrt(jnp.mean(jnp.square(u_gt_on))),
         }
         dict_losses.update(extra_diagnostics)
         if rollout_k == 0:

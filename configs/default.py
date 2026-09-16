@@ -148,10 +148,18 @@ def get_config():
     # Ground-truth-anchored on-policy post-training. `sit_gt_on_lambda` is the
     # weight on the plain FM anchor: leave it None to keep the plain SiT loss.
     model.sit_gt_on_lambda = None
+    # Additive alternative: loss = loss_fm + w * loss_corr, for the case where
+    # the corrective term is a small auxiliary rather than half the objective.
+    # Exactly one of `sit_gt_on_lambda` and `sit_gt_on_aux_weight` may be set.
+    model.sit_gt_on_aux_weight = None
     # t' is drawn from the ordinary FM time distribution squeezed into
     # [t0, (1 - delta) * t1], keeping the target divisor 1 - t' >= delta.
     model.sit_gt_on_t_delta = 0.2
-    # "data" = the method (real endpoint); "self" = self-endpoint contrast.
+    # "data" = the method (real endpoint); "self" = self-endpoint contrast
+    # (cheap variant only); "self_velocity" = local velocity consistency, the
+    # detached velocity one Euler step back (rollout variant only). Holding the
+    # state construction fixed and switching between "data" and "self_velocity"
+    # is what separates state exposure from ground-truth anchoring.
     model.sit_gt_on_target = "data"
     # Rollout depth: 0 = cheap endpoint-reconstruction variant (2 forwards/step),
     # K >= 1 = K detached Euler steps of nominal size `sit_gt_on_rollout_dt`
