@@ -91,11 +91,14 @@ def run(label, **overrides):
     labels = jnp.arange(BATCH, dtype=jnp.int32)
 
     def loss_fn(params):
+        # Same entry point the trainer uses: sit_trainstate_util wires
+        # apply_fn as partial(model.apply, method=model.forward).
         return model.apply(
             {"params": params},
-            images,
-            labels,
+            images=images,
+            labels=labels,
             rngs={"gen": jax.random.PRNGKey(2)},
+            method=model.forward,
         )
 
     # Differentiate it: the rollout sits inside the differentiated function even
