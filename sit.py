@@ -41,12 +41,15 @@ class PlainSiT(nn.Module):
     # `gt_on_lambda` and `gt_on_aux_weight` are None, which leaves the plain SiT
     # loss untouched.
     gt_on_lambda: float = None
-    # Additive mixing, as an alternative to `gt_on_lambda`'s convex mixing:
-    # loss = loss_fm + gt_on_aux_weight * loss_corr. This is the form a *small*
-    # auxiliary weight is naturally expressed in (0.01 keeps the FM term at
-    # weight 1 instead of rescaling the whole loss). Exactly one of the two must
-    # be set.
-    gt_on_aux_weight: float = None
+    # How the two terms are combined. 'lambda' is the convex mix above.
+    # 'additive' is loss = loss_fm + gt_on_aux_weight * loss_corr, which is the
+    # form a *small* auxiliary weight is naturally expressed in (0.01 leaves the
+    # FM term at weight 1 instead of rescaling the whole loss); gt_on_lambda is
+    # then unused. A string rather than "aux_weight is not None" because
+    # ml_collections cannot override a None-valued config field from the command
+    # line, so the choice has to be expressible as a value of a typed field.
+    gt_on_mix: str = "lambda"
+    gt_on_aux_weight: float = 0.0
     gt_on_t_delta: float = 0.2
     # 'data'          - the chord to the real endpoint (the method).
     # 'self'          - the chord to the model's own endpoint estimate (cheap
@@ -571,7 +574,7 @@ class PlainSiT(nn.Module):
         """Compute the official SiT transport loss."""
         if self.objective == "power_meanflow":
             return self.forward_power_meanflow(images, labels)
-        if self.gt_on_lambda is not None or self.gt_on_aux_weight is not None:
+        if self.gt_on_lambda is not None or self.gt_on_mix == "additive":
             return self.forward_gt_on_policy(images, labels)
 
         x = images.astype(self.dtype)
@@ -651,18 +654,21 @@ class PlainSiT(nn.Module):
                 "self-endpoint contrast) or 'self_velocity' (local velocity "
                 f"consistency); got {self.gt_on_target!r}."
             )
-        if (self.gt_on_lambda is None) == (self.gt_on_aux_weight is None):
+        if self.gt_on_mix not in {"lambda", "additive"}:
             raise ValueError(
-                "exactly one of gt_on_lambda (convex mixing) and "
-                "gt_on_aux_weight (additive mixing) must be set, so that the "
-                "objective the run optimises is unambiguous; got "
-                f"gt_on_lambda={self.gt_on_lambda!r}, "
-                f"gt_on_aux_weight={self.gt_on_aux_weight!r}."
+                "gt_on_mix must be 'lambda' (convex mix, weight gt_on_lambda) "
+                "or 'additive' (loss_fm + gt_on_aux_weight * loss_corr); got "
+                f"{self.gt_on_mix!r}."
             )
-        if self.gt_on_aux_weight is not None and self.gt_on_aux_weight < 0.0:
+        if self.gt_on_mix == "lambda" and self.gt_on_lambda is None:
             raise ValueError(
-                "gt_on_aux_weight is an auxiliary loss weight and cannot be "
-                f"negative; got {self.gt_on_aux_weight!r}."
+                "gt_on_mix='lambda' needs gt_on_lambda set; got None."
+            )
+        if self.gt_on_mix == "additive" and not self.gt_on_aux_weight > 0.0:
+            raise ValueError(
+                "gt_on_mix='additive' needs a positive gt_on_aux_weight -- a "
+                "weight of zero is plain flow matching and should be run as "
+                f"such; got {self.gt_on_aux_weight!r}."
             )
         if int(self.gt_on_rollout_k) < 0:
             raise ValueError(
@@ -784,7 +790,7 @@ class PlainSiT(nn.Module):
         per_sample_corr = mean_flat((pred_corr - u_gt_on) ** 2) * corr_weight
         loss_corr = jnp.mean(per_sample_corr)
 
-        if self.gt_on_aux_weight is not None:
+        if self.gt_on_mix == "additive":
             aux_w = jnp.asarray(self.gt_on_aux_weight, dtype=jnp.float32)
             loss = loss_fm + aux_w * loss_corr
         else:

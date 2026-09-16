@@ -148,10 +148,12 @@ def get_config():
     # Ground-truth-anchored on-policy post-training. `sit_gt_on_lambda` is the
     # weight on the plain FM anchor: leave it None to keep the plain SiT loss.
     model.sit_gt_on_lambda = None
-    # Additive alternative: loss = loss_fm + w * loss_corr, for the case where
-    # the corrective term is a small auxiliary rather than half the objective.
-    # Exactly one of `sit_gt_on_lambda` and `sit_gt_on_aux_weight` may be set.
-    model.sit_gt_on_aux_weight = None
+    # "lambda" = the convex mix above. "additive" = loss_fm + w * loss_corr, for
+    # the case where the corrective term is a small auxiliary rather than half
+    # the objective; `sit_gt_on_lambda` is then unused. Kept as a string because
+    # a None-valued config field cannot be overridden from the command line.
+    model.sit_gt_on_mix = "lambda"
+    model.sit_gt_on_aux_weight = 0.0
     # t' is drawn from the ordinary FM time distribution squeezed into
     # [t0, (1 - delta) * t1], keeping the target divisor 1 - t' >= delta.
     model.sit_gt_on_t_delta = 0.2

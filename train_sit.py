@@ -272,9 +272,8 @@ def _build_plain_sit(config, *, eval_mode=False):
         model_time_scale=float(config.model.get("sit_model_time_scale", 1.0)),
         model_time_flip=bool(config.model.get("sit_model_time_flip", False)),
         gt_on_lambda=_optional_float(config.model.get("sit_gt_on_lambda", None)),
-        gt_on_aux_weight=_optional_float(
-            config.model.get("sit_gt_on_aux_weight", None)
-        ),
+        gt_on_mix=str(config.model.get("sit_gt_on_mix", "lambda")),
+        gt_on_aux_weight=float(config.model.get("sit_gt_on_aux_weight", 0.0)),
         gt_on_t_delta=float(config.model.get("sit_gt_on_t_delta", 0.2)),
         gt_on_target=str(config.model.get("sit_gt_on_target", "data")),
         gt_on_rollout_k=int(config.model.get("sit_gt_on_rollout_k", 0)),

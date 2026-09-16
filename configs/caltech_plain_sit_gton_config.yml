@@ -17,7 +17,7 @@
 # Follow-ups on the 1-step rollout (all keep sit_gt_on_rollout_k=1, lambda=0.0):
 #   delta ablation   --config.model.sit_gt_on_t_delta=0.3|0.5
 #   dt ablation      --config.model.sit_gt_on_rollout_dt=0.025|0.05
-#   consistency      --config.model.sit_gt_on_lambda=None
+#   consistency      --config.model.sit_gt_on_mix=additive
 #                    --config.model.sit_gt_on_aux_weight=0.01|0.1
 #                    --config.model.sit_gt_on_target=self_velocity
 #   target contrast  --config.model.sit_gt_on_target=self_velocity  (lambda=0.0)
@@ -53,10 +53,13 @@ model:
     # --- the method ---------------------------------------------------------
     # loss = lambda * L_FM + (1 - lambda) * L_GT-on
     sit_gt_on_lambda: 0.5
-    # Additive alternative to lambda: loss = L_FM + w * L_corr. Exactly one of
-    # the two may be set, so a run using this must pass
-    # --config.model.sit_gt_on_lambda=None on the command line.
-    sit_gt_on_aux_weight: null
+    # Additive alternative to lambda: with sit_gt_on_mix=additive the loss is
+    # L_FM + w * L_corr and sit_gt_on_lambda above is unused. Both keys are kept
+    # at command-line-overridable types (a null/None field cannot be overridden
+    # by an ml_collections flag), so the mix is selected by the string, not by
+    # unsetting a number.
+    sit_gt_on_mix: lambda
+    sit_gt_on_aux_weight: 0.0
     # t' is drawn from the ordinary FM time distribution squeezed into
     # [t0, (1 - delta) * t1]. The corrective target (x1 - x_hat_t')/(1 - t')
     # diverges as t' -> 1 (the data end), so the support is truncated rather
