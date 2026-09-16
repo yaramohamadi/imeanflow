@@ -30,7 +30,9 @@ imfDiT.flaxSiT_TINY_2 = functools.partial(
 )
 
 BATCH = 4
-IMG = 8
+# The backbone's positional embedding is built for 32x32 latents at patch 2, so
+# the spatial size is not a free parameter here even though the width is.
+IMG = 32
 CHANNELS = 4
 
 
