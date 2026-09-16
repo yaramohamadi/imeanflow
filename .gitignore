@@ -71,3 +71,8 @@ samples/
 *.bak_shmfix
 *.bak_jittag
 .venv.bak/
+
+# Timestamped hand-backups made before in-place edits
+*.bak
+*.bak_*
+*.bak-*

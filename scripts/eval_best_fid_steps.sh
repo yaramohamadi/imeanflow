@@ -45,6 +45,7 @@ DATASET_NUM_CLASSES="${DATASET_NUM_CLASSES:-}"
 FID_CACHE_REF="${FID_CACHE_REF:-}"
 FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"
 EVAL_PLATFORM="${EVAL_PLATFORM:-gpu}"
+FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-}"
 
 case "$EVAL_PLATFORM" in
   gpu|cpu)
@@ -131,6 +132,9 @@ for NUM_STEPS in "${STEPS[@]}"; do
   fi
   if [[ -n "$FD_DINO_CACHE_REF" ]]; then
     EXTRA_CONFIG_ARGS+=("--config.fd_dino.cache_ref=${FD_DINO_CACHE_REF}")
+  fi
+  if [[ -n "$FID_NUM_SAMPLES" ]]; then
+    EXTRA_CONFIG_ARGS+=("--config.fid.num_samples=${FID_NUM_SAMPLES}")
   fi
 
   if [[ "$EVAL_PLATFORM" == "cpu" ]]; then

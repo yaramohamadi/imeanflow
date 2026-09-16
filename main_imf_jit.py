@@ -43,7 +43,10 @@ def main(argv):
     log_for_0("FLAGS.config: \n%s", FLAGS.config)
 
     try:
-        train_imf_jit.train_and_evaluate(FLAGS.config, FLAGS.workdir)
+        if FLAGS.config.get("eval_only", False):
+            train_imf_jit.just_evaluate(FLAGS.config, FLAGS.workdir)
+        else:
+            train_imf_jit.train_and_evaluate(FLAGS.config, FLAGS.workdir)
     finally:
         logging_util.close_wandb()
 

@@ -31,6 +31,7 @@ import utils.input_pipeline as input_pipeline
 from imf import iMeanFlow, generate
 from utils.ckpt_util import (
     restore_checkpoint,
+    restore_eval_checkpoint,
     restore_partial_checkpoint,
     save_best_checkpoint,
     save_checkpoint,
@@ -237,7 +238,8 @@ def _metrics_enabled(training_config):
 def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> TrainState:
     writer = Writer(config, workdir)
     if config.eval_only:
-        raise ValueError("eval_only is not supported by train_imf_jit.")
+        # eval_only is handled by just_evaluate(); main_imf_jit routes there.
+        return just_evaluate(config, workdir)
     _set_num_classes_from_data(config)
 
     rng = random.key(config.training.seed)
@@ -508,5 +510,178 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str) -> Train
             log_for_0("Reached max_train_steps=%d at step %d.", max_train_steps, current_step)
             break
 
+    jax.random.normal(jax.random.key(0), ()).block_until_ready()
+    return state
+
+
+########################################################
+#                 Evaluation (eval_only)               #
+########################################################
+
+
+def _get_eval_sampling_configs(config):
+    """Scalar CFG only (JiT DMF is not guidance-controllable): (omega, t_min, t_max)."""
+    sampling = config.sampling
+    omega = sampling.get("omega", None)
+    t_min = sampling.get("t_min", None)
+    t_max = sampling.get("t_max", None)
+    if omega is not None and t_min is not None and t_max is not None:
+        return [(float(omega), float(t_min), float(t_max))]
+    raise ValueError(
+        "eval_only requires sampling.omega + sampling.t_min + sampling.t_max in the config."
+    )
+
+
+def _get_metric_num_steps(config):
+    """NFE list to evaluate: force_metric_num_steps overrides; else metric_num_steps;
+    else the training sampling.num_steps. Primary step is always included first."""
+    forced = str(config.training.get("force_metric_num_steps", "") or "").strip()
+    if forced:
+        steps = [int(s) for s in forced.replace(",", " ").split()]
+    else:
+        configured = config.training.get("metric_num_steps", ())
+        steps = [int(s) for s in configured] if configured else [int(config.sampling.num_steps)]
+    primary = int(config.sampling.num_steps)
+    ordered = []
+    for s in [primary] + steps:
+        if s < 1:
+            raise ValueError("Metric sampling steps must be >= 1.")
+        if s not in ordered:
+            ordered.append(s)
+    return tuple(ordered)
+
+
+def _primary_metric_mode(use_ema):
+    return "ema" if use_ema else "online"
+
+
+def just_evaluate(config: ml_collections.ConfigDict, workdir: str):
+    """Post-hoc multi-NFE FID/FDD/IS eval for a saved JiT DMF checkpoint.
+
+    Mirrors train.py:just_evaluate on the pixel-space JiT path. Restores a
+    lightweight EvalState from config.load_from (a best_fid/checkpoint_* dir),
+    then evaluates every NFE in _get_metric_num_steps and writes eval_only rows.
+    """
+    assert config.eval_only, "config.eval_only must be True for just_evaluate"
+    assert config.load_from != "", "config.load_from must be specified for just_evaluate"
+
+    writer = Writer(config, workdir)
+    _set_num_classes_from_data(config)
+
+    image_size = int(config.dataset.image_size)
+    sample_device_bsz = get_sample_device_batch_size(config)
+    sample_local_device_count = get_sample_local_device_count(config)
+    sample_devices = get_sample_devices(config)
+    # These runs train with use_ema=False -> evaluate online params.
+    use_ema = config.training.get("use_ema", True)
+    metric_mode = _primary_metric_mode(use_ema)
+
+    model = _build_model(config, eval_mode=True)
+
+    state = restore_eval_checkpoint(config.load_from, use_ema=use_ema)
+    step = int(state.step)
+    state = jax_utils.replicate(state)
+
+    pixel_manager = PixelImageManager(
+        sample_device_bsz,
+        decode_num_local_devices=sample_local_device_count,
+    )
+
+    def build_p_sample_step(num_steps):
+        return jax.pmap(
+            partial(
+                sample_step,
+                model=model,
+                rng_init=random.PRNGKey(99),
+                device_batch_size=sample_device_bsz,
+                config=config,
+                num_steps=num_steps,
+            ),
+            axis_name="batch",
+            devices=sample_devices,
+        )
+
+    image_metric_evaluator = get_image_metric_evaluator(config, writer, pixel_manager)
+    metric_num_steps = _get_metric_num_steps(config)
+    p_metric_sample_steps = {
+        n: build_p_sample_step(n) for n in metric_num_steps
+    }
+
+    best_fid = float("inf")
+    best_config = None
+    best_fd_dino = float("inf")
+    best_fd_dino_config = None
+    csv_rows = []
+    for num_steps, p_sample_step in p_metric_sample_steps.items():
+        for omega, t_min, t_max in _get_eval_sampling_configs(config):
+            kwargs = jax_utils.replicate(
+                {"omega": omega, "t_min": t_min, "t_max": t_max},
+                devices=sample_devices,
+            )
+            result = image_metric_evaluator(
+                state,
+                p_sample_step,
+                step,
+                ema_only=use_ema,
+                metric_suffix=f"steps_{num_steps}",
+                **kwargs,
+            )
+            fid = float(result["fid"])
+            is_score = float(result["is"])
+            fd_dino = result.get("fd_dino", None)
+            row = dict(sampling_num_steps=num_steps, omega=omega, t_min=t_min,
+                       t_max=t_max, fid=fid, is_score=is_score, fd_dino=fd_dino)
+            csv_rows.append(row)
+            cfg_key = (num_steps, omega, t_min, t_max)
+            if fid < best_fid:
+                best_fid = fid
+                best_config = cfg_key
+            if fd_dino is not None and fd_dino < best_fd_dino:
+                best_fd_dino = fd_dino
+                best_fd_dino_config = cfg_key
+            log_for_0("eval_only NFE=%d omega=%.2f -> FID=%.4f IS=%.4f FDD=%s",
+                      num_steps, omega, fid, is_score,
+                      "None" if fd_dino is None else f"{float(fd_dino):.4f}")
+
+            # --- save a preview grid for this NFE (mirrors DiT eval) ---
+            num_preview_images = int(config.fid.get("num_images_to_log", 16))
+            preview_grid_size = int(num_preview_images ** 0.5)
+            num_preview_images = preview_grid_size ** 2
+            if num_preview_images > 0:
+                preview = generate_preview_samples_first_device(
+                    state,
+                    p_sample_step,
+                    pixel_manager,
+                    use_ema,
+                    num_samples=num_preview_images,
+                    param_dtype=get_sampling_param_dtype(config),
+                    sample_local_device_count=sample_local_device_count,
+                    **kwargs,
+                )
+                writer.write_images(
+                    step,
+                    {f"image_grid_steps_{num_steps}": make_uint8_image_grid(preview, preview_grid_size)},
+                )
+
+    for row in csv_rows:
+        cfg_key = (row["sampling_num_steps"], row["omega"], row["t_min"], row["t_max"])
+        _write_eval_metrics_csv(
+            workdir,
+            eval_phase="eval_only",
+            metric_mode=metric_mode,
+            training_step=step,
+            sampling_num_steps=row["sampling_num_steps"],
+            omega=row["omega"],
+            t_min=row["t_min"],
+            t_max=row["t_max"],
+            fid=float(row["fid"]),
+            inception_score=float(row["is_score"]),
+            fd_dino="" if row["fd_dino"] is None else float(row["fd_dino"]),
+            is_best_fid=int(cfg_key == best_config),
+            is_best_fd_dino=int(best_fd_dino_config is not None and cfg_key == best_fd_dino_config),
+            checkpoint_path=os.path.abspath(config.load_from),
+        )
+
+    log_for_0("eval_only DONE. best FID=%.4f at %s", best_fid, str(best_config))
     jax.random.normal(jax.random.key(0), ()).block_until_ready()
     return state

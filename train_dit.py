@@ -85,9 +85,21 @@ def train_step_with_vae(
     metrics = compute_metrics(aux[1])
     metrics["lr"] = lr_value
 
-    new_grad_accum = jax.tree_util.tree_map(
-        lambda acc, g: acc + g, state.grad_accum, grads
-    )
+    if grad_accum_steps == 1:
+        new_state = state.apply_gradients(grads=grads)
+        if use_ema:
+            ema_value = ema_fn(state.step)
+            new_ema = update_ema(new_state.ema_params, new_state.params, ema_value)
+            new_state = new_state.replace(ema_params=new_ema)
+        metrics["did_update"] = jnp.array(1.0, dtype=jnp.float32)
+        return new_state, metrics
+
+    if state.grad_accum is None:
+        new_grad_accum = grads
+    else:
+        new_grad_accum = jax.tree_util.tree_map(
+            lambda acc, g: acc + g, state.grad_accum, grads
+        )
     new_accum_step = state.grad_accum_step + 1
     should_apply = new_accum_step >= grad_accum_steps
 
