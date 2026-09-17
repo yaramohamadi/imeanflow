@@ -87,6 +87,20 @@ def run(label, **overrides):
         jnp.ones((1,), jnp.float32),
         jnp.ones((1,), jnp.int32),
     )
+    # SiT zero-initialises its final layer, so a freshly initialised model has
+    # v_theta identically 0 -- every solver then takes the same (zero) step and
+    # the rollout tests cannot tell Euler from Heun+CFG. Jitter the parameters so
+    # the velocity is a genuine function of x, t and y. Deterministic, and the
+    # same jitter for every configuration, so the arms stay comparable.
+    leaves, treedef = jax.tree_util.tree_flatten(variables["params"])
+    jitter_keys = jax.random.split(jax.random.PRNGKey(3), len(leaves))
+    params = jax.tree_util.tree_unflatten(
+        treedef,
+        [
+            leaf + 0.05 * jax.random.normal(k, leaf.shape, leaf.dtype)
+            for leaf, k in zip(leaves, jitter_keys)
+        ],
+    )
     images = jax.random.normal(
         jax.random.PRNGKey(1), (BATCH, IMG, IMG, CHANNELS), jnp.float32
     )
@@ -106,9 +120,7 @@ def run(label, **overrides):
     # Differentiate it: the rollout sits inside the differentiated function even
     # though every velocity in it is detached, so a non-differentiable construct
     # in there fails here and nowhere earlier.
-    (loss, diags), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-        variables["params"]
-    )
+    (loss, diags), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
     grad_norm = jnp.sqrt(
         sum(jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(grads))
     )
