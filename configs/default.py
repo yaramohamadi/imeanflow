@@ -168,7 +168,19 @@ def get_config():
     # along the model's own dynamics. The draft studies K in {1, 2, 4}.
     model.sit_gt_on_rollout_k = 0
     model.sit_gt_on_rollout_dt = 0.1
+    # Which step the rollout takes. "euler" + omega 1.0 is the original
+    # construction and the default, so the arms already recorded keep their
+    # meaning. "heun" + omega 1.5 makes each rollout step the *inference* step,
+    # so the state is one true sampler step off the interpolant. Set these to
+    # sampling.method / sampling.omega, and sit_gt_on_rollout_dt to
+    # 1 / sampling.num_steps, for a rollout step that matches evaluation.
+    model.sit_gt_on_rollout_solver = "euler"
+    model.sit_gt_on_rollout_omega = 1.0
     # "perturb" = the constructions above, which perturb the true interpolant.
+    # "interp" = no perturbation: the true interpolant at t' itself. With
+    # sit_gt_on_target="fm_velocity" the corrective term is exactly plain flow
+    # matching on the corrective branch's own t' draw, which is the paired
+    # control for the rollout arms (same times, same target, rollout removed).
     # "trajectory" = Denoising Resampling Forcing: integrate the inference
     # schedule from pure noise and supervise at one of its steps. The traj_*
     # keys must mirror sampling.num_steps / method / omega for the training

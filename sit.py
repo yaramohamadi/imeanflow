@@ -64,11 +64,24 @@ class PlainSiT(nn.Module):
     # along the model's own dynamics (the draft's primary construction).
     gt_on_rollout_k: int = 0
     gt_on_rollout_dt: float = 0.1
+    # Which step the rollout takes. 'euler' with omega 1.0 is the original
+    # construction and stays the default so every arm already recorded keeps its
+    # meaning. 'heun' with omega 1.5 makes each rollout step the *inference*
+    # step, so the induced state is one genuine sampler step off the interpolant
+    # rather than one Euler step of the conditional field -- which is what "the
+    # model's own inference dynamics" means when the sampler is Heun + CFG.
+    gt_on_rollout_solver: str = "euler"
+    gt_on_rollout_omega: float = 1.0
     # Where the induced state comes from.
     # 'perturb'    - the two constructions above. Both start from the *true*
     #                interpolant built from the real x1 and then perturb it, so
     #                both have a step size whose zero limit is exactly plain
     #                flow matching.
+    # 'interp'     - no perturbation at all: the true interpolant at t' itself.
+    #                With gt_on_target='fm_velocity' this is exactly plain flow
+    #                matching on the corrective branch's own t' draw, which makes
+    #                it the paired control for the rollout arms: same time
+    #                distribution, same target, same data order, rollout removed.
     # 'trajectory' - Denoising Resampling Forcing: initialise at pure noise and
     #                integrate the *inference* schedule with the *inference*
     #                solver and guidance, then supervise at one schedule point.
@@ -737,13 +750,25 @@ class PlainSiT(nn.Module):
                 "consistency) or 'fm_velocity' (the plain FM target x1 - eps at "
                 f"the induced state); got {self.gt_on_target!r}."
             )
-        if self.gt_on_state not in {"perturb", "trajectory", "schedule"}:
+        if self.gt_on_state not in {"perturb", "interp", "trajectory", "schedule"}:
             raise ValueError(
                 "gt_on_state must be 'perturb' (a perturbation of the true "
-                "interpolant), 'trajectory' (the model's own inference "
-                "trajectory from pure noise) or 'schedule' (the true "
+                "interpolant), 'interp' (the true interpolant itself at t', the "
+                "paired no-rollout control), 'trajectory' (the model's own "
+                "inference trajectory from pure noise) or 'schedule' (the true "
                 "interpolant at the trajectory's schedule times, the "
                 f"time-matched control); got {self.gt_on_state!r}."
+            )
+        if str(self.gt_on_rollout_solver).lower() not in {"euler", "heun"}:
+            raise ValueError(
+                "gt_on_rollout_solver must be 'euler' (the original rollout) or "
+                "'heun' (the inference step); got "
+                f"{self.gt_on_rollout_solver!r}."
+            )
+        if not self.gt_on_rollout_omega > 0.0:
+            raise ValueError(
+                "gt_on_rollout_omega is the rollout's guidance scale and must be "
+                f"positive; got {self.gt_on_rollout_omega!r}."
             )
         if self.gt_on_state in {"trajectory", "schedule"}:
             if int(self.gt_on_traj_steps) < 1:
@@ -835,17 +860,19 @@ class PlainSiT(nn.Module):
         t_prime = t_prime * (1.0 - self.gt_on_t_delta)
         eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
 
-        if self.gt_on_state in {"trajectory", "schedule"} and self.gt_on_target in {
-            "self",
-            "self_velocity",
-        }:
+        if self.gt_on_state in {
+            "interp",
+            "trajectory",
+            "schedule",
+        } and self.gt_on_target in {"self", "self_velocity"}:
             raise NotImplementedError(
                 "gt_on_target={!r} is defined for the 'perturb' constructions "
                 "only: 'self' needs the cheap variant's endpoint estimate and "
                 "'self_velocity' needs the velocity one Euler step back, neither "
-                "of which the trajectory rollout produces. The targets defined "
-                "on trajectory states are 'fm_velocity' (the proposal) and "
-                "'data' (the state-consistent chord).".format(self.gt_on_target)
+                "of which the trajectory rollout or the no-rollout control "
+                "produces. The targets defined on those states are 'fm_velocity' "
+                "(the plain FM target) and 'data' (the state-consistent "
+                "chord).".format(self.gt_on_target)
             )
 
         if self.gt_on_state in {"trajectory", "schedule"}:
@@ -911,6 +938,18 @@ class PlainSiT(nn.Module):
                     jnp.mean(jnp.square(u_chord - u_fm))
                 ),
             }
+        elif self.gt_on_state == "interp":
+            # The paired no-rollout control: the true interpolant at t' itself.
+            # With gt_on_target='fm_velocity' the corrective term becomes exactly
+            # the plain FM loss on the corrective branch's own t' draw, so an arm
+            # run against this one differs only in whether the state was pushed
+            # along the model's dynamics. Drift is identically zero by
+            # construction and it costs no rollout forwards. rollout_k is ignored
+            # here on purpose, so the same flag can be swept in the arm without
+            # touching the control.
+            xt_hat = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
+            induced_ref = xt_hat
+            extra_diagnostics = {}
         elif rollout_k == 0:
             # Cheap variant: the endpoint prediction the FM forward already
             # produced, re-noised at a fresh time. No extra forward pass.
@@ -944,12 +983,22 @@ class PlainSiT(nn.Module):
             _, x_roll, _ = self.transport.path_sampler.plan(t_start, eps, x1)
             induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
             dt_b = self._broadcast_scalar(dt, x_roll)
+            solver = str(self.gt_on_rollout_solver).lower()
+            omega = float(self.gt_on_rollout_omega)
             t_cur = t_start
             for _ in range(rollout_k):
-                v_step = jax.lax.stop_gradient(
-                    self._predict_transport_output(x_roll, t_cur, labels)
-                )
-                x_roll = x_roll + dt_b * v_step
+                # `_guided_velocity_sg` is the sampler's own velocity and reduces
+                # to the detached conditional forward when omega == 1.0, so the
+                # euler/omega=1 default reproduces the arms already recorded
+                # forward-pass for forward-pass.
+                v_step = self._guided_velocity_sg(x_roll, t_cur, labels, omega)
+                if solver == "heun":
+                    t_next = t_cur + dt
+                    x_pred = x_roll + dt_b * v_step
+                    v_next = self._guided_velocity_sg(x_pred, t_next, labels, omega)
+                    x_roll = x_roll + 0.5 * dt_b * (v_step + v_next)
+                else:
+                    x_roll = x_roll + dt_b * v_step
                 t_cur = t_cur + dt
             xt_hat = jax.lax.stop_gradient(x_roll)
             extra_diagnostics = {

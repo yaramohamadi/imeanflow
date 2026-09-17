@@ -278,6 +278,12 @@ def _build_plain_sit(config, *, eval_mode=False):
         gt_on_target=str(config.model.get("sit_gt_on_target", "data")),
         gt_on_rollout_k=int(config.model.get("sit_gt_on_rollout_k", 0)),
         gt_on_rollout_dt=float(config.model.get("sit_gt_on_rollout_dt", 0.1)),
+        gt_on_rollout_solver=str(
+            config.model.get("sit_gt_on_rollout_solver", "euler")
+        ),
+        gt_on_rollout_omega=float(
+            config.model.get("sit_gt_on_rollout_omega", 1.0)
+        ),
         gt_on_state=str(config.model.get("sit_gt_on_state", "perturb")),
         gt_on_traj_steps=int(config.model.get("sit_gt_on_traj_steps", 16)),
         gt_on_traj_solver=str(config.model.get("sit_gt_on_traj_solver", "heun")),
