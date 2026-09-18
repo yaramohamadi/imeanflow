@@ -66,6 +66,9 @@ def build(**overrides):
         gt_on_rollout_dt=0.1,
         gt_on_rollout_solver="euler",
         gt_on_rollout_omega=1.0,
+        gt_on_rollout_index_random=False,
+        gt_on_t_min=0.0,
+        gt_on_t_max=0.0,
         gt_on_state="perturb",
         # 4 steps rather than the real 16: the arithmetic and the masking are
         # what is under test, and 4 keeps the unrolled loop cheap on CPU.
@@ -157,8 +160,91 @@ def main():
     roll_chord = run("rollout1/heun-cfg/data", gt_on_rollout_k=1,
                      gt_on_rollout_dt=0.0625, gt_on_rollout_solver="heun",
                      gt_on_rollout_omega=1.5, gt_on_target="data")
+    # Phase 3: the t' band. Three disjoint slices of the same truncated range.
+    ROLL4 = dict(gt_on_rollout_k=4, gt_on_rollout_dt=0.0625,
+                 gt_on_rollout_solver="heun", gt_on_rollout_omega=1.5,
+                 gt_on_target="fm_velocity")
+    roll4 = run("rollout4/full-range", **ROLL4)
+    band_lo = run("rollout4/band-noise", gt_on_t_min=0.0, gt_on_t_max=0.27, **ROLL4)
+    band_mid = run("rollout4/band-middle", gt_on_t_min=0.27, gt_on_t_max=0.54, **ROLL4)
+    band_hi = run("rollout4/band-data", gt_on_t_min=0.54, gt_on_t_max=0.8, **ROLL4)
+    # Experiment C: one randomly drawn state per example out of the K visited.
+    roll4_rand = run("rollout4/random-index", gt_on_rollout_index_random=True, **ROLL4)
 
     failures = []
+
+    # The two new knobs must be inert at their defaults, or every number already
+    # recorded stops being reproducible from this code. Re-running the K=1 arm
+    # with the defaults spelled out explicitly has to reproduce it bit for bit.
+    roll_heun_again = run("rollout1/defaults-explicit", gt_on_rollout_k=1,
+                          gt_on_rollout_dt=0.0625, gt_on_rollout_solver="heun",
+                          gt_on_rollout_omega=1.5, gt_on_target="fm_velocity",
+                          gt_on_t_min=0.0, gt_on_t_max=0.0,
+                          gt_on_rollout_index_random=False)
+    for key in ("gt_on_drift_rms", "gt_on_target_rms", "t_prime_mean"):
+        if roll_heun_again[key] != roll_heun[key]:
+            failures.append(
+                f"the new knobs are not inert at their defaults: {key} moved from "
+                f"{roll_heun[key]} to {roll_heun_again[key]}"
+            )
+
+    # Each band must actually move the mean supervision time, in order.
+    if not (band_lo["t_prime_mean"] < band_mid["t_prime_mean"] < band_hi["t_prime_mean"]):
+        failures.append(
+            "the t' bands do not order by mean supervision time: "
+            f"{band_lo['t_prime_mean']:.4f} / {band_mid['t_prime_mean']:.4f} / "
+            f"{band_hi['t_prime_mean']:.4f}"
+        )
+    # ... and stay inside their own bounds.
+    for label, d, lo, hi in (
+        ("noise", band_lo, 0.0, 0.27),
+        ("middle", band_mid, 0.27, 0.54),
+        ("data", band_hi, 0.54, 0.8),
+    ):
+        if not lo - 1e-6 <= d["t_prime_mean"] <= hi + 1e-6:
+            failures.append(
+                f"the {label} band's mean t' {d['t_prime_mean']} sits outside "
+                f"[{lo}, {hi}]"
+            )
+    # The band restricts t' and nothing else, so the full-range arm's mean must
+    # sit between the extreme bands rather than outside them.
+    if not band_lo["t_prime_mean"] < roll4["t_prime_mean"] < band_hi["t_prime_mean"]:
+        failures.append("the full-range mean t' is not bracketed by the bands")
+    # Clamping t_start at t0 means the data-end band gets the longest rollout, so
+    # its drift must exceed the noise-end band's. This is the quantity Phase 3 is
+    # actually about, and if it does not move the ablation measures nothing.
+    if not band_hi["gt_on_drift_rms"] > band_lo["gt_on_drift_rms"]:
+        failures.append(
+            "the t' band does not change the achieved drift "
+            f"({band_hi['gt_on_drift_rms']} at the data end vs "
+            f"{band_lo['gt_on_drift_rms']} at the noise end), so Phase 3 would "
+            "vary the time axis without varying the rollout it is meant to probe"
+        )
+
+    # Experiment C must supervise earlier states on average than the fixed-K arm,
+    # which always takes index K.
+    if not roll4_rand["gt_on_rollout_index_mean"] < 4.0:
+        failures.append(
+            "gt_on_rollout_index_random still supervises index K on every example "
+            f"(mean {roll4_rand['gt_on_rollout_index_mean']})"
+        )
+    if roll4["gt_on_rollout_index_mean"] != 4.0:
+        failures.append(
+            "the fixed-K arm no longer reports index K, so the random-index change "
+            "altered the default path"
+        )
+    # A mixture over shorter rollouts must drift less than always taking all K.
+    if not roll4_rand["gt_on_drift_rms"] < roll4["gt_on_drift_rms"]:
+        failures.append(
+            "the random-index mixture drifts as far as the full-K rollout "
+            f"({roll4_rand['gt_on_drift_rms']} vs {roll4['gt_on_drift_rms']})"
+        )
+    # The supervision time follows the chosen state, so it must fall too.
+    if not roll4_rand["t_prime_mean"] < roll4["t_prime_mean"]:
+        failures.append(
+            "the random-index arm's supervision time did not follow the chosen "
+            "state: mean t' is unchanged, so the state and the time disagree"
+        )
 
     # The no-rollout control is the interpolant, so its drift is exactly zero --
     # if it is not, it is not a control.

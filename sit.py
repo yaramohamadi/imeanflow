@@ -72,6 +72,24 @@ class PlainSiT(nn.Module):
     # model's own inference dynamics" means when the sampler is Heun + CFG.
     gt_on_rollout_solver: str = "euler"
     gt_on_rollout_omega: float = 1.0
+    # Experiment C: supervise ONE randomly chosen state per example out of the K
+    # the rollout passes through, instead of always the last one. The supervision
+    # time moves with the chosen state (t_start + j*dt for the drawn index j), so
+    # the arm differs from the fixed-K arm in its t' distribution as well as its
+    # drift distribution -- it is a mixture over rollout distances, not a
+    # different distance, and both diagnostics are logged for that reason. Costs
+    # the same K forwards as the fixed-K arm.
+    gt_on_rollout_index_random: bool = False
+    # Phase 3, the starting-timestep / noise-level ablation: an absolute band on
+    # the t' draw. `gt_on_t_delta` can only cut the *top* of the range, so
+    # restricting supervision to the noise end, the middle or the data end needs
+    # its own knob. 0.0 for both means "unrestricted", and in that case the draw
+    # is computed by the original expression so every recorded arm stays
+    # bit-identical rather than merely equivalent. gt_on_t_max may not exceed the
+    # delta cap t1 * (1 - gt_on_t_delta): the target divisor's bound is delta's
+    # job and this knob does not get to override it.
+    gt_on_t_min: float = 0.0
+    gt_on_t_max: float = 0.0
     # Where the induced state comes from.
     # 'perturb'    - the two constructions above. Both start from the *true*
     #                interpolant built from the real x1 and then perturb it, so
@@ -817,6 +835,38 @@ class PlainSiT(nn.Module):
                 "gt_on_rollout_dt must be positive when rolling out; got "
                 f"{self.gt_on_rollout_dt!r}."
             )
+        if self.gt_on_rollout_index_random and int(self.gt_on_rollout_k) < 1:
+            raise ValueError(
+                "gt_on_rollout_index_random selects one of the rollout's "
+                "intermediate states, so it needs gt_on_rollout_k >= 1; got "
+                f"{self.gt_on_rollout_k!r}."
+            )
+        if self.gt_on_rollout_index_random and self.gt_on_state != "perturb":
+            raise ValueError(
+                "gt_on_rollout_index_random is defined for the 'perturb' rollout "
+                "construction only; the trajectory arm already draws its "
+                f"supervision index (gt_on_traj_index_min). Got {self.gt_on_state!r}."
+            )
+        if self.gt_on_t_min < 0.0 or self.gt_on_t_max < 0.0:
+            raise ValueError(
+                "gt_on_t_min / gt_on_t_max are absolute times and cannot be "
+                f"negative; got {self.gt_on_t_min!r} / {self.gt_on_t_max!r}."
+            )
+        if self.gt_on_t_max > 0.0 and not self.gt_on_t_min < self.gt_on_t_max:
+            raise ValueError(
+                "gt_on_t_min must be below gt_on_t_max for the band to contain "
+                f"anything; got {self.gt_on_t_min!r} / {self.gt_on_t_max!r}."
+            )
+        if (self.gt_on_t_min > 0.0 or self.gt_on_t_max > 0.0) and self.gt_on_state in {
+            "trajectory",
+            "schedule",
+        }:
+            raise ValueError(
+                "the gt_on_t_min / gt_on_t_max band applies to the continuous t' "
+                "draw; the trajectory and schedule constructions supervise at "
+                "discrete schedule points and restrict them with "
+                f"gt_on_traj_index_min instead. Got gt_on_state={self.gt_on_state!r}."
+            )
 
         x1 = images.astype(self.dtype)
         labels = labels.astype(jnp.int32)
@@ -854,10 +904,33 @@ class PlainSiT(nn.Module):
             self.transport.train_eps, self.transport.sample_eps
         )
         rollout_k = int(self.gt_on_rollout_k)
-        t_prime = jax.random.uniform(
-            rng_t, (x1.shape[0],), minval=t0, maxval=t1, dtype=x1.dtype
-        )
-        t_prime = t_prime * (1.0 - self.gt_on_t_delta)
+        t_cap = t1 * (1.0 - self.gt_on_t_delta)
+        if self.gt_on_t_min > 0.0 or self.gt_on_t_max > 0.0:
+            # Phase 3: draw inside an explicit band instead of the whole
+            # truncated range. Same single uniform draw, so the arms differ in
+            # where t' lives and in nothing else.
+            band_lo = max(float(self.gt_on_t_min), float(t0))
+            band_hi = float(self.gt_on_t_max) if self.gt_on_t_max > 0.0 else float(t_cap)
+            if band_hi > t_cap + 1e-9:
+                raise ValueError(
+                    f"gt_on_t_max={band_hi} exceeds the truncation cap "
+                    f"{t_cap} set by gt_on_t_delta={self.gt_on_t_delta}, which is "
+                    "what keeps the target divisor bounded. Lower gt_on_t_max or "
+                    "lower gt_on_t_delta deliberately."
+                )
+            if not band_lo < band_hi:
+                raise ValueError(
+                    f"the t' band [{band_lo}, {band_hi}] is empty after clamping "
+                    f"to the transport interval [{t0}, {t1}]."
+                )
+            t_prime = jax.random.uniform(
+                rng_t, (x1.shape[0],), minval=band_lo, maxval=band_hi, dtype=x1.dtype
+            )
+        else:
+            t_prime = jax.random.uniform(
+                rng_t, (x1.shape[0],), minval=t0, maxval=t1, dtype=x1.dtype
+            )
+            t_prime = t_prime * (1.0 - self.gt_on_t_delta)
         eps = jax.random.normal(rng_eps, x1.shape, dtype=x1.dtype)
 
         if self.gt_on_state in {
@@ -985,8 +1058,27 @@ class PlainSiT(nn.Module):
             dt_b = self._broadcast_scalar(dt, x_roll)
             solver = str(self.gt_on_rollout_solver).lower()
             omega = float(self.gt_on_rollout_omega)
+            # Experiment C: which of the K states this example is supervised at.
+            # Drawn from a key folded off the base rather than by widening the
+            # split, so the anchor term and the noise draw stay bit-identical to
+            # the fixed-K arm; only the index is new randomness. Index K is the
+            # fixed-K arm's own choice, so it stays in the support -- this is a
+            # mixture that CONTAINS the fixed-K arm, not a disjoint alternative.
+            pick_random = bool(self.gt_on_rollout_index_random)
+            if pick_random:
+                j_index = jax.random.randint(
+                    jax.random.fold_in(rng_base, 3),
+                    (x1.shape[0],),
+                    1,
+                    rollout_k + 1,
+                    dtype=jnp.int32,
+                )
+            else:
+                j_index = jnp.full((x1.shape[0],), rollout_k, dtype=jnp.int32)
+            x_sel = x_roll
+            t_sel = t_start
             t_cur = t_start
-            for _ in range(rollout_k):
+            for step_i in range(rollout_k):
                 # `_guided_velocity_sg` is the sampler's own velocity and reduces
                 # to the detached conditional forward when omega == 1.0, so the
                 # euler/omega=1 default reproduces the arms already recorded
@@ -1000,11 +1092,29 @@ class PlainSiT(nn.Module):
                 else:
                     x_roll = x_roll + dt_b * v_step
                 t_cur = t_cur + dt
-            xt_hat = jax.lax.stop_gradient(x_roll)
+                # Keep the state and the time of the step this example was
+                # assigned. `t_cur` is already the time AFTER the step, so index
+                # step_i + 1 is the state just produced.
+                take = j_index == (step_i + 1)
+                # Reshaped by hand rather than through `_broadcast_scalar`, which
+                # casts to float32 and would hand `jnp.where` a non-boolean mask.
+                take_b = take.reshape((take.shape[0],) + (1,) * (x_roll.ndim - 1))
+                x_sel = jnp.where(take_b, x_roll, x_sel)
+                t_sel = jnp.where(take, t_cur, t_sel)
+            xt_hat = jax.lax.stop_gradient(x_sel)
             extra_diagnostics = {
                 "gt_on_rollout_dt_mean": jnp.mean(dt),
                 "gt_on_rollout_t_start_mean": jnp.mean(t_start),
+                "gt_on_rollout_index_mean": jnp.mean(j_index.astype(x1.dtype)),
             }
+            if pick_random:
+                # The supervision time follows the chosen state, so t' is no
+                # longer the drawn endpoint time; the reference interpolant and
+                # every t'-dependent quantity below must use the selected time or
+                # the drift diagnostic and the chord target would be computed at a
+                # time the state does not sit at.
+                t_prime = t_sel
+                induced_ref = self.transport.path_sampler.plan(t_prime, eps, x1)[1]
 
         # --- corrective target: the chord to the REAL endpoint ---------------
         t_b = self._broadcast_scalar(t_prime, xt_hat)

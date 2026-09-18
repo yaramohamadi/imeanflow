@@ -284,6 +284,11 @@ def _build_plain_sit(config, *, eval_mode=False):
         gt_on_rollout_omega=float(
             config.model.get("sit_gt_on_rollout_omega", 1.0)
         ),
+        gt_on_rollout_index_random=bool(
+            config.model.get("sit_gt_on_rollout_index_random", False)
+        ),
+        gt_on_t_min=float(config.model.get("sit_gt_on_t_min", 0.0)),
+        gt_on_t_max=float(config.model.get("sit_gt_on_t_max", 0.0)),
         gt_on_state=str(config.model.get("sit_gt_on_state", "perturb")),
         gt_on_traj_steps=int(config.model.get("sit_gt_on_traj_steps", 16)),
         gt_on_traj_solver=str(config.model.get("sit_gt_on_traj_solver", "heun")),

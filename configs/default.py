@@ -176,6 +176,17 @@ def get_config():
     # 1 / sampling.num_steps, for a rollout step that matches evaluation.
     model.sit_gt_on_rollout_solver = "euler"
     model.sit_gt_on_rollout_omega = 1.0
+    # Experiment C: supervise one randomly drawn state per example out of the K
+    # the rollout passes through, with the supervision time following the chosen
+    # state, instead of always supervising the last one. The index-K case is in
+    # the support, so this is a mixture containing the fixed-K arm.
+    model.sit_gt_on_rollout_index_random = False
+    # Phase 3: an absolute band on the t' draw, for restricting supervision to the
+    # noise end, the middle or the data end of the schedule. 0.0 for both means
+    # unrestricted (the original draw, bit-identical). sit_gt_on_t_max may not
+    # exceed the cap set by sit_gt_on_t_delta.
+    model.sit_gt_on_t_min = 0.0
+    model.sit_gt_on_t_max = 0.0
     # "perturb" = the constructions above, which perturb the true interpolant.
     # "interp" = no perturbation: the true interpolant at t' itself. With
     # sit_gt_on_target="fm_velocity" the corrective term is exactly plain flow
