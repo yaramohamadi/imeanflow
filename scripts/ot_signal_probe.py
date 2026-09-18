@@ -65,7 +65,9 @@ def load_latent_pool(root, dataset, count, rng, split="train"):
 
     moments = np.empty((count, 32, 32, 8), np.float32)
     for index, name in enumerate(names):
-        payload = torch.load(os.path.join(directory, name), map_location="cpu")
+        payload = torch.load(
+            os.path.join(directory, name), map_location="cpu", weights_only=True
+        )
         tensor = payload["image"].numpy()  # (C, H, W)
         moments[index] = np.transpose(tensor, (1, 2, 0))
 

@@ -65,10 +65,14 @@ def sinkhorn_potentials(cost, epsilon, num_iters, log_a=None, log_b=None):
     a fixed point, but one whose plan is off by a factor of n*m -- silently, since the
     rows stay uniform among themselves.
     """
-    if epsilon <= 0.0:
-        raise ValueError("epsilon must be positive.")
     if num_iters < 1:
         raise ValueError("num_iters must be at least 1.")
+    try:
+        positive = bool(epsilon > 0.0)
+    except jax.errors.TracerBoolConversionError:
+        positive = True  # traced under jit, so the value is not inspectable here
+    if not positive:
+        raise ValueError("epsilon must be positive.")
     n, m = cost.shape
     if log_a is None:
         log_a = _uniform_log_weights(n, cost.dtype)
