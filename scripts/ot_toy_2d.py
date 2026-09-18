@@ -258,7 +258,7 @@ def evaluate(params, base_params, rng, target_sampler, count, nfe_list):
 
 
 def train(name, params, base_params, sampler, target_sampler, steps, lr, args,
-          loss_kind, rng, rows, eval_every):
+          loss_kind, rng, rows, eval_every, seed):
     optimizer = optax.adam(lr)
     state = optimizer.init(params)
 
@@ -278,13 +278,17 @@ def train(name, params, base_params, sampler, target_sampler, steps, lr, args,
 
     started = time.time()
     for index in range(steps + 1):
-        if index % eval_every == 0:
+        # `or index == steps`: without it an eval_every that does not divide `steps` means
+        # the converged model is never measured, and the smoke run reported the source
+        # transport at step 0 as if that were its quality
+        if index % eval_every == 0 or index == steps:
             rng, key_eval = jax.random.split(rng)
-            row = {"arm": name, "step": index, "seconds": time.time() - started}
+            row = {"arm": name, "seed": seed, "step": index,
+                   "seconds": time.time() - started}
             row.update(evaluate(params, base_params, key_eval, target_sampler,
                                 args.eval_count, [1, 4]))
             rows.append(row)
-            print(f"  {name:16s} step {index:6d}  "
+            print(f"  s{seed} {name:16s} step {index:6d}  "
                   f"W2(NFE1)={row['w2_nfe1']:.4f}  W2(NFE4)={row['w2_nfe4']:.4f}  "
                   f"cos={row['ot_alignment_cosine']:+.3f}  "
                   f"|d|/ideal={row['correction_over_ideal']:.2f}", flush=True)
@@ -317,65 +321,81 @@ def main():
     parser.add_argument("--lambda-traj", type=float, default=1.0)
     parser.add_argument("--eval-count", type=int, default=1024)
     parser.add_argument("--eval-every", type=int, default=500)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seeds", default="0,1,2",
+                        help="one seed is not a result; each seed repeats the whole "
+                             "pretrain + all arms, so the prior differs per seed too")
     parser.add_argument("--out", required=True)
     parser.add_argument("--arms", default="pretrained,regress_scratch,regress_ft,"
                                           "ot_final,ot_traj,ot_traj_scratch")
     args = parser.parse_args()
 
     source_sampler, target_sampler = make_samplers(args)
-    rng = jax.random.PRNGKey(args.seed)
-
-    rng, key_init = jax.random.split(rng)
-    source_params = init_params(key_init, args.width, args.depth)
-
-    print(f"pretraining the source transport ({args.pretrain_steps} steps) ...", flush=True)
-    rows = []
-    source_params = train(
-        "source_pretrain", source_params, source_params, source_sampler, source_sampler,
-        args.pretrain_steps, args.pretrain_lr, args, "regress", rng, rows,
-        args.eval_every * 4,
-    )
-
-    rng, key_scratch = jax.random.split(rng)
-    scratch_params = init_params(key_scratch, args.width, args.depth)
-
     arms = [a for a in args.arms.split(",") if a]
-    plans = {
-        "pretrained": (source_params, "regress", 0),
-        "regress_scratch": (scratch_params, "regress", args.adapt_steps),
-        "regress_ft": (source_params, "regress", args.adapt_steps),
-        "ot_final": (source_params, "ot_final", args.adapt_steps),
-        "ot_traj": (source_params, "ot_traj", args.adapt_steps),
-        "ot_traj_scratch": (scratch_params, "ot_traj", args.adapt_steps),
-    }
+    seeds = [int(v) for v in args.seeds.split(",") if v]
+    rows = []
 
-    print("\nadapting to the target:", flush=True)
-    for arm in arms:
-        if arm not in plans:
-            raise ValueError(f"unknown arm {arm}")
-        init, kind, steps = plans[arm]
-        rng, key_arm = jax.random.split(rng)
-        train(arm, init, source_params, target_sampler, target_sampler, steps,
-              args.adapt_lr, args, kind, key_arm, rows, args.eval_every)
+    for seed in seeds:
+        rng = jax.random.PRNGKey(seed)
+        rng, key_init = jax.random.split(rng)
+        source_params = init_params(key_init, args.width, args.depth)
+
+        print(f"\n=== seed {seed}: pretraining the source transport "
+              f"({args.pretrain_steps} steps) ===", flush=True)
+        source_params = train(
+            "source_pretrain", source_params, source_params, source_sampler,
+            source_sampler, args.pretrain_steps, args.pretrain_lr, args, "regress",
+            rng, rows, max(args.eval_every * 4, 1), seed,
+        )
+
+        rng, key_scratch = jax.random.split(rng)
+        scratch_params = init_params(key_scratch, args.width, args.depth)
+
+        plans = {
+            "pretrained": (source_params, "regress", 0),
+            "regress_scratch": (scratch_params, "regress", args.adapt_steps),
+            "regress_ft": (source_params, "regress", args.adapt_steps),
+            "ot_final": (source_params, "ot_final", args.adapt_steps),
+            "ot_traj": (source_params, "ot_traj", args.adapt_steps),
+            "ot_traj_scratch": (scratch_params, "ot_traj", args.adapt_steps),
+        }
+        for arm in arms:
+            if arm not in plans:
+                raise ValueError(f"unknown arm {arm}")
+            init, kind, steps = plans[arm]
+            rng, key_arm = jax.random.split(rng)
+            train(arm, init, source_params, target_sampler, target_sampler, steps,
+                  args.adapt_lr, args, kind, key_arm, rows, args.eval_every, seed)
 
     fields = sorted({key for row in rows for key in row})
-    fields = ["arm", "step"] + [f for f in fields if f not in ("arm", "step")]
+    lead = ["arm", "seed", "step"]
+    fields = lead + [f for f in fields if f not in lead]
     with open(args.out, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nwrote {args.out} ({len(rows)} rows)")
 
-    print("\nfinal state per arm (W2 is exact, lower is better):")
-    print(f"{'arm':18s}{'W2 NFE1':>10s}{'W2 NFE4':>10s}{'OT cos':>9s}{'|d|/ideal':>11s}")
+    print(f"\nfinal state per arm, mean +- sd over {len(seeds)} seeds "
+          f"(W2 is exact, lower is better):")
+    print(f"{'arm':18s}{'W2 NFE1':>18s}{'W2 NFE4':>18s}{'OT cos':>18s}{'|d|/ideal':>18s}")
     for arm in ["source_pretrain"] + arms:
-        hits = [r for r in rows if r["arm"] == arm]
-        if not hits:
+        finals = []
+        for seed in seeds:
+            hits = [r for r in rows if r["arm"] == arm and r["seed"] == seed]
+            if hits:
+                finals.append(max(hits, key=lambda r: r["step"]))
+        if not finals:
             continue
-        last = max(hits, key=lambda r: r["step"])
-        print(f"{arm:18s}{last['w2_nfe1']:>10.4f}{last['w2_nfe4']:>10.4f}"
-              f"{last['ot_alignment_cosine']:>+9.3f}{last['correction_over_ideal']:>11.2f}")
+
+        def spread(key):
+            values = np.array([f[key] for f in finals], np.float64)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                return "        n/a"
+            return f"{values.mean():>10.4f}+-{values.std(ddof=0):<6.3f}"
+
+        print(f"{arm:18s}{spread('w2_nfe1')}{spread('w2_nfe4')}"
+              f"{spread('ot_alignment_cosine')}{spread('correction_over_ideal')}")
 
 
 if __name__ == "__main__":
