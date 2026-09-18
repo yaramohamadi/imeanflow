@@ -259,13 +259,49 @@ def test_interval_levels_are_readable_inside_jit():
     assert sorted(result) == ["level_0.25", "level_0.50", "level_0.75"], sorted(result)
 
 
-def test_target_interpolant_hits_both_endpoints():
-    y = jax.random.normal(jax.random.PRNGKey(17), (4, 3))
+def test_target_interpolant_hits_both_endpoints_under_both_conventions():
+    """Pin both endpoint conventions, because this repo uses both.
+
+    The plain-imfDiT adversarial path (what Stage 1 trains) is `z_t = (1-t)x + t*e`, so t=0
+    is DATA; the SiT/DMF path is `(1-t)e + t*x`, so t=0 is NOISE. Getting this backwards
+    matches the generated marginal against the mirror image of the intended one, and the loss
+    still goes down, so nothing would look wrong.
+    """
+    data = jax.random.normal(jax.random.PRNGKey(17), (4, 3))
     noise = jax.random.normal(jax.random.PRNGKey(18), (4, 3))
-    at_zero = target_interpolant(y, noise, jnp.zeros((4,)))
-    at_one = target_interpolant(y, noise, jnp.ones((4,)))
-    np.testing.assert_allclose(np.asarray(at_zero), np.asarray(noise), rtol=1e-6)
-    np.testing.assert_allclose(np.asarray(at_one), np.asarray(y), rtol=1e-6)
+    zeros, ones = jnp.zeros((4,)), jnp.ones((4,))
+
+    # production default: noise at t=1
+    np.testing.assert_allclose(
+        np.asarray(target_interpolant(data, noise, zeros)), np.asarray(data), rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(target_interpolant(data, noise, ones)), np.asarray(noise), rtol=1e-6
+    )
+    # toy / SiT-DMF convention: data at t=1
+    np.testing.assert_allclose(
+        np.asarray(target_interpolant(data, noise, zeros, noise_at_one=False)),
+        np.asarray(noise), rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(target_interpolant(data, noise, ones, noise_at_one=False)),
+        np.asarray(data), rtol=1e-6,
+    )
+
+
+def test_target_interpolant_agrees_with_the_trainer_endpoint_builder():
+    """The production branch must reproduce imf.py's z_t exactly, not just at endpoints."""
+    data = jax.random.normal(jax.random.PRNGKey(23), (8, 4, 4, 2))
+    noise = jax.random.normal(jax.random.PRNGKey(24), (8, 4, 4, 2))
+    time = jax.random.uniform(jax.random.PRNGKey(25), (8,))
+    shaped = time.reshape((8, 1, 1, 1))
+    # imf.py::caimf endpoint builder, verbatim: z_t = (1.0 - t) * x + t * e
+    np.testing.assert_allclose(
+        np.asarray(target_interpolant(data, noise, time)),
+        np.asarray((1.0 - shaped) * data + shaped * noise),
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def test_entropic_value_is_bracketed_by_zero_and_the_mean_cost():

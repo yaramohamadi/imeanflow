@@ -271,11 +271,28 @@ def interval_levels(num_levels, minimum=0.0, maximum=1.0):
     return np.linspace(minimum, maximum, num_levels + 2)[1:-1].astype(np.float32)
 
 
-def target_interpolant(y, noise, time):
-    """p_t^T for a linear-path MeanFlow: (1 - t) * noise + t * y.
+def target_interpolant(data, noise, time, *, noise_at_one=True):
+    """p_t^T on a linear path. The concrete answer to the proposal's "what is the target
+    path for a distilled model" question: for a linear-path transport the target
+    intermediate marginal is available in closed form and needs no diffusion noising
+    process.
 
-    This is the concrete answer to the proposal's "what is the target path for a distilled
-    model" question -- for a linear-path transport the target intermediate marginal is
-    available in closed form and needs no diffusion noising process.
+    The endpoint convention is an explicit argument because **this repository contains both
+    conventions** and picking the wrong one silently matches against the mirror image of the
+    intended marginal:
+
+    * `noise_at_one=True` -> `(1 - t) * data + t * noise`. This is the plain-imfDiT
+      adversarial path -- `imf.py` `z_t = (1.0 - t) * x + t * e` (the CA-iMF/AFM endpoint
+      builder) and `train_afm.py` `linear_path(images, x1, t)`. t=0 is DATA, t=1 is NOISE,
+      and the lower endpoint r < t is the *cleaner* one, which is why
+      `generated_lower_endpoint` subtracts `(t - r) * u`. **Stage 1 uses this.**
+    * `noise_at_one=False` -> `(1 - t) * noise + t * data`, the SiT/DMF convention
+      (`imf.py::_uses_sit_dmf_time_convention`, `z_t = (1 - t) * e + t * x`) and the one the
+      2-D toy trains under.
+
+    There is no safe default, so the one chosen here is the production path: an error in
+    Stage 1 costs H100 hours, an error in the toy costs seconds.
     """
-    return linear_path(noise, y, time)
+    if noise_at_one:
+        return linear_path(data, noise, time)
+    return linear_path(noise, data, time)
