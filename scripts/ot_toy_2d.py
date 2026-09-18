@@ -24,11 +24,15 @@ What it is for, in order of importance:
    the proposal's claim that the target correction is a *small* redirection of the source
    transport.
 
-Conventions follow the repo, not the MeanFlow paper: t=0 is noise, t=1 is data,
-x_t = (1-t) z + t y, and u(x, r, t) is the average velocity with x_r = x_t + (r - t) u.
-Sampling ascends t. `generated_lower_endpoint` therefore steps *down* from a state built
-out of real data, which is what the trajectory arms supervise and what AFM already does --
-so the OT arms and the adversarial arms sit on the same trajectory construction.
+Conventions follow the **plain-imfDiT adversarial path**, which is what Stage 1 trains and
+what `afm.py` is written against: `z_t = (1-t) y + t e`, so **t=0 is data and t=1 is noise**,
+`v = e - y`, and `u(x, r, t)` is the average velocity with `x_r = x_t - (t-r) u` (that is
+`afm.generated_lower_endpoint`, unchanged). Sampling therefore **descends** t from 1 to 0,
+and the lower endpoint r < t is the *cleaner* one -- which is the whole point: at r=0 the
+comparator is pure target data, so the trajectory terms are supervised against something
+informative. An earlier version of this file used the SiT/DMF convention (t=1 = data) and so
+matched against increasingly pure Gaussian noise as r fell; that run was discarded [EXP-085].
+The repo contains both conventions -- see `otdrift.target_interpolant`.
 
 A 2-D toy cannot tell us whether Sinkhorn survives 4096 dimensions; that is Stage 0b's job
 (`ot_signal_probe.py`). If this toy passes and the probe fails, the probe wins.
@@ -113,13 +117,18 @@ def u_fn(params, x, r, t):
 
 
 def generate(params, z, num_steps):
-    """Ascend t from 0 to 1 in `num_steps` equal steps. num_steps=1 is the NFE-1 sample."""
-    grid = jnp.linspace(0.0, 1.0, num_steps + 1)
+    """Descend t from 1 (noise) to 0 (data) in `num_steps` equal steps.
+
+    Descending, because t=1 is noise in this convention. Each step is exactly
+    `generated_lower_endpoint`: x_r = x_t - (t - r) u. num_steps=1 is the NFE-1 sample,
+    x_0 = e - u(e, 0, 1).
+    """
+    grid = jnp.linspace(1.0, 0.0, num_steps + 1)
     x = z
     for index in range(num_steps):
         t = jnp.full((x.shape[0],), grid[index])
         r = jnp.full((x.shape[0],), grid[index + 1])
-        x = x + (r - t)[:, None] * u_fn(params, x, r, t)
+        x = generated_lower_endpoint(x, u_fn(params, x, r, t), r, t)
     return x
 
 
@@ -129,12 +138,13 @@ def generate(params, z, num_steps):
 def meanflow_loss(params, rng, sampler, batch_size):
     """The regression objective: u = v - (t - r) du/dt, with du/dt by JVP along the path."""
     rng_data, rng_noise, rng_time = jax.random.split(rng, 3)
-    x1 = sampler(rng_data, batch_size)
-    z = jax.random.normal(rng_noise, (batch_size, 2), jnp.float32)
+    y = sampler(rng_data, batch_size)
+    e = jax.random.normal(rng_noise, (batch_size, 2), jnp.float32)
     r, t, interval, _ = sample_time_pairs(rng_time, batch_size, MIN_INTERVAL)
 
-    x_t = linear_path(z, x1, t)
-    velocity = x1 - z
+    # production convention: z_t = (1-t) y + t e, so d z_t / dt = e - y
+    x_t = linear_path(y, e, t)
+    velocity = e - y
 
     def along_path(x_arg, t_arg):
         return u_fn(params, x_arg, r, t_arg)
@@ -152,6 +162,12 @@ def ot_loss(params, rng, sampler, batch_size, args, use_trajectory):
     transport plan is free to match a generated particle at r=0.1 against a real one at
     r=0.9, which matches a mixture-over-r to a mixture-over-r and is a strictly weaker
     condition than matching each level.
+
+    `interval_levels` is interior, so r=0 never appears here; the r=0 endpoint is exactly the
+    final term, with one difference worth keeping in mind -- the final term starts from pure
+    noise and runs the model's own one-step map, while a trajectory term starts from an x_t
+    built out of *real* target data (AFM's construction). The trajectory terms therefore test
+    the interval map on states the model does not itself have to reach.
     """
     rng_z, rng_y, rng_rest = jax.random.split(rng, 3)
     z = jax.random.normal(rng_z, (batch_size, 2), jnp.float32)
@@ -177,9 +193,11 @@ def ot_loss(params, rng, sampler, batch_size, args, use_trajectory):
         span = jnp.maximum(1.0 - level - MIN_INTERVAL, 0.0)
         t = level + MIN_INTERVAL + span * jax.random.uniform(key_t, (batch_size,))
 
+        # x_t = (1-t) y + t e, the production convention: t is the *noisier* end, so the
+        # step down to r moves toward data and the comparator at r is informative
         y_upper = sampler(key_y, batch_size)
         z_upper = jax.random.normal(key_z, (batch_size, 2), jnp.float32)
-        x_t = linear_path(z_upper, y_upper, t)
+        x_t = linear_path(y_upper, z_upper, t)
         u = u_fn(params, x_t, r, t)
         x_r_hat = generated_lower_endpoint(x_t, u, r, t)
 
@@ -187,7 +205,7 @@ def ot_loss(params, rng, sampler, batch_size, args, use_trajectory):
         # in a pointwise correspondence the method is not allowed to have
         y_real = sampler(key_y2, batch_size)
         z_real = jax.random.normal(key_z2, (batch_size, 2), jnp.float32)
-        x_r_real = target_interpolant(y_real, z_real, r)
+        x_r_real = target_interpolant(y_real, z_real, r)  # default = production convention
 
         level_loss, _ = frozen_plan_loss(
             x_r_hat, x_r_real, epsilon_relative=args.eps_rel,
