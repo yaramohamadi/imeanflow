@@ -317,6 +317,34 @@ def train(name, params, base_params, sampler, target_sampler, steps, lr, args,
     return params
 
 
+def summarise(rows, arms, seeds, pick, title):
+    """Print one arm-by-arm table, `pick` choosing which eval row represents each seed."""
+    print(f"\n{title}:")
+    print(f"{'arm':18s}{'W2 NFE1':>18s}{'W2 NFE4':>18s}{'OT cos':>18s}"
+          f"{'|d|/ideal':>18s}{'step':>10s}")
+    for arm in ["source_pretrain"] + arms:
+        chosen = []
+        for seed in seeds:
+            hits = [r for r in rows if r["arm"] == arm and r["seed"] == seed]
+            if hits:
+                chosen.append(pick(hits))
+        if not chosen:
+            continue
+
+        def spread(key):
+            values = np.array([row[key] for row in chosen], np.float64)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                return "        n/a"
+            return f"{values.mean():>10.4f}+-{values.std(ddof=0):<6.3f}"
+
+        steps = sorted({int(row["step"]) for row in chosen})
+        step_text = str(steps[0]) if len(steps) == 1 else f"{steps[0]}-{steps[-1]}"
+        print(f"{arm:18s}{spread('w2_nfe1')}{spread('w2_nfe4')}"
+              f"{spread('ot_alignment_cosine')}{spread('correction_over_ideal')}"
+              f"{step_text:>10s}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--num-modes", type=int, default=6)
@@ -393,27 +421,19 @@ def main():
         writer.writerows(rows)
     print(f"\nwrote {args.out} ({len(rows)} rows)")
 
-    print(f"\nfinal state per arm, mean +- sd over {len(seeds)} seeds "
-          f"(W2 is exact, lower is better):")
-    print(f"{'arm':18s}{'W2 NFE1':>18s}{'W2 NFE4':>18s}{'OT cos':>18s}{'|d|/ideal':>18s}")
-    for arm in ["source_pretrain"] + arms:
-        finals = []
-        for seed in seeds:
-            hits = [r for r in rows if r["arm"] == arm and r["seed"] == seed]
-            if hits:
-                finals.append(max(hits, key=lambda r: r["step"]))
-        if not finals:
-            continue
-
-        def spread(key):
-            values = np.array([f[key] for f in finals], np.float64)
-            values = values[np.isfinite(values)]
-            if values.size == 0:
-                return "        n/a"
-            return f"{values.mean():>10.4f}+-{values.std(ddof=0):<6.3f}"
-
-        print(f"{arm:18s}{spread('w2_nfe1')}{spread('w2_nfe4')}"
-              f"{spread('ot_alignment_cosine')}{spread('correction_over_ideal')}")
+    # Two tables, because W2 is not monotone in step here and the last eval is not
+    # necessarily the arm at its best. The selected table applies model selection *on the
+    # reported metric*, which is exactly what Stage 1 does when it keeps the best-FID
+    # checkpoint -- so it is the comparable one, and the final table is what guards against
+    # reading a lucky eval as convergence. If the two disagree for an arm, the arm is
+    # unstable and that is the finding, not the number.
+    summarise(rows, arms, seeds, lambda hits: max(hits, key=lambda r: r["step"]),
+              f"final eval per arm, mean +- sd over {len(seeds)} seeds "
+              f"(W2 is exact, lower is better)")
+    summarise(rows, arms, seeds,
+              lambda hits: min(hits, key=lambda r: r["w2_nfe1"]),
+              "best-W2(NFE1) eval per arm (model selection on the metric, as in Stage 1's "
+              "best-FID checkpoint)")
 
 
 if __name__ == "__main__":
