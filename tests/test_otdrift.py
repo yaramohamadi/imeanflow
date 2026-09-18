@@ -158,26 +158,32 @@ def test_repulsion_clip_scales_instead_of_zeroing_the_gradient():
     acting alone -- maximal collapse pressure -- on exactly the steps where the guard
     fires. Scaling keeps a bounded repulsion gradient instead, so assert both that the
     bound holds and that the gradient did not vanish.
-    """
-    x = jax.random.normal(jax.random.PRNGKey(26), (24, 6)) * 0.05
-    y = jax.random.normal(jax.random.PRNGKey(27), (24, 6)) * 0.05
 
-    loose, aux_loose = frozen_plan_loss(x, y, epsilon_relative=0.05, num_iters=300)
-    _, aux_tight = frozen_plan_loss(
-        x, y, epsilon_relative=0.05, num_iters=300, repulsion_clip=0.25
-    )
+    The configuration is not arbitrary. Making the guard fire needs the repulsion to be
+    comparable to the attraction, and that happens when the generated set is already close
+    to the target *and* the blur is wide: at eps_rel=0.05 with well-separated sets the
+    self-plan is nearly the identity, so its barycentric target is nearly the particle
+    itself and the debiasing term is ~4% of the attraction (measured: 5.2e-4 vs 1.2e-2 on
+    24 particles in 6-D). At eps_rel=0.5 with the sets 0.1 apart the ratio is 0.95. So the
+    repulsion is weakest exactly where collapse is not a risk and strongest as the model
+    approaches the target, which is the right way round.
+    """
+    y = jax.random.normal(jax.random.PRNGKey(27), (24, 6))
+    x = y + 0.1 * jax.random.normal(jax.random.PRNGKey(26), (24, 6))
+    settings = dict(epsilon_relative=0.5, num_iters=400)
+
+    _, aux_loose = frozen_plan_loss(x, y, repulsion_clip=1e9, **settings)
+    _, aux_tight = frozen_plan_loss(x, y, repulsion_clip=0.5, **settings)
     assert float(aux_loose["ot_repulsion_scale"]) == 1.0
+    assert float(aux_loose["ot_repulsion"]) > 0.5 * float(aux_loose["ot_attraction"])
     assert 0.0 < float(aux_tight["ot_repulsion_scale"]) < 1.0
-    assert float(aux_tight["ot_repulsion"]) <= 0.25 * float(
+    assert float(aux_tight["ot_repulsion"]) <= 0.5 * float(
         aux_tight["ot_attraction"]
     ) + 1e-6
     grad = jax.grad(
-        lambda z: frozen_plan_loss(
-            z, y, epsilon_relative=0.05, num_iters=300, repulsion_clip=0.25
-        )[0]
+        lambda z: frozen_plan_loss(z, y, repulsion_clip=0.5, **settings)[0]
     )(x)
     assert float(jnp.linalg.norm(grad)) > 0.0
-    del loose
 
 
 def test_debiasing_keeps_the_particle_set_from_collapsing():
