@@ -165,6 +165,131 @@ def barycentric_targets(plan, y):
     return weights, projected.reshape((plan.shape[0],) + y.shape[1:])
 
 
+def _weighted_quadratic(x, weights, targets):
+    """sum_i w_i |x_i - target_i|^2 / D -- a sum over particles, hence decomposable."""
+    reduce_axes = tuple(range(1, x.ndim))
+    dimension = 1
+    for size in x.shape[1:]:
+        dimension *= size
+    return jnp.sum(
+        weights * jnp.sum((x - targets) ** 2, axis=reduce_axes) / dimension
+    )
+
+
+def frozen_plan_targets(
+    x_hat,
+    y,
+    *,
+    epsilon_relative=0.05,
+    epsilon=None,
+    num_iters=100,
+    debias=True,
+    repulsion_clip=10.0,
+):
+    """Solve the OT problems once, with no gradient, and return per-particle targets.
+
+    This is the half of the loss that needs **all** N particles in one place. It is also
+    the half that costs nothing to run under `stop_gradient`, which is the entire reason a
+    256-particle divergence is affordable for a model that trains at batch 2: solve here,
+    then regress in microbatches through `frozen_plan_apply`.
+
+    Returns `(targets, aux)`. `targets` is a pytree of per-particle quantities, all
+    detached and all indexed by the generated particle, so a caller may slice row-wise and
+    accumulate; `repulsion_scale` is a scalar shared by every slice.
+
+    `epsilon` pins an absolute blur; otherwise it is `epsilon_relative` times the mean
+    cross cost, which keeps one setting usable across latent and feature spaces. Either
+    way the *same* epsilon is used for the cross and self terms -- the debiasing only
+    cancels under a common blur, and giving the self term its own relative epsilon quietly
+    breaks the divergence.
+
+    `aux` carries the diagnostics that say whether the objective is doing anything: plan
+    entropy (is the blur so large that the plan is uniform and the gradient is just "move
+    to the mean"?) and particle spread (is the debiasing term holding diversity up?).
+    """
+    x_detached = jax.lax.stop_gradient(x_hat)
+    y = jax.lax.stop_gradient(y)
+    cost_xy = squared_cost_matrix(x_detached, y)
+    if epsilon is None:
+        epsilon = relative_epsilon(cost_xy, epsilon_relative)
+    plan_xy = transport_plan(cost_xy, epsilon, num_iters)
+    weights_xy, targets_xy = barycentric_targets(plan_xy, y)
+    attraction = _weighted_quadratic(x_detached, weights_xy, targets_xy)
+
+    if debias:
+        cost_xx = squared_cost_matrix(x_detached, x_detached)
+        plan_xx = transport_plan(cost_xx, epsilon, num_iters)
+        weights_xx, targets_xx = barycentric_targets(plan_xx, x_detached)
+        repulsion = _weighted_quadratic(x_detached, weights_xx, targets_xx)
+        # The repulsion is a negative quadratic and is unbounded below on its own. The
+        # plan is re-solved every step so it does not run away in practice, but bound the
+        # ratio anyway: without this a single step with a near-degenerate plan can
+        # dominate the update. Scale rather than `minimum`, because clamping the *value*
+        # against a detached bound zeroes the repulsion gradient exactly when the term is
+        # largest, which leaves the attraction alone -- i.e. maximal collapse pressure --
+        # on precisely the steps that triggered the guard.
+        bound = repulsion_clip * attraction
+        repulsion_scale = jnp.where(
+            repulsion > bound, bound / jnp.maximum(repulsion, 1e-12), 1.0
+        )
+    else:
+        weights_xx = jnp.zeros_like(weights_xy)
+        targets_xx = jnp.zeros_like(x_detached)
+        repulsion = jnp.asarray(0.0, jnp.float32)
+        repulsion_scale = jnp.asarray(0.0, jnp.float32)
+
+    plan_entropy = -jnp.sum(plan_xy * jnp.log(jnp.maximum(plan_xy, 1e-30)))
+    uniform_entropy = jnp.log(plan_xy.shape[0] * plan_xy.shape[1])
+    targets = {
+        "weights_xy": weights_xy,
+        "targets_xy": targets_xy,
+        "weights_xx": weights_xx,
+        "targets_xx": targets_xx,
+        "repulsion_scale": repulsion_scale,
+    }
+    aux = {
+        "loss_ot": attraction - repulsion_scale * repulsion,
+        "ot_attraction": attraction,
+        "ot_repulsion": repulsion_scale * repulsion,
+        "ot_repulsion_scale": repulsion_scale,
+        "ot_epsilon": epsilon,
+        "ot_matched_cost": jnp.sum(plan_xy * cost_xy),
+        "ot_plan_entropy_ratio": plan_entropy / uniform_entropy,
+        "ot_fake_spread": jnp.mean(jnp.std(flatten_particles(x_detached), axis=0)),
+        "ot_real_spread": jnp.mean(jnp.std(flatten_particles(y), axis=0)),
+    }
+    return jax.lax.stop_gradient(targets), aux
+
+
+def slice_targets(targets, start, stop):
+    """Row-slice the per-particle targets, leaving the shared scalar alone."""
+    return {
+        key: value if value.ndim == 0 else value[start:stop]
+        for key, value in targets.items()
+    }
+
+
+def frozen_plan_apply(x_hat, targets):
+    """The differentiable half: a weighted MSE against detached barycentric targets.
+
+    Summing this over a partition of the particles reproduces the full-batch value and
+    gradient exactly, because every term is a sum over particles and `repulsion_scale` is
+    a scalar. That identity is the microbatch path, and `tests/test_otdrift.py` pins it.
+    """
+    attraction = _weighted_quadratic(
+        x_hat, targets["weights_xy"], targets["targets_xy"]
+    )
+    repulsion = _weighted_quadratic(
+        x_hat, targets["weights_xx"], targets["targets_xx"]
+    )
+    loss = attraction - targets["repulsion_scale"] * repulsion
+    return loss, {
+        "loss_ot": loss,
+        "ot_attraction": attraction,
+        "ot_repulsion": targets["repulsion_scale"] * repulsion,
+    }
+
+
 def frozen_plan_loss(
     x_hat,
     y,
@@ -175,74 +300,23 @@ def frozen_plan_loss(
     debias=True,
     repulsion_clip=10.0,
 ):
-    """Envelope-theorem Sinkhorn loss: solve OT without gradient, regress with gradient.
+    """Envelope-theorem Sinkhorn loss, single-pass: solve, then regress, in one call.
 
-    `x_hat` carries the gradient; the plans, the weights and the barycentric targets are
-    all `stop_gradient`. Returns (loss, aux) with the diagnostics that tell us whether
-    the objective is doing anything: plan entropy (is the blur so large that the plan is
-    uniform and the gradient is just "move to the mean"?) and particle spread (is the
-    debiasing term actually holding diversity up?).
-
-    `epsilon` pins an absolute blur; otherwise it is `epsilon_relative` times the mean
-    cross cost, which keeps one setting usable across latent and feature spaces. Either
-    way the *same* epsilon is used for the cross and self terms -- the debiasing only
-    cancels under a common blur, and giving the self term its own relative epsilon quietly
-    breaks the divergence.
+    Convenience composition of `frozen_plan_targets` and `frozen_plan_apply` for callers
+    that can hold every particle in one graph (the 2-D toy, the tests). The trainer uses
+    the two halves separately so the second one can be microbatched.
     """
-    cost_xy = squared_cost_matrix(jax.lax.stop_gradient(x_hat), y)
-    if epsilon is None:
-        epsilon = relative_epsilon(cost_xy, epsilon_relative)
-    plan_xy = jax.lax.stop_gradient(transport_plan(cost_xy, epsilon, num_iters))
-    weights_xy, targets_xy = barycentric_targets(plan_xy, jax.lax.stop_gradient(y))
-    weights_xy = jax.lax.stop_gradient(weights_xy)
-    targets_xy = jax.lax.stop_gradient(targets_xy)
-
-    reduce_axes = tuple(range(1, x_hat.ndim))
-    dimension = 1
-    for size in x_hat.shape[1:]:
-        dimension *= size
-    attraction = jnp.sum(
-        weights_xy * jnp.sum((x_hat - targets_xy) ** 2, axis=reduce_axes) / dimension
+    targets, aux = frozen_plan_targets(
+        x_hat,
+        y,
+        epsilon_relative=epsilon_relative,
+        epsilon=epsilon,
+        num_iters=num_iters,
+        debias=debias,
+        repulsion_clip=repulsion_clip,
     )
-
-    loss = attraction
-    repulsion = jnp.asarray(0.0, jnp.float32)
-    if debias:
-        x_detached = jax.lax.stop_gradient(x_hat)
-        cost_xx = squared_cost_matrix(x_detached, x_detached)
-        plan_xx = jax.lax.stop_gradient(transport_plan(cost_xx, epsilon, num_iters))
-        weights_xx, targets_xx = barycentric_targets(plan_xx, x_detached)
-        weights_xx = jax.lax.stop_gradient(weights_xx)
-        targets_xx = jax.lax.stop_gradient(targets_xx)
-        # One factor of 2 because both indices of the self term depend on x_hat; the
-        # other copy is detached so the term stays decomposable over particles.
-        repulsion = jnp.sum(
-            weights_xx
-            * jnp.sum((x_hat - targets_xx) ** 2, axis=reduce_axes)
-            / dimension
-        )
-        # The repulsion is a negative quadratic and is unbounded below on its own. The
-        # plan is re-solved every step so it does not run away in practice, but clip the
-        # ratio anyway: without this a single step with a near-degenerate plan can
-        # dominate the update.
-        bound = repulsion_clip * jax.lax.stop_gradient(attraction)
-        repulsion = jnp.minimum(repulsion, bound)
-        loss = loss - repulsion
-
-    plan_entropy = -jnp.sum(plan_xy * jnp.log(jnp.maximum(plan_xy, 1e-30)))
-    uniform_entropy = jnp.log(plan_xy.shape[0] * plan_xy.shape[1])
-    x_flat = flatten_particles(jax.lax.stop_gradient(x_hat))
-    y_flat = flatten_particles(y)
-    aux = {
-        "loss_ot": loss,
-        "ot_attraction": attraction,
-        "ot_repulsion": repulsion,
-        "ot_epsilon": epsilon,
-        "ot_matched_cost": jnp.sum(plan_xy * cost_xy),
-        "ot_plan_entropy_ratio": plan_entropy / uniform_entropy,
-        "ot_fake_spread": jnp.mean(jnp.std(x_flat, axis=0)),
-        "ot_real_spread": jnp.mean(jnp.std(y_flat, axis=0)),
-    }
+    loss, _ = frozen_plan_apply(x_hat, targets)
+    aux["loss_ot"] = loss
     return loss, aux
 
 

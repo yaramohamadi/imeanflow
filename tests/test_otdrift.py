@@ -11,11 +11,14 @@ from otdrift import (
     barycentric_targets,
     energy_distance,
     entropic_ot_cost,
+    frozen_plan_apply,
     frozen_plan_loss,
+    frozen_plan_targets,
     interval_levels,
     matched_cost,
     relative_epsilon,
     sinkhorn_divergence,
+    slice_targets,
     squared_cost_matrix,
     target_interpolant,
     transport_plan,
@@ -115,36 +118,66 @@ def test_frozen_plan_gradient_matches_autodiff_through_sinkhorn():
     assert 0.5 < scale < 2.0, scale
 
 
-def test_frozen_plan_loss_is_microbatch_decomposable():
-    """Accumulating over microbatches must give the same gradient as one pass."""
-    rng = jax.random.PRNGKey(9)
-    x = jax.random.normal(rng, (16, 5))
-    y = jax.random.normal(jax.random.PRNGKey(10), (16, 5)) + 0.5
+def test_microbatch_accumulation_reproduces_the_single_pass_loss_and_gradient():
+    """The real microbatch path, on the real API -- this is what the trainer runs.
 
-    cost = squared_cost_matrix(x, y)
-    epsilon = relative_epsilon(cost, 0.05)
-    plan = transport_plan(cost, epsilon, 400)
-    weights, targets = barycentric_targets(plan, y)
+    XL-2 trains at batch 2 and the divergence needs N >= 256 particles [EXP-084], so the
+    trainer solves the OT once over all N under `stop_gradient` and then accumulates the
+    weighted-MSE gradient in microbatches. If this identity does not hold exactly, the
+    trainer is optimising something other than the divergence it reports.
+    """
+    x = jax.random.normal(jax.random.PRNGKey(9), (16, 4, 4, 2))
+    y = jax.random.normal(jax.random.PRNGKey(10), (16, 4, 4, 2)) + 0.5
 
-    def full(z):
-        return jnp.sum(weights * jnp.sum((z - targets) ** 2, axis=1) / z.shape[1])
+    def single(z):
+        return frozen_plan_loss(z, y, epsilon_relative=0.05, num_iters=300)[0]
 
-    grad_full = np.asarray(jax.grad(full)(x))
+    targets, _ = frozen_plan_targets(x, y, epsilon_relative=0.05, num_iters=300)
 
-    grad_accumulated = np.zeros_like(grad_full)
+    total = 0.0
+    grad_accumulated = np.zeros_like(np.asarray(x))
     for start in range(0, 16, 4):
         stop = start + 4
-        slice_weights = weights[start:stop]
-        slice_targets = targets[start:stop]
+        piece = slice_targets(targets, start, stop)
+        value, grad = jax.value_and_grad(lambda z: frozen_plan_apply(z, piece)[0])(
+            x[start:stop]
+        )
+        total += float(value)
+        grad_accumulated[start:stop] = np.asarray(grad)
 
-        def piece(z_slice):
-            return jnp.sum(
-                slice_weights * jnp.sum((z_slice - slice_targets) ** 2, axis=1) / z_slice.shape[1]
-            )
+    np.testing.assert_allclose(total, float(single(x)), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(
+        grad_accumulated, np.asarray(jax.grad(single)(x)), rtol=1e-5, atol=1e-6
+    )
 
-        grad_accumulated[start:stop] = np.asarray(jax.grad(piece)(x[start:stop]))
 
-    np.testing.assert_allclose(grad_accumulated, grad_full, rtol=1e-6, atol=1e-7)
+def test_repulsion_clip_scales_instead_of_zeroing_the_gradient():
+    """A bound that keeps a gradient, because the alternative collapses on trigger.
+
+    Clamping the repulsion *value* against a detached bound would leave the attraction
+    acting alone -- maximal collapse pressure -- on exactly the steps where the guard
+    fires. Scaling keeps a bounded repulsion gradient instead, so assert both that the
+    bound holds and that the gradient did not vanish.
+    """
+    x = jax.random.normal(jax.random.PRNGKey(26), (24, 6)) * 0.05
+    y = jax.random.normal(jax.random.PRNGKey(27), (24, 6)) * 0.05
+
+    loose, aux_loose = frozen_plan_loss(x, y, epsilon_relative=0.05, num_iters=300)
+    _, aux_tight = frozen_plan_loss(
+        x, y, epsilon_relative=0.05, num_iters=300, repulsion_clip=0.25
+    )
+    assert float(aux_loose["ot_repulsion_scale"]) == 1.0
+    assert 0.0 < float(aux_tight["ot_repulsion_scale"]) < 1.0
+    assert float(aux_tight["ot_repulsion"]) <= 0.25 * float(
+        aux_tight["ot_attraction"]
+    ) + 1e-6
+    grad = jax.grad(
+        lambda z: frozen_plan_loss(
+            z, y, epsilon_relative=0.05, num_iters=300, repulsion_clip=0.25
+        )[0]
+    )(x)
+    assert float(jnp.linalg.norm(grad)) > 0.0
+    del loose
 
 
 def test_debiasing_keeps_the_particle_set_from_collapsing():
