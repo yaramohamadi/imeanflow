@@ -59,11 +59,42 @@ def finite_fake_logit(discriminator, discriminator_params, samples):
     return (d_t - d_fake) / (t - r)
 
 
-def discriminator_loss(real_logit, fake_logit, potentials, lambda_cp=1e-3):
+# Centering-penalty (CP) variants for the discriminator ablation. Each maps the
+# three finite-interval potentials (d_t = D(x_t), d_r = D(x_r), d_fake = D(xhat_r))
+# to a scalar centering penalty. "full" is the default (our method).
+#   full        : d_t^2 + d_r^2 + d_fake^2         (D_zt^2 + D_zr^2 + D_zhatr^2)
+#   none        : 0                                 (no CP)
+#   zt          : d_t^2                             (D_zt^2)
+#   zt_zr       : d_t^2 + d_r^2                     (D_zt^2 + D_zr^2)
+#   zt_zhatr    : d_t^2 + d_fake^2                  (D_zt^2 + D_zhatr^2)
+#   afm_sum2    : (d_t + d_fake)^2                  ((D_zt + D_zhatr)^2, AFM-style)
+#   full_sum2   : (d_t + d_r + d_fake)^2            ((D_zt + D_zr + D_zhatr)^2)
+def compute_centering(d_t, d_r, d_fake, cp_mode="full"):
+    """Return the centering-penalty scalar for the requested CP variant."""
+    if cp_mode == "none":
+        return jnp.zeros((), dtype=d_t.dtype)
+    if cp_mode == "full":
+        return jnp.mean(d_t**2 + d_r**2 + d_fake**2)
+    if cp_mode == "zt":
+        return jnp.mean(d_t**2)
+    if cp_mode == "zt_zr":
+        return jnp.mean(d_t**2 + d_r**2)
+    if cp_mode == "zt_zhatr":
+        return jnp.mean(d_t**2 + d_fake**2)
+    if cp_mode == "afm_sum2":
+        return jnp.mean((d_t + d_fake) ** 2)
+    if cp_mode == "full_sum2":
+        return jnp.mean((d_t + d_r + d_fake) ** 2)
+    raise ValueError(f"Unknown cp_mode: {cp_mode!r}")
+
+
+def discriminator_loss(
+    real_logit, fake_logit, potentials, lambda_cp=1e-3, cp_mode="full"
+):
     """Least-squares finite-interval discriminator loss with centering."""
     d_t, d_r, d_fake = potentials
     classification = jnp.mean((real_logit - 1.0) ** 2 + (fake_logit + 1.0) ** 2)
-    centering = jnp.mean(d_t**2 + d_r**2 + d_fake**2)
+    centering = compute_centering(d_t, d_r, d_fake, cp_mode=cp_mode)
     total = classification + lambda_cp * centering
     return total, {
         "loss": total,

@@ -1,38 +1,32 @@
 dataset:
-    root: /home/ens/Zdehghani/datasets/caltech-101_processed_latents
-    image_size: 32
-    image_channels: 4
-    vae: mse
-    name: caltech101_latent
-    num_classes: 101
+    root: /opt/dlami/nvme/meanflow/datasets/cub-200-2011_processed_latents
+    num_classes: 200
     num_classes_from_data: True
     num_workers: 4
     prefetch_factor: 2
     pin_memory: True
 
 model:
-    model_str: imfSiT_DMF_XL_2
-    num_classes: 101
+    model_str: imfDiT_XL_2
+    num_classes: 200
     training_mode: imf_jvp
     target_use_null_class: True
-    use_auxiliary_v_head: False
+    use_auxiliary_v_head: True
     use_dogfit: False
     class_dropout_prob: 0.1
     cfg_beta: 1.0
-    guidance_scale_strategy: fixed
-    fixed_guidance_scale: 7.5
-    use_context_guidance_conditioning: False
-    use_adaln_guidance_scale_conditioning: False
-    adaln_guidance_scale_init: timestep
-    use_adaln_condition_mixing: False
-    decoder_only_guidance_conditioning: False
-    time_conditioning_mode: split
+    guidance_scale_strategy: sampled
+    max_sampled_guidance_scale: 8.0
 
 caimf:
+    # ---- shared operating point for the CP ablation (identical across variants) ----
+    # PURE-adversarial, matching the project CAIMF definition + the SiT runs so this
+    # ablation is apples-to-apples with the rest of the CAIMF work.
     lambda_imf: 0.0
     lambda_adv: 1.0
     lambda_ot: 0.0
     lambda_cp: 0.001
+    cp_mode: full            # overridden per-variant on the CLI (--config.caimf.cp_mode=...)
     interval_eps: 0.001
     gen_learning_rate: 0.00001
     dis_learning_rate: 0.00001
@@ -44,7 +38,7 @@ caimf:
     discriminator_updates: True
     freeze_discriminator_backbone: False
     load_generator_ema: False
-    max_posttrain_batches: 150000
+    max_posttrain_batches: 155000
 
 training:
     num_epochs: 1000
@@ -54,14 +48,14 @@ training:
     ema_val: 0.9999
     log_per_step: 100
     checkpoint_per_epoch: 1
-    sample_per_step: 5000
-    preview_num_steps: [1, 2, 4]
-    preview_num_images: 16
+    sample_per_step: 0
     fid_per_step: 0
     fid_schedule:
         - from_step: 5000
           every_steps: 5000
-    metric_num_steps: [4]
+    metric_num_steps:
+        - 1
+        - 4
     save_best_fid_only: True
     save_best_fid_eval_state_only: True
     best_fid_checkpoint_dir: best_fid
@@ -70,18 +64,18 @@ training:
     seed: 42
 
 fid:
-    cache_ref: /home/ens/Zdehghani/imeanflow/files/fid_stats/caltech-101-fid_stats.npz
-    device_batch_size: 1
-    sample_device_batch_size: 1
+    cache_ref: /opt/dlami/nvme/meanflow/imeanflow/files/fid_stats/cub-200-2011_processed-fid_stats.npz
+    device_batch_size: 2
+    sample_device_batch_size: 2
     sample_log_every: 25
     num_samples: 10000
 
 fd_dino:
     arch: vitb14
-    cache_ref: /home/ens/Zdehghani/imeanflow/files/fdd_stats/caltech-101-fd_dino-vitb14_stats.npz
+    cache_ref: /opt/dlami/nvme/meanflow/imeanflow/files/fdd_stats/cub-200-2011-fd_dino-vitb14_stats.npz
 
 sampling:
-    num_classes: 101
+    num_classes: 200
     num_steps: 4
     omega: 7.5
     t_min: 0.4
@@ -89,10 +83,14 @@ sampling:
 
 logging:
     use_wandb: False
-    wandb_project: caimf_sit_meft
-    wandb_name: caltech_sit_meft_caimf
-    wandb_entity: ''
-    wandb_tags: [caltech101, sit-meft, caimf, posttrain]
+    wandb_project: caimf_cp_ablation
+    wandb_name: cub_imf_caimf_cpablation
+    wandb_entity: yara-mohammadi-bahram-1-ecole-superieure-de-technologie
+    wandb_tags:
+        - caimf
+        - cp-ablation
+        - cub200
+    wandb_notes: CA-iMF CP-regularization ablation on CUB-200 from target fine-tuned iMF checkpoint.
 
 load_from: ''
 partial_load: True

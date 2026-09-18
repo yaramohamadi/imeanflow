@@ -11,6 +11,7 @@ import ml_collections
 import numpy as np
 import optax
 from flax import jax_utils, serialization, struct
+from flax.training import checkpoints
 from jax import lax, random
 
 import utils.input_pipeline as input_pipeline
@@ -693,8 +694,21 @@ def _step_value(state, field="step"):
 
 
 def _save_full_state(state, workdir, distributed, metadata):
-    replicated = state if distributed else jax_utils.replicate(state)
-    save_checkpoint(replicated, workdir)
+    if distributed:
+        save_checkpoint(state, workdir)
+    else:
+        # Single device: state has NO leading device axis. jax_utils.replicate
+        # would allocate a 2nd full copy of the fat adversarial state (G + D +
+        # both optimizers + EMA) on the GPU, on top of resident eval models ->
+        # OOM at end-of-training. device_get pulls to host RAM (no 2nd GPU
+        # copy); save directly. Mirrors train_caimf.save_state.
+        host_state = jax.device_get(state)
+        s_step = int(np.asarray(host_state.step).reshape(-1)[0])
+        log_for_0("Saving full AFM state step %d (single-device).", s_step)
+        checkpoints.save_checkpoint_multiprocess(
+            os.path.abspath(workdir), host_state, s_step, keep=3
+        )
+        log_for_0("Full AFM state step %d saved.", s_step)
     step = _step_value(state)
     checkpoint_path = os.path.join(os.path.abspath(workdir), f"checkpoint_{step}")
     _write_metadata(checkpoint_path, metadata)
@@ -996,6 +1010,22 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
                             "checkpoint_path": checkpoint_path,
                         },
                     )
+
+                # eval-path OOM fix (mirror train_caimf): on a single GPU the
+                # jax_utils.replicate copies (metric_state, and checkpoint_state
+                # on a best-FID save) of the fat adversarial state stay resident
+                # and overflow the next dis_step. Free them before resuming.
+                if not distributed:
+                    to_free = [metric_state]
+                    if "checkpoint_state" in locals():
+                        to_free.append(checkpoint_state)
+                    jax.tree_util.tree_map(
+                        lambda x: x.delete() if hasattr(x, "delete") else None,
+                        tuple(to_free),
+                    )
+                    del metric_state
+                    if "checkpoint_state" in locals():
+                        del checkpoint_state
 
             if current_step >= max_batches:
                 stop = True
