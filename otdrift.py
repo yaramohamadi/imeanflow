@@ -18,6 +18,7 @@ Two loss entry points, and they are not interchangeable:
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from afm import generated_lower_endpoint, linear_path, sample_time_pairs  # noqa: F401
 
@@ -258,10 +259,16 @@ def energy_distance(x, y):
 
 
 def interval_levels(num_levels, minimum=0.0, maximum=1.0):
-    """Fixed grid of trajectory levels at which the distributions are matched."""
+    """Fixed grid of trajectory levels at which the distributions are matched.
+
+    Deliberately numpy and not jnp: these levels are static configuration, and under
+    omnistaging a `jnp.linspace` here becomes a tracer inside any jitted step, so a caller
+    that wants to loop over the levels (to key a per-level metric, or to unroll K Sinkhorn
+    solves) cannot read them. Static things stay static.
+    """
     if num_levels < 1:
         raise ValueError("num_levels must be at least 1.")
-    return jnp.linspace(minimum, maximum, num_levels + 2)[1:-1]
+    return np.linspace(minimum, maximum, num_levels + 2)[1:-1].astype(np.float32)
 
 
 def target_interpolant(y, noise, time):

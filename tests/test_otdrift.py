@@ -239,6 +239,26 @@ def test_interval_levels_are_interior_and_ordered():
     assert (np.diff(levels) > 0).all()
 
 
+def test_interval_levels_are_readable_inside_jit():
+    """Regression: the levels must be static, not a device array.
+
+    Under omnistaging a `jnp.linspace` inside a jitted function is a tracer even though its
+    arguments are constants, so any caller that loops over the levels -- to key a per-level
+    metric, or to unroll K Sinkhorn solves -- dies at trace time with
+    TracerArrayConversionError. The 2-D toy hit exactly this.
+    """
+
+    @jax.jit
+    def keyed(x):
+        return {
+            f"level_{float(level):.2f}": jnp.mean(x) * float(level)
+            for level in interval_levels(3)
+        }
+
+    result = keyed(jnp.ones((4,)))
+    assert sorted(result) == ["level_0.25", "level_0.50", "level_0.75"], sorted(result)
+
+
 def test_target_interpolant_hits_both_endpoints():
     y = jax.random.normal(jax.random.PRNGKey(17), (4, 3))
     noise = jax.random.normal(jax.random.PRNGKey(18), (4, 3))

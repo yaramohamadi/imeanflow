@@ -167,7 +167,7 @@ def ot_loss(params, rng, sampler, batch_size, args, use_trajectory):
         return loss, metrics
 
     # python floats, not traced array entries: the level indexes a metrics key below
-    levels = [float(v) for v in np.asarray(interval_levels(args.num_levels))]
+    levels = [float(v) for v in interval_levels(args.num_levels)]
     traj_total = 0.0
     for level in levels:
         rng_rest, key_t, key_y, key_y2, key_z, key_z2 = jax.random.split(rng_rest, 6)
