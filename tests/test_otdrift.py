@@ -13,6 +13,7 @@ from otdrift import (
     entropic_ot_cost,
     frozen_plan_loss,
     interval_levels,
+    matched_cost,
     relative_epsilon,
     sinkhorn_divergence,
     squared_cost_matrix,
@@ -88,16 +89,18 @@ def test_frozen_plan_gradient_matches_autodiff_through_sinkhorn():
     rng = jax.random.PRNGKey(7)
     x = jax.random.normal(rng, (24, 6))
     y = jax.random.normal(jax.random.PRNGKey(8), (24, 6)) + 0.6
-    iters = 600
-    eps_rel = 0.1
+    iters = 800
+    # a fixed blur for both paths: the adaptive `epsilon_relative` makes epsilon itself a
+    # function of z, which the autodiff path would differentiate through and the frozen one
+    # would not, and that difference is not the identity under test
+    epsilon = relative_epsilon(squared_cost_matrix(x, y), 0.1)
 
     def through(z):
-        cost = squared_cost_matrix(z, y)
-        return sinkhorn_divergence(z, y, relative_epsilon(cost, eps_rel), iters)
+        return sinkhorn_divergence(z, y, epsilon, iters)
 
     def frozen(z):
         loss, _ = frozen_plan_loss(
-            z, y, epsilon_relative=eps_rel, num_iters=iters, repulsion_clip=1e9
+            z, y, epsilon=epsilon, num_iters=iters, repulsion_clip=1e9
         )
         return loss
 
@@ -186,6 +189,42 @@ def test_frozen_plan_aux_reports_usable_diagnostics():
     assert 0.0 < float(aux["ot_plan_entropy_ratio"]) <= 1.0
 
 
+def test_entropic_cost_converges_to_the_exact_assignment():
+    """Cross-check against an exact solver, not against a second Sinkhorn.
+
+    For equal-size uniform marginals the unregularised OT cost *is* the optimal assignment
+    cost / n, so `matched_cost` must converge to scipy's exact answer as the blur shrinks
+    and must never fall below it. `ott-jax` would be the conventional cross-check but is
+    not in this env, and adding it to the training venv is not worth the risk; an exact
+    solver is the better reference anyway.
+
+    The residual at the tightest blur here is entropic bias, not float error -- rerunning
+    this under `jax_enable_x64` moves it by <1%, so what the tolerances below encode is
+    "error falls off with epsilon", not "Sinkhorn is exact".
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    rng = np.random.default_rng(0)
+    blurs = (0.1, 0.02, 0.004)
+    for trial in range(3):
+        x = jnp.asarray(rng.normal(size=(24, 4)), jnp.float32)
+        y = jnp.asarray(rng.normal(size=(24, 4)) + 0.6, jnp.float32)
+        cost = squared_cost_matrix(x, y)
+        rows, cols = linear_sum_assignment(np.asarray(cost, np.float64))
+        exact = float(np.asarray(cost, np.float64)[rows, cols].mean())
+
+        errors = []
+        for eps_rel in blurs:
+            approx = float(matched_cost(x, y, relative_epsilon(cost, eps_rel), 4000))
+            # entropic smoothing can only spread mass off the optimal assignment
+            assert approx >= exact - 1e-4, (trial, eps_rel, approx, exact)
+            errors.append(abs(approx - exact) / exact)
+        # each 5x reduction in blur must buy at least 3x in accuracy
+        for tighter, looser in zip(errors[1:], errors[:-1]):
+            assert tighter * 3.0 < looser, (trial, errors)
+        assert errors[-1] < 5e-3, (trial, errors)
+
+
 def test_energy_distance_vanishes_and_is_positive():
     x = jax.random.normal(jax.random.PRNGKey(15), (32, 6))
     assert abs(float(energy_distance(x, x))) < 1e-4
@@ -209,6 +248,25 @@ def test_target_interpolant_hits_both_endpoints():
     np.testing.assert_allclose(np.asarray(at_one), np.asarray(y), rtol=1e-6)
 
 
+def test_entropic_value_is_bracketed_by_zero_and_the_mean_cost():
+    """0 <= <P,C> + eps KL(P|ab) <= <C, a x b>, because P = a x b is feasible with KL 0.
+
+    Cheap, and it is the assertion that catches a mis-scaled plan or a sign slip in the
+    potentials -- both of which leave the plan's rows uniform and so slip past a marginals
+    check that only compares rows to each other.
+    """
+    x = jax.random.normal(jax.random.PRNGKey(21), (20, 5))
+    for shift in (0.0, 0.5, 2.0):
+        y = jax.random.normal(jax.random.PRNGKey(22), (20, 5)) + shift
+        cost = squared_cost_matrix(x, y)
+        for eps_rel in (0.5, 0.1, 0.02):
+            epsilon = relative_epsilon(cost, eps_rel)
+            value = float(entropic_ot_cost(x, y, epsilon, 600))
+            assert -1e-5 <= value <= float(jnp.mean(cost)) + 1e-5, (
+                shift, eps_rel, value, float(jnp.mean(cost))
+            )
+
+
 def test_entropic_cost_decreases_as_the_blur_shrinks():
     x = jax.random.normal(jax.random.PRNGKey(19), (24, 5))
     y = jax.random.normal(jax.random.PRNGKey(20), (24, 5)) + 0.5
@@ -219,11 +277,27 @@ def test_entropic_cost_decreases_as_the_blur_shrinks():
 
 
 if __name__ == "__main__":
+    import traceback
+
+    # Run every check even after one fails and report at the end. The alphabetical
+    # early-exit version of this loop hid a wrong transport plan behind an unrelated
+    # gradient failure, because `test_plan_marginals_are_uniform` sorts late.
     checks = [
         value
         for name, value in sorted(globals().items())
         if name.startswith("test_") and callable(value)
     ]
+    failures = []
     for check in checks:
-        check()
-        print(f"PASS {check.__name__}")
+        try:
+            check()
+        except Exception:
+            failures.append(check.__name__)
+            print(f"FAIL {check.__name__}")
+            traceback.print_exc()
+        else:
+            print(f"PASS {check.__name__}")
+    print(f"\n{len(checks) - len(failures)}/{len(checks)} passed")
+    if failures:
+        print("failed: " + ", ".join(failures))
+        sys.exit(1)

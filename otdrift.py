@@ -48,22 +48,41 @@ def squared_cost_matrix(x, y):
     return jnp.maximum(squared, 0.0) / dimension
 
 
+def _uniform_log_weights(size, dtype):
+    return jnp.full((size,), -jnp.log(size), dtype=dtype)
+
+
 def sinkhorn_potentials(cost, epsilon, num_iters, log_a=None, log_b=None):
-    """Log-domain Sinkhorn. Returns dual potentials (f, g) for uniform marginals."""
+    """Log-domain Sinkhorn (soft-min form). Returns the dual potentials (f, g).
+
+    Each update is a soft-min over the *opposite* marginal:
+
+        f_i <- -eps * logsumexp_j[ log b_j + (g_j - C_ij) / eps ]
+
+    The weight inside the reduction has to be the marginal being summed over, which is
+    what makes exp(f_i / eps) the exact reciprocal of the row scaling and hence makes the
+    plan below satisfy sum_j P_ij = a_i. Putting `log a` there instead still converges to
+    a fixed point, but one whose plan is off by a factor of n*m -- silently, since the
+    rows stay uniform among themselves.
+    """
     if epsilon <= 0.0:
         raise ValueError("epsilon must be positive.")
     if num_iters < 1:
         raise ValueError("num_iters must be at least 1.")
     n, m = cost.shape
     if log_a is None:
-        log_a = jnp.full((n,), -jnp.log(n), dtype=cost.dtype)
+        log_a = _uniform_log_weights(n, cost.dtype)
     if log_b is None:
-        log_b = jnp.full((m,), -jnp.log(m), dtype=cost.dtype)
+        log_b = _uniform_log_weights(m, cost.dtype)
 
     def body(carry, _):
         f, g = carry
-        f = epsilon * (log_a - jax.nn.logsumexp((g[None, :] - cost) / epsilon, axis=1))
-        g = epsilon * (log_b - jax.nn.logsumexp((f[:, None] - cost) / epsilon, axis=0))
+        f = -epsilon * jax.nn.logsumexp(
+            log_b[None, :] + (g[None, :] - cost) / epsilon, axis=1
+        )
+        g = -epsilon * jax.nn.logsumexp(
+            log_a[:, None] + (f[:, None] - cost) / epsilon, axis=0
+        )
         return (f, g), None
 
     init = (jnp.zeros((n,), cost.dtype), jnp.zeros((m,), cost.dtype))
@@ -75,9 +94,9 @@ def transport_plan(cost, epsilon, num_iters, log_a=None, log_b=None):
     """Entropic transport plan; rows sum to 1/n."""
     n, m = cost.shape
     if log_a is None:
-        log_a = jnp.full((n,), -jnp.log(n), dtype=cost.dtype)
+        log_a = _uniform_log_weights(n, cost.dtype)
     if log_b is None:
-        log_b = jnp.full((m,), -jnp.log(m), dtype=cost.dtype)
+        log_b = _uniform_log_weights(m, cost.dtype)
     f, g = sinkhorn_potentials(cost, epsilon, num_iters, log_a, log_b)
     log_plan = (
         log_a[:, None] + log_b[None, :] + (f[:, None] + g[None, :] - cost) / epsilon
@@ -85,15 +104,31 @@ def transport_plan(cost, epsilon, num_iters, log_a=None, log_b=None):
     return jnp.exp(log_plan)
 
 
-def entropic_ot_cost(x, y, epsilon, num_iters):
-    """<P, C> for the entropic plan between two particle sets."""
+def matched_cost(x, y, epsilon, num_iters):
+    """<P*, C>: the mass-weighted transported cost. A diagnostic, not the objective."""
     cost = squared_cost_matrix(x, y)
     plan = transport_plan(cost, epsilon, num_iters)
     return jnp.sum(plan * cost)
 
 
+def entropic_ot_cost(x, y, epsilon, num_iters):
+    """Regularised entropic OT value <P*, C> + eps * KL(P* | a (x) b), read off the duals.
+
+    The duals and not the raw transported cost, because it is *this* value whose
+    derivative with respect to the cost matrix is exactly P*. That is the whole basis of
+    `frozen_plan_loss`: with the regularised value the frozen plan carries the true
+    gradient, whereas differentiating <P*, C> leaves a <dP/dx, C> term behind and the two
+    disagree (~0.96 cosine on a 24-particle toy, which is close enough to look right and
+    wrong enough to matter).
+    """
+    cost = squared_cost_matrix(x, y)
+    f, g = sinkhorn_potentials(cost, epsilon, num_iters)
+    # uniform marginals, so <f, a> + <g, b> is just the two means
+    return jnp.mean(f) + jnp.mean(g)
+
+
 def sinkhorn_divergence(x, y, epsilon, num_iters, debias=True):
-    """Debiased Sinkhorn divergence S(x, y) - 0.5 S(x, x) - 0.5 S(y, y).
+    """Debiased Sinkhorn divergence OT_eps(x, y) - 0.5 OT_eps(x, x) - 0.5 OT_eps(y, y).
 
     Differentiable through the iterations. The self terms are what stop the loss from
     collapsing the particle set onto the target barycentre; `debias=False` exists only to
@@ -130,6 +165,7 @@ def frozen_plan_loss(
     y,
     *,
     epsilon_relative=0.05,
+    epsilon=None,
     num_iters=100,
     debias=True,
     repulsion_clip=10.0,
@@ -141,9 +177,16 @@ def frozen_plan_loss(
     the objective is doing anything: plan entropy (is the blur so large that the plan is
     uniform and the gradient is just "move to the mean"?) and particle spread (is the
     debiasing term actually holding diversity up?).
+
+    `epsilon` pins an absolute blur; otherwise it is `epsilon_relative` times the mean
+    cross cost, which keeps one setting usable across latent and feature spaces. Either
+    way the *same* epsilon is used for the cross and self terms -- the debiasing only
+    cancels under a common blur, and giving the self term its own relative epsilon quietly
+    breaks the divergence.
     """
     cost_xy = squared_cost_matrix(jax.lax.stop_gradient(x_hat), y)
-    epsilon = relative_epsilon(cost_xy, epsilon_relative)
+    if epsilon is None:
+        epsilon = relative_epsilon(cost_xy, epsilon_relative)
     plan_xy = jax.lax.stop_gradient(transport_plan(cost_xy, epsilon, num_iters))
     weights_xy, targets_xy = barycentric_targets(plan_xy, jax.lax.stop_gradient(y))
     weights_xy = jax.lax.stop_gradient(weights_xy)
@@ -162,9 +205,7 @@ def frozen_plan_loss(
     if debias:
         x_detached = jax.lax.stop_gradient(x_hat)
         cost_xx = squared_cost_matrix(x_detached, x_detached)
-        plan_xx = jax.lax.stop_gradient(
-            transport_plan(cost_xx, relative_epsilon(cost_xx, epsilon_relative), num_iters)
-        )
+        plan_xx = jax.lax.stop_gradient(transport_plan(cost_xx, epsilon, num_iters))
         weights_xx, targets_xx = barycentric_targets(plan_xx, x_detached)
         weights_xx = jax.lax.stop_gradient(weights_xx)
         targets_xx = jax.lax.stop_gradient(targets_xx)
