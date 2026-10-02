@@ -378,6 +378,167 @@ def fig_camf():
     return best
 
 
+# =========================================================================================
+# Figures 8 & 9 -- EXP-126, one OT step from a source state at a fixed noise level
+# =========================================================================================
+# `mf_head_t0` is deliberately absent: it is the identity map for every theta, so its bar is
+# 8x the others and squashes the comparison that matters. It is a confirmed null -- a number,
+# not a comparison -- so it is reported as a caption instead of a bar.
+SRC_T_ARMS = [
+    ("src_t1", "t=1\nsource init"),
+    ("src_t0.5", "t=0.5\nsource init"),
+    ("src_t0", "t=0\nsource init"),
+    ("scratch_t1", "t=1\nscratch"),
+    ("scratch_t0", "t=0\nscratch"),
+    ("mf_head_t1", "t=1\nMF head"),
+]
+
+
+def source_t_table(src):
+    """Final-step rows keyed by (arm, seed), plus the seed list."""
+    final = {}
+    for r in src:
+        if int(r["step"]) == 4000:
+            final[(r["arm"], int(r["seed"]))] = r
+    seeds = sorted({int(r["seed"]) for r in src})
+    return final, seeds
+
+
+def fig_source_t_arms(src):
+    final, seeds = source_t_table(src)
+
+    def col(arm, key):
+        return np.array([float(final[(arm, s)][key]) for s in seeds])
+
+    labels = [label for _, label in SRC_T_ARMS]
+    x = np.arange(len(SRC_T_ARMS), dtype=float)
+    width = 0.36
+    measures = [("w2_forward", "train-matched input\n(forward-noised)"),
+                ("w2_onpolicy_src4", "test-time input\n(frozen source model, 4 steps)")]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.6, 4.8),
+                             gridspec_kw={"width_ratios": [1.55, 1]})
+
+    ax = axes[0]
+    for i, (key, label) in enumerate(measures):
+        mean = [col(a, key).mean() for a, _ in SRC_T_ARMS]
+        err = [col(a, key).std(ddof=0) for a, _ in SRC_T_ARMS]
+        offset = (i - 0.5) * (width + 0.02)
+        ax.bar(x + offset, mean, width, color=CAT[i], label=label, zorder=2)
+        ax.errorbar(x + offset, mean, yerr=err, fmt="none", ecolor=INK2, elinewidth=1.0,
+                    capsize=3, zorder=3)
+        for xi, value, e in zip(x + offset, mean, err):
+            ax.text(xi, value + e + 0.02, f"{value:.2f}", ha="center", va="bottom",
+                    fontsize=7.5, color=INK2)
+    style(ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8, color=INK2)
+    ax.set_ylim(0, max(col(a, "w2_onpolicy_src4").mean() + col(a, "w2_onpolicy_src4").std()
+                       for a, _ in SRC_T_ARMS) * 1.42)
+    ax.set_ylabel("W2 to target, one OT step  (lower is better)")
+    ax.set_title("Lower t does not pay. The gap between the two bars is the cost of\n"
+                 "training without the source model in the loop, and it grows as t falls.",
+                 fontsize=9.5, loc="left")
+    ax.legend(loc="upper left", labelcolor=INK2, frameon=False)
+    # the degenerate arm is a number, not a comparison -- see the SRC_T_ARMS comment
+    ax.text(0.995, 0.70, "not plotted: the MeanFlow head at t=0 is the identity map for\n"
+            "every theta. Measured W2 %.2f train-matched / %.2f on-policy,\n"
+            "unmoved from its %.2f init. Predicted null, confirmed."
+            % (col("mf_head_t0", "w2_forward").mean(),
+               col("mf_head_t0", "w2_onpolicy_src4").mean(),
+               float(np.mean([float(r["w2_forward"]) for r in src
+                              if r["arm"] == "mf_head_t0" and int(r["step"]) == 0]))),
+            transform=ax.transAxes, fontsize=7.5, color=INK2, ha="right", va="top")
+
+    ax = axes[1]
+    mean = [col(a, "mode_mi").mean() for a, _ in SRC_T_ARMS]
+    err = [col(a, "mode_mi").std(ddof=0) for a, _ in SRC_T_ARMS]
+    ax.bar(x, mean, 0.6, color=CAT[2], zorder=2)
+    ax.errorbar(x, mean, yerr=err, fmt="none", ecolor=INK2, elinewidth=1.0, capsize=3,
+                zorder=3)
+    ceiling = np.log2(6)
+    ax.axhline(ceiling, color=MUTED, linewidth=1.0, linestyle=(0, (4, 3)), zorder=1)
+    ax.text(-0.4, ceiling + 0.05, f"perfect: log2(6) = {ceiling:.2f} bits",
+            fontsize=8, color=INK2, ha="left", va="bottom")
+    for xi, value, e in zip(x, mean, err):
+        # a label that would land on the reference line is lifted clear of it instead
+        top = value + e + 0.04
+        ax.text(xi, ceiling + 0.22 if abs(top - ceiling) < 0.14 else top, f"{value:.2f}",
+                ha="center", va="bottom", fontsize=7.5, color=INK2)
+    style(ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8, color=INK2)
+    ax.set_ylim(0, ceiling * 1.26)
+    ax.set_ylabel("mode MI (bits):  input mode -> output mode")
+    ax.set_title("Does it ignore the source input?  No.\n"
+                 "At t=0 the map is almost a bijection on modes; at t=1 it is at chance.",
+                 fontsize=9.5, loc="left")
+
+    fig.suptitle("EXP-126: one OT step from a source state at a fixed noise level.  "
+                 "5 seeds, error bars = std.",
+                 fontsize=10, x=0.008, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig8_source_t_arms.png"))
+    plt.close(fig)
+    return final, seeds
+
+
+def fig_source_t_clouds(clouds):
+    arms = [("src_t1", "t = 1  (pure noise in)"),
+            ("src_t0.5", "t = 0.5  (half-noised source in)"),
+            ("src_t0", "t = 0  (clean source image in)")]
+    panels = [("in_forward", "input: forward-noised\n(what training sees)", "real_source"),
+              ("in_onpolicy", "input: frozen source model\n(what test sees)", "real_source"),
+              ("out_forward", "output from the training input", "real_target"),
+              ("out_onpolicy", "output from the test input", "real_target")]
+
+    fig, axes = plt.subplots(3, 4, figsize=(11.2, 8.6), sharex=True, sharey=True)
+    for row, (arm, caption) in enumerate(arms):
+        for col, (suffix, title, reference) in enumerate(panels):
+            ax = axes[row, col]
+            ref = clouds[reference]
+            ax.scatter(ref[:, 0], ref[:, 1], s=4, c=AXIS, linewidths=0, zorder=1)
+            pts = clouds[f"{arm}_{suffix}"]
+            ax.scatter(pts[:, 0], pts[:, 1], s=4, c=CAT[0], alpha=0.55, linewidths=0,
+                       zorder=2)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal")
+            for side in ax.spines.values():
+                side.set_color(AXIS)
+            if row == 0:
+                ax.set_title(title, fontsize=8.5, color=INK)
+            if col == 0:
+                ax.set_ylabel(caption, fontsize=9, color=INK)
+    fig.suptitle("Why lower t costs more: the source model's partial generation (col 2) is "
+                 "not the forward-noised state\ntraining saw (col 1), and the mismatch grows "
+                 "as t falls.  Gray = source ring (cols 1-2) or target ring (cols 3-4).",
+                 fontsize=10, x=0.008, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig9_source_t_clouds.png"))
+    plt.close(fig)
+
+
+def report_paired(final, seeds):
+    """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
+    def col(arm, key):
+        return np.array([float(final[(arm, s)][key]) for s in seeds])
+
+    print("\npaired differences in W2 at the test-time condition (on-policy, 4 source steps):")
+    for a, b in [("src_t0.5", "src_t1"), ("src_t0", "src_t1"), ("scratch_t1", "src_t1"),
+                 ("scratch_t0", "src_t0"), ("mf_head_t1", "src_t1")]:
+        d = col(a, "w2_onpolicy_src4") - col(b, "w2_onpolicy_src4")
+        t = d.mean() / (d.std(ddof=1) / np.sqrt(d.size))
+        print(f"  {a:11s} - {b:9s} {d.mean():+.4f}  t({d.size - 1})={t:+.2f}  "
+              f"{a} wins {int((d < 0).sum())}/{d.size}")
+    print("\ntrain-matched -> on-policy penalty, paired within arm:")
+    for arm in ["src_t1", "src_t0.5", "src_t0", "scratch_t0"]:
+        d = col(arm, "w2_onpolicy_src4") - col(arm, "w2_forward")
+        t = d.mean() / (d.std(ddof=1) / np.sqrt(d.size))
+        print(f"  {arm:11s} +{d.mean():.4f} ({100 * d.mean() / col(arm, 'w2_forward').mean():+.0f}%)"
+              f"  t({d.size - 1})={t:+.2f}  input_shift={col(arm, 'input_shift').mean():.3f}")
+
+
 def main():
     global DATA, FIGS
     parser = argparse.ArgumentParser(description=__doc__)
@@ -398,6 +559,11 @@ def main():
     fig_snr(snr)
     fig_cost(snr)
     best = fig_camf()
+
+    src = rows("toy_source_t.csv")
+    final, seeds = fig_source_t_arms(src)
+    fig_source_t_clouds(np.load(os.path.join(DATA, "toy_source_t_clouds.npz")))
+    report_paired(final, seeds)
 
     print("CAMF cub200 best:", best)
     for key in sorted(finals):
