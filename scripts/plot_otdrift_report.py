@@ -932,6 +932,78 @@ def fig_t_sweep(folder):
     plt.close(fig)
 
 
+# =========================================================================================
+# Figure 2b -- EXP-130: fig 2's baselines with FD, plus one-step OT from scratch
+# =========================================================================================
+FIG2B_ARMS = [("pretrained", "pretrained (zero-shot)"),
+              ("regress_scratch", "regression, scratch"),
+              ("regress_ft", "regression, fine-tune"),
+              ("scratch_t1", "OT one-step, scratch\n(t=1, eps_rel 0.005)")]
+
+
+def fig_generations_fd(folder):
+    """Rows are NFE 1 and 4. The OT map is one step by construction, so it has no NFE 4 cell.
+
+    Panel FD is on the seed-0 points drawn (n=2048); the bracket is the 5-seed mean +- sd of
+    the logged final eval (n=1024). `pretrained` is scored at step 0, the rest at the last step.
+    """
+    base = np.load(os.path.join(folder, "stage0a_clouds.npz"))
+    ot = np.load(os.path.join(folder, "scratch_t1_clouds.npz"))
+    target = base["real_target"]
+    floor, floor_sd = ring_fd_floor(target)
+
+    logged = {}
+    rows_a = list(csv.DictReader(open(os.path.join(folder, "stage0a.csv"))))
+    for arm in ("pretrained", "regress_scratch", "regress_ft"):
+        mine = [r for r in rows_a if r["arm"] == arm and r.get("fd_nfe1")]
+        last = 0 if arm == "pretrained" else max(int(r["step"]) for r in mine)
+        for nfe in (1, 4):
+            logged[(arm, nfe)] = np.array([float(r[f"fd_nfe{nfe}"]) for r in mine
+                                           if int(r["step"]) == last])
+    rows_b = list(csv.DictReader(open(os.path.join(folder, "scratch_t1.csv"))))
+    last = max(int(r["step"]) for r in rows_b)
+    logged[("scratch_t1", 1)] = np.array([float(r["fd_forward"]) for r in rows_b
+                                          if int(r["step"]) == last])
+
+    fig, axes = plt.subplots(2, len(FIG2B_ARMS), figsize=(11.0, 5.9), sharex=True,
+                             sharey=True)
+    for col, (arm, label) in enumerate(FIG2B_ARMS):
+        for row, nfe in enumerate((1, 4)):
+            ax = axes[row, col]
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal")
+            for side in ax.spines.values():
+                side.set_color(AXIS)
+            if row == 0:
+                ax.set_title(label, fontsize=9, color=INK)
+            if col == 0:
+                ax.set_ylabel(f"NFE {nfe}", fontsize=10, color=INK)
+            ax.scatter(target[:, 0], target[:, 1], s=5, c=AXIS, linewidths=0, zorder=1)
+            if arm == "scratch_t1":
+                if nfe != 1:
+                    ax.text(0.5, 0.5, "one-step map:\nno NFE 4", transform=ax.transAxes,
+                            fontsize=9, color=MUTED, ha="center", va="center")
+                    continue
+                pts = ot["scratch_t1_out_forward"]
+            else:
+                pts = base[f"{arm}_nfe{nfe}"]
+            ax.scatter(pts[:, 0], pts[:, 1], s=4, c=CAT[0], alpha=0.6, linewidths=0,
+                       zorder=2)
+            vals = logged[(arm, nfe)]
+            ax.text(0.03, 0.03, "FD %.4f\n(5 seeds %.4f ± %.4f)"
+                    % (frechet_fd(pts, target), vals.mean(), vals.std()),
+                    transform=ax.transAxes, fontsize=7.5, color=INK, ha="left", va="bottom")
+    fig.suptitle("Generated sets against the target ring (gray), seed 0 drawn.  "
+                 "FD = FID-style W2² vs the target.\nA perfect generator scores "
+                 "%.4f ± %.4f at n=%d (panel) and 0.0219 ± 0.0150 at n=1024 (bracket)."
+                 % (floor, floor_sd, target.shape[0]),
+                 fontsize=10, x=0.012, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.9), h_pad=2.0)
+    fig.savefig(os.path.join(FIGS, "fig2b_toy_generations_fd.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -958,10 +1030,14 @@ def main():
     parser.add_argument("--data", default=DATA, help="folder holding the result CSVs and the npz")
     parser.add_argument("--out", default=FIGS, help="folder to write the PNGs into")
     parser.add_argument("--t-sweep", default="", help="EXP-128 folder; only fig 14 is drawn")
+    parser.add_argument("--fig2b", default="", help="EXP-130 folder; only fig 2b is drawn")
     parsed = parser.parse_args()
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
+    if parsed.fig2b:
+        fig_generations_fd(parsed.fig2b)
+        return
     if parsed.t_sweep:
         fig_t_sweep(parsed.t_sweep)
         return
