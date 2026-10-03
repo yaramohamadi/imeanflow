@@ -926,18 +926,32 @@ def floor_text(target, mmd):
             % (floor, sd, target.shape[0]))
 
 
-def fig_t_sweep(folder):
+def fig_t_sweep(folder, tcond=None):
     """Separate fixed-t models. Each row is one model; inputs on the left, outputs on the right.
 
     Panel FD is on the seed-0 points drawn (n=2048). The bracket is the 5-seed mean +- sd of
     the logged eval (fresh draws, n=1024), so a seed-0 outlier cannot pass as the result.
     """
-    clouds, table = {}, {}
-    for t in T_SWEEP:
-        clouds[t] = np.load(os.path.join(folder, f"t_{t}_clouds.npz"))
-        rows_t = list(csv.DictReader(open(os.path.join(folder, f"t_{t}.csv"))))
-        last = max(int(r["step"]) for r in rows_t)
-        table[t] = [r for r in rows_t if int(r["step"]) == last]
+    if tcond:
+        # EXP-135: one model, all t. Per-seed CSVs, one dump holding every level.
+        bundle = np.load(os.path.join(folder, f"tcond_{tcond}_clouds.npz"))
+        rows_all = []
+        for name in sorted(os.listdir(folder)):
+            if name.startswith(f"tcond_{tcond}_s") and name.endswith(".csv"):
+                rows_all += list(csv.DictReader(open(os.path.join(folder, name))))
+        last = max(int(r["step"]) for r in rows_all)
+        clouds = {t: bundle for t in T_SWEEP}
+        table = {t: [r for r in rows_all if int(r["step"]) == last
+                     and abs(float(r["t_level"]) - float(t)) < 1e-9] for t in T_SWEEP}
+        key = lambda t, suffix: f"tcond_t{float(t):g}_{suffix}"
+    else:
+        clouds, table = {}, {}
+        for t in T_SWEEP:
+            clouds[t] = np.load(os.path.join(folder, f"t_{t}_clouds.npz"))
+            rows_t = list(csv.DictReader(open(os.path.join(folder, f"t_{t}.csv"))))
+            last = max(int(r["step"]) for r in rows_t)
+            table[t] = [r for r in rows_t if int(r["step"]) == last]
+        key = lambda t, suffix: f"src_t{t}_{suffix}"
     target = clouds["1"]["real_target"]
     # EXP-129 logs the on-policy input at a fixed source step size; EXP-128 at 1 step.
     # EXP-131 re-scores EXP-129 with MMD at n=10k.
@@ -968,7 +982,7 @@ def fig_t_sweep(folder):
             ax = axes[row, col]
             ref = cl[reference]
             ax.scatter(ref[:SHOW, 0], ref[:SHOW, 1], s=3, c=AXIS, linewidths=0, zorder=1)
-            pts = cl[f"src_t{t}_{suffix}"]
+            pts = cl[key(t, suffix)]
             ax.scatter(pts[:SHOW, 0], pts[:SHOW, 1], s=3, c=CAT[0], alpha=0.55,
                        linewidths=0, zorder=2)
             if metric:
@@ -989,13 +1003,16 @@ def fig_t_sweep(folder):
                     nfe = int(float(table[t][0]["src_grid_nfe"]))
                     label += f"\n{nfe} MeanFlow + 1 OT step"
                 ax.set_ylabel(label, fontsize=9.5, color=INK)
-    fig.suptitle("One separately trained OT model per row, trained on the %s input, "
-                 "eps_rel 0.005, seed 0 drawn.  "
+    fig.suptitle(("ONE t-conditioned OT model for every row" if tcond
+                  else "One separately trained OT model per row")
+                 + ", trained on the %s input, eps_rel 0.005, seed 0 drawn.  "
                  % ("ON-POLICY" if onpolicy_train else "forward-noised") +
                  "Gray = source (cols 1-2) or target (cols 3-4).\n" + floor_text(target, mmd),
                  fontsize=10, x=0.008, ha="left", color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.945))
     name = "fig15_t_sweep_separate_grid4" if grid else "fig14_t_sweep_separate"
+    if tcond:
+        name = "fig17_t_sweep_single_tcond"
     if onpolicy_train:
         name += "_trained_onpolicy"
     fig.savefig(os.path.join(FIGS, name + ("_mmd.png" if mmd else ".png")))
@@ -1127,6 +1144,69 @@ def fig_train_test_inputs(folder_fwd, folder_onp):
     plt.close(fig)
 
 
+def fig_single_vs_separate(sep_fwd, sep_onp, tcond_folder):
+    """Fig 16 plus the single t-conditioned model (dashed, open markers) on the same axes.
+
+    Colour = train input, as in fig 16; line style = separate fixed-t models vs one model.
+    """
+    def separate(folder, t, metric):
+        table = list(csv.DictReader(open(os.path.join(folder, f"t_{t}.csv"))))
+        last = max(int(r["step"]) for r in table)
+        return [1e3 * float(r[metric]) for r in table if int(r["step"]) == last]
+
+    def single(variant, t, metric):
+        rows_all = []
+        for name in sorted(os.listdir(tcond_folder)):
+            if name.startswith(f"tcond_{variant}_s") and name.endswith(".csv"):
+                rows_all += list(csv.DictReader(open(os.path.join(tcond_folder, name))))
+        last = max(int(r["step"]) for r in rows_all)
+        return [1e3 * float(r[metric]) for r in rows_all if int(r["step"]) == last
+                and abs(float(r["t_level"]) - float(t)) < 1e-9]
+
+    series = [("separate, trained on forward-noised", CAT[0], "-", "o", True,
+               lambda t, m: separate(sep_fwd, t, m)),
+              ("separate, trained on on-policy", CAT[1], "-", "s", True,
+               lambda t, m: separate(sep_onp, t, m)),
+              ("single model, trained on forward-noised", CAT[0], "--", "o", False,
+               lambda t, m: single("forward", t, m)),
+              ("single model, trained on on-policy", CAT[1], "--", "s", False,
+               lambda t, m: single("onpolicy", t, m))]
+    tested = [("mmd_forward", "tested on forward-noised input (off-policy)"),
+              ("mmd_onpolicy_grid", "tested on on-policy input (MeanFlow at step 0.25)")]
+    x = np.arange(len(T_SWEEP), dtype=float)
+    ticks = {"mmd_forward": [f"t = {t}" for t in T_SWEEP],
+             "mmd_onpolicy_grid": [f"t = {t}\n{int(round((1 - float(t)) / 0.25)) + 1} NFE"
+                                   for t in T_SWEEP]}
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.6), sharey=True)
+    for ax, (metric, title) in zip(axes, tested):
+        ax.axhspan(-0.05, 0.05, color=GRID, zorder=0, linewidth=0)
+        for i, (label, color, ls, marker, filled, get) in enumerate(series):
+            vals = np.array([get(t, metric) for t in T_SWEEP])
+            mean, sd = vals.mean(1), vals.std(1)
+            dx = (i - 1.5) * 0.06   # small dodge so the error bars do not sit on each other
+            ax.errorbar(x + dx, mean, yerr=sd, fmt="none", ecolor=color, elinewidth=1.0,
+                        capsize=2.5, alpha=0.6, zorder=2)
+            ax.plot(x + dx, mean, color=color, linewidth=2, linestyle=ls, marker=marker,
+                    markersize=8, markerfacecolor=color if filled else SURFACE,
+                    markeredgecolor=color if not filled else SURFACE,
+                    markeredgewidth=2 if filled else 1.8, label=label, zorder=3)
+        ax.set_xticks(x)
+        ax.set_xticklabels(ticks[metric], fontsize=8)
+        ax.set_title(title, fontsize=9.5, color=INK)
+        style(ax)
+    axes[0].set_ylabel("MMD² × 10³ to the target  (lower is better)")
+    axes[0].set_ylim(bottom=0)
+    axes[1].legend(loc="upper left", fontsize=7.5)
+    fig.suptitle("Five fixed-t models (solid) vs ONE t-conditioned model (dashed).  "
+                 "eps_rel 0.005, 5 seeds (mean ± sd), MMD on 10k points; "
+                 "both at 20k total training steps.",
+                 fontsize=10, x=0.012, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig18_single_vs_separate_mmd.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -1157,12 +1237,21 @@ def main():
     parser.add_argument("--fig12", default="", help="EXP-132 folder; only fig 12 is drawn")
     parser.add_argument("--fig16", nargs=2, default=None, metavar=("FWD", "ONPOLICY"),
                         help="EXP-131 and EXP-134 folders; only fig 16 is drawn")
+    parser.add_argument("--fig17-18", nargs=3, default=None,
+                        metavar=("FWD", "ONPOLICY", "TCOND"),
+                        help="EXP-131, EXP-134 and EXP-135 folders; figs 17 and 18 are drawn")
     parsed = parser.parse_args()
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
     if parsed.fig16:
         fig_train_test_inputs(*parsed.fig16)
+        return
+    if parsed.fig17_18:
+        sep_fwd, sep_onp, tcond_folder = parsed.fig17_18
+        for variant in ("forward", "onpolicy"):
+            fig_t_sweep(tcond_folder, tcond=variant)
+        fig_single_vs_separate(sep_fwd, sep_onp, tcond_folder)
         return
     if parsed.fig2b or parsed.fig12 or parsed.t_sweep:
         if parsed.fig2b:
