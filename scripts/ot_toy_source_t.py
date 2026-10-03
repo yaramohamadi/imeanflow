@@ -61,6 +61,7 @@ have to earn it; that is what the figure is for.
 import argparse
 import csv
 import os
+import pickle
 import sys
 import time
 
@@ -196,6 +197,11 @@ def frechet(x, y):
                  + np.trace(cov_x + cov_y - 2.0 * np.real(sqrtm(cov_x @ cov_y))))
 
 
+def grid_nfe(t_level, step):
+    """Source steps from t=1 down to t at a fixed step size; 0 at t=1."""
+    return int(round((1.0 - t_level) / step))
+
+
 def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, head,
              centres, args):
     key_in, key_z, key_y = jax.random.split(rng, 3)
@@ -216,6 +222,13 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
         out_on = one_step(params, state, t_level, head)
         row[f"w2_onpolicy_src{nfe}"] = toy.exact_w2(out_on, y)[0]
         row[f"fd_onpolicy_src{nfe}"] = frechet(out_on, y)
+    if args.src_step > 0:
+        # fixed source step size: t=0.25 at step 0.25 is 3 source steps, then the OT step
+        nfe = grid_nfe(t_level, args.src_step)
+        out_on = one_step(params, source_state(base_params, z, t_level, nfe), t_level, head)
+        row["src_grid_nfe"] = nfe
+        row["w2_onpolicy_grid"] = toy.exact_w2(out_on, y)[0]
+        row["fd_onpolicy_grid"] = frechet(out_on, y)
     # how far the test-time input is from the one training showed the model
     row["input_shift"] = toy.exact_w2(source_state(base_params, z, t_level, max(SRC_NFE)),
                                       x_fwd)[0]
@@ -315,6 +328,11 @@ def main():
                         help="extra source-init unit-head arms src_t<t>, e.g. 0,0.25,0.5")
     parser.add_argument("--dump-src-nfe", type=int, default=max(SRC_NFE),
                         help="source-model steps for the dumped on-policy input")
+    parser.add_argument("--src-step", type=float, default=0.0,
+                        help="if > 0, also eval (and dump) the on-policy input made with a "
+                             "fixed source step size, i.e. round((1-t)/step) steps")
+    parser.add_argument("--save-params", default="",
+                        help="optional folder; each trained arm is pickled per seed")
     parser.add_argument("--out", required=True)
     parser.add_argument("--dump", default="", help="optional .npz of seed-0 point clouds")
     args = parser.parse_args()
@@ -362,11 +380,18 @@ def main():
                 source_sampler, target_sampler, t_level, head, centres, args, key_arm,
                 rows, seed,
             )
+            if args.save_params:
+                os.makedirs(args.save_params, exist_ok=True)
+                with open(os.path.join(args.save_params, f"{arm}_seed{seed}.pkl"), "wb") as f:
+                    pickle.dump({"trained": jax.device_get(trained),
+                                 "source": jax.device_get(source_params)}, f)
             if args.dump and seed == seeds[0]:
                 rng, key_in, key_z = jax.random.split(rng, 3)
                 x_fwd, _ = forward_noised(key_in, source_sampler, 2048, t_level)
                 z = jax.random.normal(key_z, (2048, 2), jnp.float32)
-                state = source_state(source_params, z, t_level, args.dump_src_nfe)
+                nfe = (grid_nfe(t_level, args.src_step) if args.src_step > 0
+                       else args.dump_src_nfe)
+                state = source_state(source_params, z, t_level, nfe)
                 bundle[f"{arm}_in_forward"] = np.asarray(x_fwd)
                 bundle[f"{arm}_in_onpolicy"] = np.asarray(state)
                 bundle[f"{arm}_out_forward"] = np.asarray(
