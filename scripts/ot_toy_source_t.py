@@ -62,6 +62,7 @@ have to earn it; that is what the figure is for.
 
 import argparse
 import csv
+import functools
 import os
 import pickle
 import sys
@@ -103,7 +104,8 @@ def forward_noised(rng, source_sampler, count, t_level):
 
 def source_state(base_params, z, t_level, num_steps):
     """The TEST input: the frozen source model run from t=1 down to `t_level`."""
-    if t_level >= 1.0:
+    # `t_level` may be traced (the t-conditioned arm), so only branch on Python values
+    if num_steps == 0 or (isinstance(t_level, (int, float)) and t_level >= 1.0):
         return z
     grid = jnp.linspace(1.0, t_level, num_steps + 1)
     x = z
@@ -154,7 +156,7 @@ def target_centres(args):
 
 
 def ot_step_loss(params, rng, source_sampler, target_sampler, t_level, head, args,
-                 base_params=None):
+                 base_params=None, nfe=None):
     """Debiased Sinkhorn between the one-step outputs and an independent clean target batch.
 
     The comparator is clean target data, never an interpolant: this map is supposed to land on
@@ -169,7 +171,8 @@ def ot_step_loss(params, rng, source_sampler, target_sampler, t_level, head, arg
     if args.train_input == "onpolicy":
         z = jax.random.normal(key_in, (args.batch_size, 2), jnp.float32)
         x_t = jax.lax.stop_gradient(
-            source_state(base_params, z, t_level, grid_nfe(t_level, args.src_step)))
+            source_state(base_params, z, t_level,
+                         grid_nfe(t_level, args.src_step) if nfe is None else nfe))
     else:
         x_t, _ = forward_noised(key_in, source_sampler, args.batch_size, t_level)
     x_hat = one_step(params, x_t, t_level, head)
@@ -291,6 +294,60 @@ def run_arm(name, params, base_params, source_sampler, target_sampler, t_level, 
     return params
 
 
+def train_nfe(t_level, step):
+    """Source steps for an ARBITRARY t at a fixed step size: ceil, so no step exceeds `step`.
+
+    Matches `grid_nfe` on grid points; at least 1, because a t below 1 is never pure noise.
+    """
+    return max(1, int(np.ceil((1.0 - t_level) / step - 1e-6)))
+
+
+def run_tcond(name, params, base_params, source_sampler, target_sampler, head, centres,
+              args, rng, rows, seed, levels):
+    """ONE model for every t: t is an input, drawn fresh each step, shared by the batch.
+
+    One t per step, not one per particle, so every OT problem is between outputs at a single
+    t and the target: a mixed-t batch would only force the t-averaged output to match.
+    t ~ U[0, 1] on the host; the on-policy input needs a static source-step count, so the
+    step is compiled once per count (at most 1/src_step + 1 variants), with t traced.
+    Evaluated at each of `levels` exactly as the fixed-t arms are.
+    """
+    optimizer = optax.adam(args.adapt_lr)
+    state = optimizer.init(params)
+    draw_t = np.random.default_rng(10_000 + seed)
+
+    @functools.partial(jax.jit, static_argnums=(4,))
+    def step(p, opt_state, key, t, nfe):
+        def objective(q):
+            return ot_step_loss(q, key, source_sampler, target_sampler, t, head, args,
+                                base_params, nfe)
+        (value, metrics), grads = jax.value_and_grad(objective, has_aux=True)(p)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        return optax.apply_updates(p, updates), opt_state, value, metrics
+
+    started = time.time()
+    for index in range(args.tcond_steps + 1):
+        if index % args.eval_every == 0 or index == args.tcond_steps:
+            for level in levels:
+                rng, key_eval = jax.random.split(rng)
+                row = {"arm": name, "seed": seed, "step": index, "t_level": level,
+                       "head": head, "train_input": args.train_input,
+                       "seconds": time.time() - started}
+                row.update(evaluate(params, base_params, key_eval, source_sampler,
+                                    target_sampler, level, head, centres, args))
+                rows.append(row)
+                print(f"  s{seed} {name:8s} t={level:<5g} step {index:6d}  "
+                      f"MMD(fwd)={row['mmd_forward']:.2e}  "
+                      f"MMD(grid)={row.get('mmd_onpolicy_grid', float('nan')):.2e}", flush=True)
+        if index == args.tcond_steps:
+            break
+        rng, key_step = jax.random.split(rng)
+        t = float(draw_t.uniform())
+        nfe = train_nfe(t, args.src_step) if args.train_input == "onpolicy" else 0
+        params, state, _, _ = step(params, state, key_step, jnp.float32(t), nfe)
+    return params
+
+
 # the arms. (t level, head, init) -- `init` is "source" or "scratch".
 ARMS = {
     "src_t1":      (1.0, "unit", "source"),
@@ -300,6 +357,8 @@ ARMS = {
     "scratch_t0":  (0.0, "unit", "scratch"),
     "mf_head_t1":  (1.0, "meanflow", "source"),
     "mf_head_t0":  (0.0, "meanflow", "source"),
+    # one t-conditioned model for every t; trained by `run_tcond`, scored at --tcond-levels
+    "tcond":       (None, "unit", "source"),
 }
 
 
@@ -309,10 +368,13 @@ def summarise(rows, arms, seeds):
     print("\nfinal eval per arm, mean +- sd over %d seeds (multi-scale MMD^2 and FD, lower better):" %
           len(seeds))
     print(f"{'arm':12s}{'t':>5s}{'head':>10s}" + "".join(f"{k:>20s}" for k in keys))
-    for arm in arms:
+    pairs = sorted({(r["arm"], r["t_level"]) for r in rows if r["arm"] in arms},
+                   key=lambda p: (arms.index(p[0]), -p[1]))
+    for arm, level in pairs:
         chosen = []
         for seed in seeds:
-            hits = [r for r in rows if r["arm"] == arm and r["seed"] == seed]
+            hits = [r for r in rows if r["arm"] == arm and r["seed"] == seed
+                    and r["t_level"] == level]
             if hits:
                 chosen.append(max(hits, key=lambda r: r["step"]))
         if not chosen:
@@ -323,8 +385,7 @@ def summarise(rows, arms, seeds):
             values = values[np.isfinite(values)]
             cells.append("                 n/a" if values.size == 0 else
                          f"{values.mean():>12.4f}+-{values.std(ddof=0):<6.3f}")
-        t_level, head, _ = ARMS[arm]
-        print(f"{arm:12s}{t_level:>5.2f}{head:>10s}" + "".join(cells))
+        print(f"{arm:12s}{level:>5.2f}{ARMS[arm][1]:>10s}" + "".join(cells))
 
 
 def main():
@@ -353,6 +414,10 @@ def main():
     parser.add_argument("--train-input", choices=["forward", "onpolicy"], default="forward",
                         help="training input: forward-noised source data, or the frozen "
                              "source model's own generation at --src-step (needs it > 0)")
+    parser.add_argument("--tcond-steps", type=int, default=20000,
+                        help="steps for the t-conditioned arm; 20000 = 5 fixed-t arms x 4000")
+    parser.add_argument("--tcond-levels", default="0,0.25,0.5,0.75,1",
+                        help="t levels the t-conditioned arm is scored (and dumped) at")
     parser.add_argument("--save-params", default="",
                         help="optional folder; each trained arm is pickled per seed")
     parser.add_argument("--out", required=True)
@@ -399,29 +464,36 @@ def main():
             rng, key_arm = jax.random.split(rng)
             print(f"\n--- seed {seed} {arm}: t={t_level} head={head} init={init} ---",
                   flush=True)
-            trained = run_arm(
-                arm, source_params if init == "source" else scratch_params, source_params,
-                source_sampler, target_sampler, t_level, head, centres, args, key_arm,
-                rows, seed,
-            )
+            init_params = source_params if init == "source" else scratch_params
+            if arm == "tcond":
+                levels = [float(v) for v in args.tcond_levels.split(",") if v]
+                trained = run_tcond(arm, init_params, source_params, source_sampler,
+                                    target_sampler, head, centres, args, key_arm, rows, seed,
+                                    levels)
+            else:
+                levels = [t_level]
+                trained = run_arm(
+                    arm, init_params, source_params, source_sampler, target_sampler, t_level,
+                    head, centres, args, key_arm, rows, seed,
+                )
             if args.save_params:
                 os.makedirs(args.save_params, exist_ok=True)
                 with open(os.path.join(args.save_params, f"{arm}_seed{seed}.pkl"), "wb") as f:
                     pickle.dump({"trained": jax.device_get(trained),
                                  "source": jax.device_get(source_params)}, f)
-            if args.dump and seed == seeds[0]:
+            for level in levels if args.dump and seed == seeds[0] else []:
+                # fixed-t arms keep their old keys; the t-conditioned one is keyed per level
+                tag = f"{arm}_t{level:g}" if arm == "tcond" else arm
                 rng, key_in, key_z = jax.random.split(rng, 3)
-                x_fwd, _ = forward_noised(key_in, source_sampler, args.dump_count, t_level)
+                x_fwd, _ = forward_noised(key_in, source_sampler, args.dump_count, level)
                 z = jax.random.normal(key_z, (args.dump_count, 2), jnp.float32)
-                nfe = (grid_nfe(t_level, args.src_step) if args.src_step > 0
+                nfe = (grid_nfe(level, args.src_step) if args.src_step > 0
                        else args.dump_src_nfe)
-                state = source_state(source_params, z, t_level, nfe)
-                bundle[f"{arm}_in_forward"] = np.asarray(x_fwd)
-                bundle[f"{arm}_in_onpolicy"] = np.asarray(state)
-                bundle[f"{arm}_out_forward"] = np.asarray(
-                    one_step(trained, x_fwd, t_level, head))
-                bundle[f"{arm}_out_onpolicy"] = np.asarray(
-                    one_step(trained, state, t_level, head))
+                state = source_state(source_params, z, level, nfe)
+                bundle[f"{tag}_in_forward"] = np.asarray(x_fwd)
+                bundle[f"{tag}_in_onpolicy"] = np.asarray(state)
+                bundle[f"{tag}_out_forward"] = np.asarray(one_step(trained, x_fwd, level, head))
+                bundle[f"{tag}_out_onpolicy"] = np.asarray(one_step(trained, state, level, head))
 
     fields = ["arm", "seed", "step", "t_level", "head"]
     fields += sorted({k for row in rows for k in row} - set(fields))
