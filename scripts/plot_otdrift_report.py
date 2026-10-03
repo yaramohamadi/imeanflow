@@ -1072,6 +1072,61 @@ def fig_generations_fd(folder):
     plt.close(fig)
 
 
+# =========================================================================================
+# Figure 16 -- EXP-131 vs EXP-134: what the model trained on x what it is tested on
+# =========================================================================================
+def fig_train_test_inputs(folder_fwd, folder_onp):
+    """Two panels, one per TEST input; colour = TRAIN input; x = t, so NFE grows rightward.
+
+    One axis per panel and the same y-scale on both, so a line can be read across panels.
+    Points are the 5-seed mean of the logged final eval, bars +- 1 sd over seeds.
+    """
+    def final(folder, t):
+        table = list(csv.DictReader(open(os.path.join(folder, f"t_{t}.csv"))))
+        last = max(int(r["step"]) for r in table)
+        return [r for r in table if int(r["step"]) == last]
+
+    trained = [(folder_fwd, "trained on forward-noised input", CAT[0], "o"),
+               (folder_onp, "trained on on-policy input", CAT[1], "s")]
+    tested = [("mmd_forward", "tested on forward-noised input (off-policy)"),
+              ("mmd_onpolicy_grid", "tested on on-policy input (MeanFlow at step 0.25)")]
+    x = np.arange(len(T_SWEEP), dtype=float)
+    # NFE only means something for the on-policy input, which the source model generates
+    ticks = {"mmd_forward": [f"t = {t}" for t in T_SWEEP],
+             "mmd_onpolicy_grid": [f"t = {t}\n{int(round((1 - float(t)) / 0.25)) + 1} NFE"
+                                   for t in T_SWEEP]}
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.4), sharey=True)
+    for ax, (metric, title) in zip(axes, tested):
+        ax.axhspan(-0.05, 0.05, color=GRID, zorder=0, linewidth=0)
+        for folder, label, color, marker in trained:
+            vals = np.array([[1e3 * float(r[metric]) for r in final(folder, t)]
+                             for t in T_SWEEP])
+            mean, sd = vals.mean(1), vals.std(1)
+            ax.errorbar(x, mean, yerr=sd, fmt="none", ecolor=color, elinewidth=1.0,
+                        capsize=3, alpha=0.7, zorder=2)
+            ax.plot(x, mean, color=color, linewidth=2, marker=marker, markersize=8,
+                    markeredgecolor=SURFACE, markeredgewidth=2, label=label, zorder=3)
+            ax.annotate(f"{mean[-1]:.2f}", (x[-1], mean[-1]), xytext=(8, 0),
+                        textcoords="offset points", va="center", fontsize=8, color=INK2)
+        ax.set_xticks(x)
+        ax.set_xticklabels(ticks[metric], fontsize=8)
+        ax.set_xlim(-0.3, len(T_SWEEP) - 0.5)
+        ax.set_title(title, fontsize=9.5, color=INK)
+        style(ax)
+    axes[0].set_ylabel("MMD² × 10³ to the target  (lower is better)")
+    axes[0].set_ylim(bottom=0)
+    axes[0].text(0.02, 0.06 / axes[0].get_ylim()[1] + 0.01, "perfect generator ≈ 0",
+                 transform=axes[0].transAxes, fontsize=7.5, color=MUTED, va="bottom")
+    axes[1].legend(loc="upper left", fontsize=8)
+    fig.suptitle("A model is best on the input it was trained on.  One separately trained "
+                 "OT model per t, eps_rel 0.005, 5 seeds (mean ± sd), MMD on 10k points.",
+                 fontsize=10, x=0.012, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig16_train_vs_test_input_mmd.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -1100,10 +1155,15 @@ def main():
     parser.add_argument("--t-sweep", default="", help="EXP-128 folder; only fig 14 is drawn")
     parser.add_argument("--fig2b", default="", help="EXP-130 folder; only fig 2b is drawn")
     parser.add_argument("--fig12", default="", help="EXP-132 folder; only fig 12 is drawn")
+    parser.add_argument("--fig16", nargs=2, default=None, metavar=("FWD", "ONPOLICY"),
+                        help="EXP-131 and EXP-134 folders; only fig 16 is drawn")
     parsed = parser.parse_args()
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
+    if parsed.fig16:
+        fig_train_test_inputs(*parsed.fig16)
+        return
     if parsed.fig2b or parsed.fig12 or parsed.t_sweep:
         if parsed.fig2b:
             fig_generations_fd(parsed.fig2b)
