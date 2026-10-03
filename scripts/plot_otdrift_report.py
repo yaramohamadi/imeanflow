@@ -837,6 +837,92 @@ def fig_eps_generations():
     plt.close(fig)
 
 
+# =========================================================================================
+# Figure 14 -- EXP-128: fig 9 at 5 t levels, eps 0.005, 1-step on-policy input, FD
+# =========================================================================================
+T_SWEEP = ["1", "0.75", "0.5", "0.25", "0"]
+
+
+def frechet_fd(p, q):
+    """FID-style W2^2 between Gaussians fitted to the two sets."""
+    from scipy.linalg import sqrtm
+
+    cov_p, cov_q = np.cov(p.T), np.cov(q.T)
+    return float(((p.mean(0) - q.mean(0)) ** 2).sum()
+                 + np.trace(cov_p + cov_q - 2 * np.real(sqrtm(cov_p @ cov_q))))
+
+
+def ring_fd_floor(target, draws=20, seed=0):
+    """FD of fresh target draws (same n) against `target`: what a perfect generator scores."""
+    spread, num_modes = 0.25, 6
+    angles = 2.0 * np.pi * np.arange(num_modes) / num_modes + 0.5236
+    centres = np.stack([3.6 * np.cos(angles) + 1.0, 3.6 * np.sin(angles)], 1)
+    rng = np.random.default_rng(seed)
+    vals = [frechet_fd(centres[rng.integers(0, num_modes, target.shape[0])]
+                       + spread * rng.standard_normal(target.shape), target)
+            for _ in range(draws)]
+    return float(np.mean(vals)), float(np.std(vals))
+
+
+def fig_t_sweep(folder):
+    """Separate fixed-t models. Each row is one model; inputs on the left, outputs on the right.
+
+    Panel FD is on the seed-0 points drawn (n=2048). The bracket is the 5-seed mean +- sd of
+    the logged eval (fresh draws, n=1024), so a seed-0 outlier cannot pass as the result.
+    """
+    clouds, table = {}, {}
+    for t in T_SWEEP:
+        clouds[t] = np.load(os.path.join(folder, f"t_{t}_clouds.npz"))
+        rows_t = list(csv.DictReader(open(os.path.join(folder, f"t_{t}.csv"))))
+        last = max(int(r["step"]) for r in rows_t)
+        table[t] = [r for r in rows_t if int(r["step"]) == last]
+    target = clouds["1"]["real_target"]
+    floor, floor_sd = ring_fd_floor(target)
+
+    panels = [("in_forward", "input: forward-noised source\n(off-policy, what training sees)",
+               "real_source", None),
+              ("in_onpolicy", "input: source model, 1 step\nfrom t=1 to t (on-policy)",
+               "real_source", None),
+              ("out_forward", "output from the off-policy input", "real_target", "fd_forward"),
+              ("out_onpolicy", "output from the on-policy input", "real_target",
+               "fd_onpolicy_src1")]
+
+    fig, axes = plt.subplots(len(T_SWEEP), 4, figsize=(11.2, 2.75 * len(T_SWEEP)),
+                             sharex=True, sharey=True)
+    for row, t in enumerate(T_SWEEP):
+        cl = clouds[t]
+        for col, (suffix, title, reference, metric) in enumerate(panels):
+            ax = axes[row, col]
+            ref = cl[reference]
+            ax.scatter(ref[:, 0], ref[:, 1], s=3, c=AXIS, linewidths=0, zorder=1)
+            pts = cl[f"src_t{t}_{suffix}"]
+            ax.scatter(pts[:, 0], pts[:, 1], s=3, c=CAT[0], alpha=0.55, linewidths=0,
+                       zorder=2)
+            if metric:
+                vals = np.array([float(r[metric]) for r in table[t]])
+                ax.text(0.03, 0.03, "FD %.4f\n(5 seeds %.4f ± %.4f)"
+                        % (frechet_fd(pts, target), vals.mean(), vals.std()),
+                        transform=ax.transAxes, fontsize=7.5, color=INK, ha="left",
+                        va="bottom")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal")
+            for side in ax.spines.values():
+                side.set_color(AXIS)
+            if row == 0:
+                ax.set_title(title, fontsize=8.5, color=INK)
+            if col == 0:
+                ax.set_ylabel(f"t = {t}", fontsize=9.5, color=INK)
+    fig.suptitle("One separately trained OT model per row, eps_rel 0.005, seed 0 drawn.  "
+                 "Gray = source (cols 1-2) or target (cols 3-4).\n"
+                 "FD = FID-style W2² vs the target. A perfect generator scores "
+                 "%.4f ± %.4f at n=%d." % (floor, floor_sd, target.shape[0]),
+                 fontsize=10, x=0.008, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+    fig.savefig(os.path.join(FIGS, "fig14_t_sweep_separate.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -862,10 +948,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", default=DATA, help="folder holding the result CSVs and the npz")
     parser.add_argument("--out", default=FIGS, help="folder to write the PNGs into")
+    parser.add_argument("--t-sweep", default="", help="EXP-128 folder; only fig 14 is drawn")
     parsed = parser.parse_args()
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
+    if parsed.t_sweep:
+        fig_t_sweep(parsed.t_sweep)
+        return
     clouds = np.load(os.path.join(DATA, "toy_clouds_seed0.npz"))
     toy = rows("toy_2d_prodconv.csv")
     snr = rows("snr_summary_cub_food.csv")
