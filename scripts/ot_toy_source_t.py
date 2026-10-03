@@ -77,6 +77,7 @@ import numpy as np
 import optax
 
 import ot_toy_2d as toy
+import ot_toy_zoo as zoo
 from otdrift import frozen_plan_loss, generated_lower_endpoint
 
 SRC_NFE = (1, 2, 4)
@@ -189,11 +190,13 @@ def ot_step_loss(params, rng, source_sampler, target_sampler, t_level, head, arg
 
 def mode_mutual_info(source_labels, outputs, centres):
     """I(source mode ; nearest target mode) in bits. 0 = the output ignores the input."""
+    if centres is None:          # modeless target (spiral, moons, checkerboard)
+        return float("nan")
     out = np.asarray(outputs, np.float64)
     assigned = np.argmin(((out[:, None, :] - centres[None, :, :]) ** 2).sum(-1), axis=1)
     labels = np.asarray(source_labels, np.int64)
-    k = centres.shape[0]
-    joint = np.zeros((k, k), np.float64)
+    # source and target may have different mode counts (occlusion, adding)
+    joint = np.zeros((int(labels.max()) + 1, centres.shape[0]), np.float64)
     np.add.at(joint, (labels, assigned), 1.0)
     joint /= joint.sum()
     px, py = joint.sum(1, keepdims=True), joint.sum(0, keepdims=True)
@@ -226,6 +229,7 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
     x_fwd, labels = forward_noised(key_in, source_sampler, args.eval_count, t_level)
     out_fwd = one_step(params, x_fwd, t_level, head)
     row = {"fd_forward": frechet(out_fwd, y),
+           "mode_err_forward": zoo.mode_weight_error(out_fwd, centres, args.target_weights),
            "mode_mi": mode_mutual_info(labels, out_fwd, centres),
            "out_spread": float(np.asarray(out_fwd, np.float64).std(0).mean()),
            "target_spread": float(y_np.std(0).mean())}
@@ -243,6 +247,8 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
         row["src_grid_nfe"] = nfe
         row["fd_onpolicy_grid"] = frechet(out_on, y)
         row["mmd_onpolicy_grid"], per = toy.mmd_multi(out_on, y)
+        row["mode_err_onpolicy_grid"] = zoo.mode_weight_error(out_on, centres,
+                                                              args.target_weights)
         for sigma, v in zip(toy.MMD_SIGMAS, per):
             row[f"mmd{sigma:g}_onpolicy_grid"] = v
     # how far the test-time input is from the one training showed the model
@@ -326,13 +332,17 @@ def run_tcond(name, params, base_params, source_sampler, target_sampler, head, c
         return optax.apply_updates(p, updates), opt_state, value, metrics
 
     started = time.time()
+    # mean training loss since the last eval, accumulated on device (no per-step sync)
+    loss_sum, loss_count = jnp.zeros((), jnp.float32), 0
     for index in range(args.tcond_steps + 1):
         if index % args.eval_every == 0 or index == args.tcond_steps:
+            train_loss = float(loss_sum) / loss_count if loss_count else float("nan")
+            loss_sum, loss_count = jnp.zeros((), jnp.float32), 0
             for level in levels:
                 rng, key_eval = jax.random.split(rng)
                 row = {"arm": name, "seed": seed, "step": index, "t_level": level,
                        "head": head, "train_input": args.train_input,
-                       "seconds": time.time() - started}
+                       "train_loss": train_loss, "seconds": time.time() - started}
                 row.update(evaluate(params, base_params, key_eval, source_sampler,
                                     target_sampler, level, head, centres, args))
                 rows.append(row)
@@ -344,7 +354,8 @@ def run_tcond(name, params, base_params, source_sampler, target_sampler, head, c
         rng, key_step = jax.random.split(rng)
         t = float(draw_t.uniform())
         nfe = train_nfe(t, args.src_step) if args.train_input == "onpolicy" else 0
-        params, state, _, _ = step(params, state, key_step, jnp.float32(t), nfe)
+        params, state, value, _ = step(params, state, key_step, jnp.float32(t), nfe)
+        loss_sum, loss_count = loss_sum + value, loss_count + 1
     return params
 
 
@@ -414,6 +425,9 @@ def main():
     parser.add_argument("--train-input", choices=["forward", "onpolicy"], default="forward",
                         help="training input: forward-noised source data, or the frozen "
                              "source model's own generation at --src-step (needs it > 0)")
+    parser.add_argument("--zoo", default="", choices=[""] + sorted(zoo.CELLS),
+                        help="Part 3: take source and target from this ot_toy_zoo cell "
+                             "instead of the ring flags")
     parser.add_argument("--tcond-steps", type=int, default=20000,
                         help="steps for the t-conditioned arm; 20000 = 5 fixed-t arms x 4000")
     parser.add_argument("--tcond-levels", default="0,0.25,0.5,0.75,1",
@@ -426,9 +440,16 @@ def main():
     if args.train_input == "onpolicy" and args.src_step <= 0:
         parser.error("--train-input onpolicy needs --src-step > 0")
 
-    source_sampler, target_sampler = labelled_samplers(args)
-    plain_source, _ = toy.make_samplers(args)   # unlabelled, for the MeanFlow pretrain
-    centres = target_centres(args)
+    if args.zoo:
+        cell = zoo.CELLS[args.zoo]
+        source_sampler, target_sampler = cell.source, cell.target
+        plain_source = lambda key, n: cell.source(key, n)[0]   # noqa: E731
+        centres, args.target_weights = cell.target_centres, cell.target_weights
+    else:
+        source_sampler, target_sampler = labelled_samplers(args)
+        plain_source, _ = toy.make_samplers(args)   # unlabelled, for the MeanFlow pretrain
+        centres = target_centres(args)
+        args.target_weights = np.full(args.num_modes, 1.0 / args.num_modes)
     for level in [float(v) for v in args.t_levels.split(",") if v]:
         ARMS.setdefault(f"src_t{level:g}", (level, "unit", "source"))
     arms = [a for a in args.arms.split(",") if a]
@@ -447,7 +468,7 @@ def main():
               f"({args.pretrain_steps} steps) ===", flush=True)
         source_params = toy.train(
             "source_pretrain", source_params, source_params, plain_source, plain_source,
-            args.pretrain_steps, args.pretrain_lr, args, "regress", rng, [],
+            args.pretrain_steps, args.pretrain_lr, args, "regress", rng, rows,
             args.pretrain_steps, seed,
         )
 
