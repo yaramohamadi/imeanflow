@@ -758,18 +758,25 @@ def fig_eps_generations():
               for level in EPS_SHOW}
     target = clouds[EPS_SHOW[0]]["real_target"]
 
-    # W2^2 of the cloud actually drawn, not the CSV's seed mean: the CSV scores a separate eval
-    # draw, so its number does not describe these points. The floor is a fresh target draw of
-    # the same size against the same target set, i.e. what a perfect generator would score.
-    from ot_toy_2d import exact_w2
-    w2 = {(arm, level): exact_w2(clouds[level][f"{arm}_out_forward"], target)[0]
+    # FID-style W2^2 (Frechet distance between fitted Gaussians) of the cloud actually drawn,
+    # not the CSV's seed mean: the CSV scores a separate eval draw. Exact sample-matching W2^2
+    # is not used: at n=2048 it is dominated by chance per-mode counts, not by quality. The
+    # floor is a fresh target draw of the same size against the same target set.
+    from scipy.linalg import sqrtm
+
+    def frechet(p, q):
+        cov_p, cov_q = np.cov(p.T), np.cov(q.T)
+        return float(((p.mean(0) - q.mean(0)) ** 2).sum()
+                     + np.trace(cov_p + cov_q - 2 * np.real(sqrtm(cov_p @ cov_q))))
+
+    w2 = {(arm, level): frechet(clouds[level][f"{arm}_out_forward"], target)
           for level in EPS_SHOW for arm in ("src_t1", "src_t0")}
     rng = np.random.default_rng(0)
     floors = []
-    for _ in range(5):
+    for _ in range(20):
         which = rng.integers(0, num_modes, target.shape[0])
         fresh = tgt_c[which] + spread * rng.standard_normal(target.shape)
-        floors.append(exact_w2(fresh, target)[0])
+        floors.append(frechet(fresh, target))
     floor, floor_sd = float(np.mean(floors)), float(np.std(floors))
     # the zoom window: one target mode, +/- 3 blob stds, so a correct blob fills it and no more
     hub, half = tgt_c[1], 3.2 * spread
@@ -801,7 +808,7 @@ def fig_eps_generations():
                            zorder=2)
                 ax.set_xlim(-4.2, 6.2)
                 ax.set_ylim(-5.2, 5.2)
-                ax.text(0.03, 0.03, f"W2² {w2[(arm, level)]:.3f}", transform=ax.transAxes,
+                ax.text(0.03, 0.03, f"FD {w2[(arm, level)]:.4f}", transform=ax.transAxes,
                         fontsize=8.5, color=INK, ha="left", va="bottom")
             ax.set_xticks([])
             ax.set_yticks([])
@@ -820,8 +827,8 @@ def fig_eps_generations():
                 ax.set_ylabel(label, fontsize=9.5, color=INK)
 
     fig.suptitle("Gray = the target. Blue = the arm's own 1-step output on training-matched "
-                 "inputs, seed 0.\nW2² is exact, on the points shown. A perfect generator "
-                 "(fresh target draw, same n=%d) scores %.3f ± %.3f.\n"
+                 "inputs, seed 0.\nFD = FID-style W2² between Gaussians fitted to the points shown. "
+                 "A perfect generator (fresh target draw, same n=%d) scores %.4f ± %.4f.\n"
                  "The dashed circle in the zoom row is 2 std of a correct blob."
                  % (target.shape[0], floor, floor_sd),
                  fontsize=10, x=0.012, ha="left", color=INK)
