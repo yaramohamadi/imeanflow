@@ -742,7 +742,7 @@ def fig_eps_sweep():
 EPS_SHOW = ["0.05", "0.005", "0.001"]
 
 
-def fig_eps_generations():
+def fig_eps_generations(folder=None):
     """The same three arms' outputs at the old blur, the good blur, and one step too far.
 
     Two full-ring rows plus a zoom row, because at ring scale a 0.6-unit crescent is a few
@@ -754,9 +754,19 @@ def fig_eps_generations():
     tgt_c = np.stack([3.0 * scale * np.cos(angles) + 1.0,
                       3.0 * scale * np.sin(angles)], 1)
 
-    clouds = {level: np.load(os.path.join(DATA, "eps_sweep", f"eps_{level}_clouds.npz"))
+    mmd = folder is not None   # EXP-132: the same sweep re-scored with MMD at n=10k
+    folder = folder or os.path.join(DATA, "eps_sweep")
+    clouds = {level: np.load(os.path.join(folder, f"eps_{level}_clouds.npz"))
               for level in EPS_SHOW}
     target = clouds[EPS_SHOW[0]]["real_target"]
+    logged = {}
+    if mmd:
+        for level in EPS_SHOW:
+            table = list(csv.DictReader(open(os.path.join(folder, f"eps_{level}.csv"))))
+            last = max(int(r["step"]) for r in table)
+            for arm in ("src_t1", "src_t0"):
+                logged[(arm, level)] = np.array([float(r["mmd_forward"]) for r in table
+                                                 if r["arm"] == arm and int(r["step"]) == last])
 
     # FID-style W2^2 (Frechet distance between fitted Gaussians) of the cloud actually drawn,
     # not the CSV's seed mean: the CSV scores a separate eval draw. Exact sample-matching W2^2
@@ -789,12 +799,14 @@ def fig_eps_generations():
     for r, (arm, label, zoom) in enumerate(panels):
         for c, level in enumerate(EPS_SHOW):
             ax = axes[r, c]
-            pts = clouds[level][f"{arm}_out_forward"]
+            full = clouds[level][f"{arm}_out_forward"]
+            pts = full[:SHOW]
             if zoom:
                 circle = np.stack([np.cos(np.linspace(0, 2 * np.pi, 200)),
                                    np.sin(np.linspace(0, 2 * np.pi, 200))], 1)
-                keep = (np.abs(target - hub) < half).all(1)
-                ax.scatter(*(target[keep] - hub).T, s=12, c=AXIS, linewidths=0, zorder=1)
+                shown = target[:SHOW]
+                keep = (np.abs(shown - hub) < half).all(1)
+                ax.scatter(*(shown[keep] - hub).T, s=12, c=AXIS, linewidths=0, zorder=1)
                 ax.plot(*(circle * 2 * spread).T, color=INK2, linewidth=1.3,
                         linestyle=(0, (5, 3)), zorder=4)
                 keep = (np.abs(pts - hub) < half).all(1)
@@ -803,12 +815,15 @@ def fig_eps_generations():
                 ax.set_xlim(-half, half)
                 ax.set_ylim(-half, half)
             else:
-                ax.scatter(target[:, 0], target[:, 1], s=4, c=AXIS, linewidths=0, zorder=1)
+                ax.scatter(target[:SHOW, 0], target[:SHOW, 1], s=4, c=AXIS, linewidths=0,
+                           zorder=1)
                 ax.scatter(pts[:, 0], pts[:, 1], s=4, c=CAT[0], alpha=0.6, linewidths=0,
                            zorder=2)
                 ax.set_xlim(-4.2, 6.2)
                 ax.set_ylim(-5.2, 5.2)
-                ax.text(0.03, 0.03, f"FD {w2[(arm, level)]:.4f}", transform=ax.transAxes,
+                score = (score_text(full, target, logged[(arm, level)], True) if mmd
+                         else f"FD {w2[(arm, level)]:.4f}")
+                ax.text(0.03, 0.03, score, transform=ax.transAxes,
                         fontsize=8.5, color=INK, ha="left", va="bottom")
             ax.set_xticks([])
             ax.set_yticks([])
@@ -816,8 +831,8 @@ def fig_eps_generations():
             for side in ax.spines.values():
                 side.set_color(AXIS)
             if r == 0:
-                blur = float(np.sqrt(float(level) * ((clouds[level]["src_t1_out_forward"][:, None]
-                                                      - target[None]) ** 2).sum(-1).mean()))
+                blur = float(np.sqrt(float(level) * ((clouds[level]["src_t1_out_forward"][:SHOW, None]
+                                                      - target[None, :SHOW]) ** 2).sum(-1).mean()))
                 note = {"0.05": "what we trained with",
                         "0.005": "the fix",
                         "0.001": "one step too far"}[level]
@@ -826,14 +841,19 @@ def fig_eps_generations():
             if c == 0:
                 ax.set_ylabel(label, fontsize=9.5, color=INK)
 
+    if mmd:
+        caption = floor_text(target, True)
+    else:
+        caption = ("FD = FID-style W2² between Gaussians fitted to the points shown. "
+                   "A perfect generator (fresh target draw, same n=%d) scores %.4f ± %.4f."
+                   % (target.shape[0], floor, floor_sd))
     fig.suptitle("Gray = the target. Blue = the arm's own 1-step output on training-matched "
-                 "inputs, seed 0.\nFD = FID-style W2² between Gaussians fitted to the points shown. "
-                 "A perfect generator (fresh target draw, same n=%d) scores %.4f ± %.4f.\n"
-                 "The dashed circle in the zoom row is 2 std of a correct blob."
-                 % (target.shape[0], floor, floor_sd),
+                 "inputs, seed 0.\n" + caption + "\n"
+                 "The dashed circle in the zoom row is 2 std of a correct blob.",
                  fontsize=10, x=0.012, ha="left", color=INK)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    fig.savefig(os.path.join(FIGS, "fig12_eps_generations.png"))
+    fig.tight_layout(rect=(0, 0, 1, 0.915))
+    fig.savefig(os.path.join(FIGS, "fig12_eps_generations_mmd.png" if mmd
+                             else "fig12_eps_generations.png"))
     plt.close(fig)
 
 
@@ -864,6 +884,48 @@ def ring_fd_floor(target, draws=20, seed=0):
     return float(np.mean(vals)), float(np.std(vals))
 
 
+SHOW = 2048   # points drawn per cloud; every metric uses the full dumped set
+
+
+def mmd_e3(pts, target):
+    """Unbiased multi-scale MMD^2 (sigma 0.25 / 1 / 4) x 1e3, the toys' own implementation."""
+    from ot_toy_2d import mmd_multi
+
+    return 1e3 * mmd_multi(pts, target)[0]
+
+
+def ring_mmd_floor(target, draws=10, seed=0):
+    """MMD x 1e3 of fresh target draws (same n) against `target`: a perfect generator."""
+    spread, num_modes = 0.25, 6
+    angles = 2.0 * np.pi * np.arange(num_modes) / num_modes + 0.5236
+    centres = np.stack([3.6 * np.cos(angles) + 1.0, 3.6 * np.sin(angles)], 1)
+    rng = np.random.default_rng(seed)
+    vals = [mmd_e3(centres[rng.integers(0, num_modes, target.shape[0])]
+                   + spread * rng.standard_normal(target.shape), target)
+            for _ in range(draws)]
+    return float(np.mean(vals)), float(np.std(vals))
+
+
+def score_text(pts, target, logged, mmd):
+    """Panel label: the drawn seed's score, then the 5-seed mean +- sd of the logged eval."""
+    if mmd:
+        return "MMD×10³ %.3f\n(5 seeds %.3f ± %.3f)" % (
+            mmd_e3(pts, target), 1e3 * logged.mean(), 1e3 * logged.std())
+    return "FD %.4f\n(5 seeds %.4f ± %.4f)" % (frechet_fd(pts, target), logged.mean(),
+                                              logged.std())
+
+
+def floor_text(target, mmd):
+    if mmd:
+        floor, sd = ring_mmd_floor(target)
+        return ("MMD = unbiased multi-scale MMD² (RBF σ 0.25 / 1 / 4) vs the target, on all "
+                "%d points; %d drawn.\nA perfect generator scores %.3f ± %.3f (×10³)."
+                % (target.shape[0], SHOW, floor, sd))
+    floor, sd = ring_fd_floor(target)
+    return ("FD = FID-style W2² vs the target. A perfect generator scores %.4f ± %.4f at n=%d."
+            % (floor, sd, target.shape[0]))
+
+
 def fig_t_sweep(folder):
     """Separate fixed-t models. Each row is one model; inputs on the left, outputs on the right.
 
@@ -877,10 +939,12 @@ def fig_t_sweep(folder):
         last = max(int(r["step"]) for r in rows_t)
         table[t] = [r for r in rows_t if int(r["step"]) == last]
     target = clouds["1"]["real_target"]
-    floor, floor_sd = ring_fd_floor(target)
-    # EXP-129 logs the on-policy input at a fixed source step size; EXP-128 at 1 step
+    # EXP-129 logs the on-policy input at a fixed source step size; EXP-128 at 1 step.
+    # EXP-131 re-scores EXP-129 with MMD at n=10k.
     grid = "fd_onpolicy_grid" in table["1"][0]
-    on_metric = "fd_onpolicy_grid" if grid else "fd_onpolicy_src1"
+    mmd = "mmd_forward" in table["1"][0]
+    kind = "mmd" if mmd else "fd"
+    on_metric = f"{kind}_onpolicy_grid" if grid else f"{kind}_onpolicy_src1"
 
     panels = [("in_forward", "input: forward-noised source\n(off-policy, what training sees)",
                "real_source", None),
@@ -888,7 +952,8 @@ def fig_t_sweep(folder):
                                if grid else
                                "input: source model, 1 step\nfrom t=1 to t (on-policy)"),
                "real_source", None),
-              ("out_forward", "output from the off-policy input", "real_target", "fd_forward"),
+              ("out_forward", "output from the off-policy input", "real_target",
+               f"{kind}_forward"),
               ("out_onpolicy", "output from the on-policy input", "real_target", on_metric)]
 
     fig, axes = plt.subplots(len(T_SWEEP), 4, figsize=(11.2, 2.75 * len(T_SWEEP)),
@@ -898,14 +963,13 @@ def fig_t_sweep(folder):
         for col, (suffix, title, reference, metric) in enumerate(panels):
             ax = axes[row, col]
             ref = cl[reference]
-            ax.scatter(ref[:, 0], ref[:, 1], s=3, c=AXIS, linewidths=0, zorder=1)
+            ax.scatter(ref[:SHOW, 0], ref[:SHOW, 1], s=3, c=AXIS, linewidths=0, zorder=1)
             pts = cl[f"src_t{t}_{suffix}"]
-            ax.scatter(pts[:, 0], pts[:, 1], s=3, c=CAT[0], alpha=0.55, linewidths=0,
-                       zorder=2)
+            ax.scatter(pts[:SHOW, 0], pts[:SHOW, 1], s=3, c=CAT[0], alpha=0.55,
+                       linewidths=0, zorder=2)
             if metric:
                 vals = np.array([float(r[metric]) for r in table[t]])
-                ax.text(0.03, 0.03, "FD %.4f\n(5 seeds %.4f ± %.4f)"
-                        % (frechet_fd(pts, target), vals.mean(), vals.std()),
+                ax.text(0.03, 0.03, score_text(pts, target, vals, mmd),
                         transform=ax.transAxes, fontsize=7.5, color=INK, ha="left",
                         va="bottom")
             ax.set_xticks([])
@@ -922,13 +986,11 @@ def fig_t_sweep(folder):
                     label += f"\n{nfe} MeanFlow + 1 OT step"
                 ax.set_ylabel(label, fontsize=9.5, color=INK)
     fig.suptitle("One separately trained OT model per row, eps_rel 0.005, seed 0 drawn.  "
-                 "Gray = source (cols 1-2) or target (cols 3-4).\n"
-                 "FD = FID-style W2² vs the target. A perfect generator scores "
-                 "%.4f ± %.4f at n=%d." % (floor, floor_sd, target.shape[0]),
+                 "Gray = source (cols 1-2) or target (cols 3-4).\n" + floor_text(target, mmd),
                  fontsize=10, x=0.008, ha="left", color=INK)
-    fig.tight_layout(rect=(0, 0, 1, 0.955))
-    fig.savefig(os.path.join(FIGS, "fig15_t_sweep_separate_grid4.png" if grid
-                             else "fig14_t_sweep_separate.png"))
+    fig.tight_layout(rect=(0, 0, 1, 0.945))
+    name = "fig15_t_sweep_separate_grid4" if grid else "fig14_t_sweep_separate"
+    fig.savefig(os.path.join(FIGS, name + ("_mmd.png" if mmd else ".png")))
     plt.close(fig)
 
 
@@ -950,19 +1012,20 @@ def fig_generations_fd(folder):
     base = np.load(os.path.join(folder, "stage0a_clouds.npz"))
     ot = np.load(os.path.join(folder, "scratch_t1_clouds.npz"))
     target = base["real_target"]
-    floor, floor_sd = ring_fd_floor(target)
 
     logged = {}
     rows_a = list(csv.DictReader(open(os.path.join(folder, "stage0a.csv"))))
+    mmd = "mmd_nfe1" in rows_a[0]
+    kind = "mmd" if mmd else "fd"
     for arm in ("pretrained", "regress_scratch", "regress_ft"):
-        mine = [r for r in rows_a if r["arm"] == arm and r.get("fd_nfe1")]
+        mine = [r for r in rows_a if r["arm"] == arm and r.get(f"{kind}_nfe1")]
         last = 0 if arm == "pretrained" else max(int(r["step"]) for r in mine)
         for nfe in (1, 4):
-            logged[(arm, nfe)] = np.array([float(r[f"fd_nfe{nfe}"]) for r in mine
+            logged[(arm, nfe)] = np.array([float(r[f"{kind}_nfe{nfe}"]) for r in mine
                                            if int(r["step"]) == last])
     rows_b = list(csv.DictReader(open(os.path.join(folder, "scratch_t1.csv"))))
     last = max(int(r["step"]) for r in rows_b)
-    logged[("scratch_t1", 1)] = np.array([float(r["fd_forward"]) for r in rows_b
+    logged[("scratch_t1", 1)] = np.array([float(r[f"{kind}_forward"]) for r in rows_b
                                           if int(r["step"]) == last])
 
     fig, axes = plt.subplots(2, len(FIG2B_ARMS), figsize=(11.0, 5.9), sharex=True,
@@ -979,7 +1042,8 @@ def fig_generations_fd(folder):
                 ax.set_title(label, fontsize=9, color=INK)
             if col == 0:
                 ax.set_ylabel(f"NFE {nfe}", fontsize=10, color=INK)
-            ax.scatter(target[:, 0], target[:, 1], s=5, c=AXIS, linewidths=0, zorder=1)
+            ax.scatter(target[:SHOW, 0], target[:SHOW, 1], s=5, c=AXIS, linewidths=0,
+                       zorder=1)
             if arm == "scratch_t1":
                 if nfe != 1:
                     ax.text(0.5, 0.5, "one-step map:\nno NFE 4", transform=ax.transAxes,
@@ -988,19 +1052,15 @@ def fig_generations_fd(folder):
                 pts = ot["scratch_t1_out_forward"]
             else:
                 pts = base[f"{arm}_nfe{nfe}"]
-            ax.scatter(pts[:, 0], pts[:, 1], s=4, c=CAT[0], alpha=0.6, linewidths=0,
+            ax.scatter(pts[:SHOW, 0], pts[:SHOW, 1], s=4, c=CAT[0], alpha=0.6, linewidths=0,
                        zorder=2)
-            vals = logged[(arm, nfe)]
-            ax.text(0.03, 0.03, "FD %.4f\n(5 seeds %.4f ± %.4f)"
-                    % (frechet_fd(pts, target), vals.mean(), vals.std()),
+            ax.text(0.03, 0.03, score_text(pts, target, logged[(arm, nfe)], mmd),
                     transform=ax.transAxes, fontsize=7.5, color=INK, ha="left", va="bottom")
-    fig.suptitle("Generated sets against the target ring (gray), seed 0 drawn.  "
-                 "FD = FID-style W2² vs the target.\nA perfect generator scores "
-                 "%.4f ± %.4f at n=%d (panel) and 0.0219 ± 0.0150 at n=1024 (bracket)."
-                 % (floor, floor_sd, target.shape[0]),
-                 fontsize=10, x=0.012, ha="left", color=INK)
+    fig.suptitle("Generated sets against the target ring (gray), seed 0 drawn.\n"
+                 + floor_text(target, mmd), fontsize=10, x=0.012, ha="left", color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.9), h_pad=2.0)
-    fig.savefig(os.path.join(FIGS, "fig2b_toy_generations_fd.png"))
+    fig.savefig(os.path.join(FIGS, "fig2b_toy_generations_mmd.png" if mmd
+                             else "fig2b_toy_generations_fd.png"))
     plt.close(fig)
 
 
@@ -1031,12 +1091,18 @@ def main():
     parser.add_argument("--out", default=FIGS, help="folder to write the PNGs into")
     parser.add_argument("--t-sweep", default="", help="EXP-128 folder; only fig 14 is drawn")
     parser.add_argument("--fig2b", default="", help="EXP-130 folder; only fig 2b is drawn")
+    parser.add_argument("--fig12", default="", help="EXP-132 folder; only fig 12 is drawn")
     parsed = parser.parse_args()
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
-    if parsed.fig2b:
-        fig_generations_fd(parsed.fig2b)
+    if parsed.fig2b or parsed.fig12 or parsed.t_sweep:
+        if parsed.fig2b:
+            fig_generations_fd(parsed.fig2b)
+        if parsed.fig12:
+            fig_eps_generations(parsed.fig12)
+        if parsed.t_sweep:
+            fig_t_sweep(parsed.t_sweep)
         return
     if parsed.t_sweep:
         fig_t_sweep(parsed.t_sweep)
