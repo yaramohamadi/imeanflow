@@ -735,6 +735,93 @@ def fig_eps_sweep():
     return geom
 
 
+
+# =========================================================================================
+# Figure 12 -- EXP-127: what the fix looks like, as generations
+# =========================================================================================
+EPS_SHOW = ["0.05", "0.005", "0.001"]
+
+
+def fig_eps_generations():
+    """The same three arms' outputs at the old blur, the good blur, and one step too far.
+
+    Two full-ring rows plus a zoom row, because at ring scale a 0.6-unit crescent is a few
+    pixels. The zoom is one target mode of the t=0 arm, which is where section 9 fitted the
+    Jacobian.
+    """
+    spread, scale, rot, num_modes = 0.25, 1.2, 0.5236, 6
+    angles = 2.0 * np.pi * np.arange(num_modes) / num_modes + rot
+    tgt_c = np.stack([3.0 * scale * np.cos(angles) + 1.0,
+                      3.0 * scale * np.sin(angles)], 1)
+
+    w2 = {}
+    for level in EPS_SHOW:
+        table = rows(os.path.join("eps_sweep", f"eps_{level}.csv"))
+        last = max(int(r["step"]) for r in table)
+        for arm in ("src_t1", "src_t0"):
+            vals = [num(r["w2_forward"]) for r in table
+                    if r["arm"] == arm and int(r["step"]) == last and num(r["w2_forward"])]
+            w2[(arm, level)] = float(np.mean(vals))
+
+    clouds = {level: np.load(os.path.join(DATA, "eps_sweep", f"eps_{level}_clouds.npz"))
+              for level in EPS_SHOW}
+    target = clouds[EPS_SHOW[0]]["real_target"]
+    # the zoom window: one target mode, +/- 3 blob stds, so a correct blob fills it and no more
+    hub, half = tgt_c[1], 3.2 * spread
+
+    panels = [("src_t1", "t = 1,  the winning arm", False),
+              ("src_t0", "t = 0", False),
+              ("src_t0", "t = 0, zoomed on one mode", True)]
+
+    fig, axes = plt.subplots(3, 3, figsize=(10.4, 10.0))
+    for r, (arm, label, zoom) in enumerate(panels):
+        for c, level in enumerate(EPS_SHOW):
+            ax = axes[r, c]
+            pts = clouds[level][f"{arm}_out_forward"]
+            if zoom:
+                circle = np.stack([np.cos(np.linspace(0, 2 * np.pi, 200)),
+                                   np.sin(np.linspace(0, 2 * np.pi, 200))], 1)
+                keep = (np.abs(target - hub) < half).all(1)
+                ax.scatter(*(target[keep] - hub).T, s=12, c=AXIS, linewidths=0, zorder=1)
+                ax.plot(*(circle * 2 * spread).T, color=INK2, linewidth=1.3,
+                        linestyle=(0, (5, 3)), zorder=4)
+                keep = (np.abs(pts - hub) < half).all(1)
+                ax.scatter(*(pts[keep] - hub).T, s=12, c=CAT[0], alpha=0.75, linewidths=0,
+                           zorder=3)
+                ax.set_xlim(-half, half)
+                ax.set_ylim(-half, half)
+            else:
+                ax.scatter(target[:, 0], target[:, 1], s=4, c=AXIS, linewidths=0, zorder=1)
+                ax.scatter(pts[:, 0], pts[:, 1], s=4, c=CAT[0], alpha=0.6, linewidths=0,
+                           zorder=2)
+                ax.set_xlim(-4.2, 6.2)
+                ax.set_ylim(-5.2, 5.2)
+                ax.text(0.03, 0.03, f"W2 {w2[(arm, level)]:.2f}", transform=ax.transAxes,
+                        fontsize=8.5, color=INK, ha="left", va="bottom")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal")
+            for side in ax.spines.values():
+                side.set_color(AXIS)
+            if r == 0:
+                blur = float(np.sqrt(float(level) * ((clouds[level]["src_t1_out_forward"][:, None]
+                                                      - target[None]) ** 2).sum(-1).mean()))
+                note = {"0.05": "what we trained with",
+                        "0.005": "the fix",
+                        "0.001": "one step too far"}[level]
+                ax.set_title(f"eps_rel {level}   blur {blur:.2f}\n{note}", fontsize=9.5,
+                             color=INK)
+            if c == 0:
+                ax.set_ylabel(label, fontsize=9.5, color=INK)
+
+    fig.suptitle("Gray = the target. Blue = the arm's own 1-step output on training-matched "
+                 "inputs, seed 0.\nThe dashed circle in the zoom row is 2 std of a correct blob.",
+                 fontsize=10, x=0.012, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(os.path.join(FIGS, "fig12_eps_generations.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -782,6 +869,7 @@ def main():
     fig_source_t_clouds(src_clouds)
     fig_boomerang(src_clouds)
     geom = fig_eps_sweep()
+    fig_eps_generations()
     report_paired(final, seeds)
 
     for level, (blur, cond, rad, tan) in geom.items():
