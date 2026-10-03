@@ -878,14 +878,18 @@ def fig_t_sweep(folder):
         table[t] = [r for r in rows_t if int(r["step"]) == last]
     target = clouds["1"]["real_target"]
     floor, floor_sd = ring_fd_floor(target)
+    # EXP-129 logs the on-policy input at a fixed source step size; EXP-128 at 1 step
+    grid = "fd_onpolicy_grid" in table["1"][0]
+    on_metric = "fd_onpolicy_grid" if grid else "fd_onpolicy_src1"
 
     panels = [("in_forward", "input: forward-noised source\n(off-policy, what training sees)",
                "real_source", None),
-              ("in_onpolicy", "input: source model, 1 step\nfrom t=1 to t (on-policy)",
+              ("in_onpolicy", ("input: source model at step 0.25\nfrom t=1 to t (on-policy)"
+                               if grid else
+                               "input: source model, 1 step\nfrom t=1 to t (on-policy)"),
                "real_source", None),
               ("out_forward", "output from the off-policy input", "real_target", "fd_forward"),
-              ("out_onpolicy", "output from the on-policy input", "real_target",
-               "fd_onpolicy_src1")]
+              ("out_onpolicy", "output from the on-policy input", "real_target", on_metric)]
 
     fig, axes = plt.subplots(len(T_SWEEP), 4, figsize=(11.2, 2.75 * len(T_SWEEP)),
                              sharex=True, sharey=True)
@@ -912,14 +916,19 @@ def fig_t_sweep(folder):
             if row == 0:
                 ax.set_title(title, fontsize=8.5, color=INK)
             if col == 0:
-                ax.set_ylabel(f"t = {t}", fontsize=9.5, color=INK)
+                label = f"t = {t}"
+                if grid:
+                    nfe = int(float(table[t][0]["src_grid_nfe"]))
+                    label += f"\n{nfe} MeanFlow + 1 OT step"
+                ax.set_ylabel(label, fontsize=9.5, color=INK)
     fig.suptitle("One separately trained OT model per row, eps_rel 0.005, seed 0 drawn.  "
                  "Gray = source (cols 1-2) or target (cols 3-4).\n"
                  "FD = FID-style W2² vs the target. A perfect generator scores "
                  "%.4f ± %.4f at n=%d." % (floor, floor_sd, target.shape[0]),
                  fontsize=10, x=0.008, ha="left", color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
-    fig.savefig(os.path.join(FIGS, "fig14_t_sweep_separate.png"))
+    fig.savefig(os.path.join(FIGS, "fig15_t_sweep_separate_grid4.png" if grid
+                             else "fig14_t_sweep_separate.png"))
     plt.close(fig)
 
 
