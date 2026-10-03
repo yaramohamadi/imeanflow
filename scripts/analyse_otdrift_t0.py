@@ -79,7 +79,13 @@ def section_shape(label, src_mode, points):
 
 
 def section_decompose(label, src_mode, points):
-    """split the squared error into 'blob in the wrong place' vs 'blob the wrong shape'."""
+    """split the SECOND-MOMENT mismatch into 'wrong place' vs 'wrong shape'.
+
+    NOT a decomposition of W2. W2 is an optimal coupling cost and is much smaller than the
+    second-moment mismatch, because a smeared blob can still be matched point-for-point into
+    the overlapping part of the target blob. These two numbers say which of the two defects
+    is larger; they do not add up to W2^2.
+    """
     place, shape, n = 0.0, 0.0, points.shape[0]
     for s in range(NUM_MODES):
         pts = points[src_mode == s]
@@ -89,7 +95,7 @@ def section_decompose(label, src_mode, points):
         place += w * ((mean - target) ** 2).sum()
         shape += w * ((pts - mean) ** 2).sum(1).mean()
     ideal = 2 * SPREAD ** 2
-    print(f"\n[{label}] error budget, per point, squared units")
+    print(f"\n[{label}] second-moment mismatch (NOT a W2 decomposition), squared units")
     print(f"  wrong place  (mode centre vs its target centre) {place:8.4f}  -> rms {np.sqrt(place):.3f}")
     print(f"  wrong shape  (spread about the mode centre)     {shape:8.4f}  -> rms {np.sqrt(shape):.3f}")
     print(f"  of which unavoidable (the target blob itself)   {ideal:8.4f}  -> rms {np.sqrt(ideal):.3f}")
