@@ -944,11 +944,15 @@ def fig_t_sweep(folder):
     grid = "fd_onpolicy_grid" in table["1"][0]
     mmd = "mmd_forward" in table["1"][0]
     kind = "mmd" if mmd else "fd"
+    # EXP-134 trains on the on-policy input instead of the forward-noised one
+    onpolicy_train = table["1"][0].get("train_input") == "onpolicy"
+    seen = "what training sees"
     on_metric = f"{kind}_onpolicy_grid" if grid else f"{kind}_onpolicy_src1"
 
-    panels = [("in_forward", "input: forward-noised source\n(off-policy, what training sees)",
-               "real_source", None),
-              ("in_onpolicy", ("input: source model at step 0.25\nfrom t=1 to t (on-policy)"
+    panels = [("in_forward", "input: forward-noised source\n(off-policy%s)"
+               % ("" if onpolicy_train else ", " + seen), "real_source", None),
+              ("in_onpolicy", ("input: source model at step 0.25\nfrom t=1 to t (on-policy%s)"
+                               % (", " + seen if onpolicy_train else "")
                                if grid else
                                "input: source model, 1 step\nfrom t=1 to t (on-policy)"),
                "real_source", None),
@@ -985,11 +989,15 @@ def fig_t_sweep(folder):
                     nfe = int(float(table[t][0]["src_grid_nfe"]))
                     label += f"\n{nfe} MeanFlow + 1 OT step"
                 ax.set_ylabel(label, fontsize=9.5, color=INK)
-    fig.suptitle("One separately trained OT model per row, eps_rel 0.005, seed 0 drawn.  "
+    fig.suptitle("One separately trained OT model per row, trained on the %s input, "
+                 "eps_rel 0.005, seed 0 drawn.  "
+                 % ("ON-POLICY" if onpolicy_train else "forward-noised") +
                  "Gray = source (cols 1-2) or target (cols 3-4).\n" + floor_text(target, mmd),
                  fontsize=10, x=0.008, ha="left", color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.945))
     name = "fig15_t_sweep_separate_grid4" if grid else "fig14_t_sweep_separate"
+    if onpolicy_train:
+        name += "_trained_onpolicy"
     fig.savefig(os.path.join(FIGS, name + ("_mmd.png" if mmd else ".png")))
     plt.close(fig)
 
