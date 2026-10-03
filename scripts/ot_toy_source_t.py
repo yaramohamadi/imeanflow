@@ -153,15 +153,25 @@ def target_centres(args):
 # --------------------------------------------------------------------------- loss
 
 
-def ot_step_loss(params, rng, source_sampler, target_sampler, t_level, head, args):
+def ot_step_loss(params, rng, source_sampler, target_sampler, t_level, head, args,
+                 base_params=None):
     """Debiased Sinkhorn between the one-step outputs and an independent clean target batch.
 
     The comparator is clean target data, never an interpolant: this map is supposed to land on
     the target distribution in one step, so matching it against anything noisier would score a
     weaker condition than the one we claim.
+
+    `--train-input onpolicy` replaces the forward-noised input with the frozen source model's
+    own partial generation (fresh noise, `--src-step` steps from t=1 down to t, no gradient),
+    i.e. exactly the input the arm meets at test time.
     """
     key_in, key_y = jax.random.split(rng)
-    x_t, _ = forward_noised(key_in, source_sampler, args.batch_size, t_level)
+    if args.train_input == "onpolicy":
+        z = jax.random.normal(key_in, (args.batch_size, 2), jnp.float32)
+        x_t = jax.lax.stop_gradient(
+            source_state(base_params, z, t_level, grid_nfe(t_level, args.src_step)))
+    else:
+        x_t, _ = forward_noised(key_in, source_sampler, args.batch_size, t_level)
     x_hat = one_step(params, x_t, t_level, head)
     y, _ = target_sampler(key_y, args.batch_size)
     loss, aux = frozen_plan_loss(x_hat, y, epsilon_relative=args.eps_rel,
@@ -252,7 +262,8 @@ def run_arm(name, params, base_params, source_sampler, target_sampler, t_level, 
     @jax.jit
     def step(p, opt_state, key):
         def objective(q):
-            return ot_step_loss(q, key, source_sampler, target_sampler, t_level, head, args)
+            return ot_step_loss(q, key, source_sampler, target_sampler, t_level, head, args,
+                                base_params)
         (value, metrics), grads = jax.value_and_grad(objective, has_aux=True)(p)
         updates, opt_state = optimizer.update(grads, opt_state)
         return optax.apply_updates(p, updates), opt_state, value, metrics
@@ -262,7 +273,8 @@ def run_arm(name, params, base_params, source_sampler, target_sampler, t_level, 
         if index % args.eval_every == 0 or index == args.adapt_steps:
             rng, key_eval = jax.random.split(rng)
             row = {"arm": name, "seed": seed, "step": index, "t_level": t_level,
-                   "head": head, "seconds": time.time() - started}
+                   "head": head, "train_input": args.train_input,
+                   "seconds": time.time() - started}
             row.update(evaluate(params, base_params, key_eval, source_sampler,
                                 target_sampler, t_level, head, centres, args))
             rows.append(row)
@@ -338,11 +350,16 @@ def main():
                         help="if > 0, also eval (and dump) the on-policy input made with a "
                              "fixed source step size, i.e. round((1-t)/step) steps")
     parser.add_argument("--dump-count", type=int, default=2048)
+    parser.add_argument("--train-input", choices=["forward", "onpolicy"], default="forward",
+                        help="training input: forward-noised source data, or the frozen "
+                             "source model's own generation at --src-step (needs it > 0)")
     parser.add_argument("--save-params", default="",
                         help="optional folder; each trained arm is pickled per seed")
     parser.add_argument("--out", required=True)
     parser.add_argument("--dump", default="", help="optional .npz of seed-0 point clouds")
     args = parser.parse_args()
+    if args.train_input == "onpolicy" and args.src_step <= 0:
+        parser.error("--train-input onpolicy needs --src-step > 0")
 
     source_sampler, target_sampler = labelled_samplers(args)
     plain_source, _ = toy.make_samplers(args)   # unlabelled, for the MeanFlow pretrain
