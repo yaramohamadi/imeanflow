@@ -232,6 +232,16 @@ def exact_w2(x, y):
     return float(cost[rows, cols].mean()), cols
 
 
+def frechet(x, y):
+    """FID-style W2^2 between Gaussians fitted to the two sets."""
+    from scipy.linalg import sqrtm
+
+    x_np, y_np = np.asarray(x, np.float64), np.asarray(y, np.float64)
+    cov_x, cov_y = np.cov(x_np.T), np.cov(y_np.T)
+    return float(((x_np.mean(0) - y_np.mean(0)) ** 2).sum()
+                 + np.trace(cov_x + cov_y - 2.0 * np.real(sqrtm(cov_x @ cov_y))))
+
+
 def correction_alignment(x_source, x_adapted, y):
     """How close is the learned correction to the exact OT displacement?
 
@@ -262,8 +272,10 @@ def evaluate(params, base_params, rng, target_sampler, count, nfe_list):
     y = target_sampler(rng_y, count)
     out = {}
     for nfe in nfe_list:
-        value, _ = exact_w2(generate(params, z, nfe), y)
+        sample = generate(params, z, nfe)
+        value, _ = exact_w2(sample, y)
         out[f"w2_nfe{nfe}"] = value
+        out[f"fd_nfe{nfe}"] = frechet(sample, y)
     x_source = generate(base_params, z, 1)
     cosine, ratio, magnitude = correction_alignment(x_source, generate(params, z, 1), y)
     out["ot_alignment_cosine"] = cosine

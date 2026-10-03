@@ -42,6 +42,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, help="output .npz")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--arms", default=",".join(ARMS))
     parser.add_argument("--dump-count", type=int, default=2048,
                         help="particles per saved cloud; larger than eval_count is fine, "
                              "these are for looking at, not for the metric")
@@ -83,7 +84,7 @@ def main():
         "noise": np.asarray(z),
     }
 
-    for arm in ARMS:
+    for arm in [a for a in parsed.arms.split(",") if a]:
         init, kind, steps = plans[arm]
         rng, key_arm = jax.random.split(rng)
         print(f"\n=== {arm} ({kind}, {steps} steps) ===", flush=True)
