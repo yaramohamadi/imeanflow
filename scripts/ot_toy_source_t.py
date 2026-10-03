@@ -42,10 +42,12 @@ should sit exactly at the no-op W2 (the predicted null that confirms the degener
 
 ## Metrics
 
-  w2_forward             exact W2 to target data, train-matched input.
-  w2_onpolicy_src{1,2,4} exact W2 with the input produced on-policy by the frozen source
+  mmd_forward            multi-scale MMD^2 to target data, train-matched input. (EXP-126/127
+                         logged exact sample W2^2 here; dropped, it is dominated by chance
+                         per-mode counts at these n.)
+  mmd_onpolicy_src{1,2,4} the same, with the input produced on-policy by the frozen source
                          model at 1/2/4 steps. At t=1 there is nothing for the source model
-                         to do, so these equal w2_forward by construction.
+                         to do, so these equal mmd_forward by construction.
   mode_mi                mutual information (bits) between the input's source mode and the
                          output's nearest target mode, max log2(6)=2.585, chance 0. This is
                          the "does it ignore the input" test: a model that discards x and
@@ -210,8 +212,7 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
 
     x_fwd, labels = forward_noised(key_in, source_sampler, args.eval_count, t_level)
     out_fwd = one_step(params, x_fwd, t_level, head)
-    row = {"w2_forward": toy.exact_w2(out_fwd, y)[0],
-           "fd_forward": frechet(out_fwd, y),
+    row = {"fd_forward": frechet(out_fwd, y),
            "mode_mi": mode_mutual_info(labels, out_fwd, centres),
            "out_spread": float(np.asarray(out_fwd, np.float64).std(0).mean()),
            "target_spread": float(y_np.std(0).mean())}
@@ -220,18 +221,23 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
     for nfe in SRC_NFE:
         state = source_state(base_params, z, t_level, nfe)
         out_on = one_step(params, state, t_level, head)
-        row[f"w2_onpolicy_src{nfe}"] = toy.exact_w2(out_on, y)[0]
         row[f"fd_onpolicy_src{nfe}"] = frechet(out_on, y)
+        row[f"mmd_onpolicy_src{nfe}"] = toy.mmd_multi(out_on, y)[0]
     if args.src_step > 0:
         # fixed source step size: t=0.25 at step 0.25 is 3 source steps, then the OT step
         nfe = grid_nfe(t_level, args.src_step)
         out_on = one_step(params, source_state(base_params, z, t_level, nfe), t_level, head)
         row["src_grid_nfe"] = nfe
-        row["w2_onpolicy_grid"] = toy.exact_w2(out_on, y)[0]
         row["fd_onpolicy_grid"] = frechet(out_on, y)
+        row["mmd_onpolicy_grid"], per = toy.mmd_multi(out_on, y)
+        for sigma, v in zip(toy.MMD_SIGMAS, per):
+            row[f"mmd{sigma:g}_onpolicy_grid"] = v
     # how far the test-time input is from the one training showed the model
-    row["input_shift"] = toy.exact_w2(source_state(base_params, z, t_level, max(SRC_NFE)),
-                                      x_fwd)[0]
+    row["input_shift_mmd"] = toy.mmd_multi(
+        source_state(base_params, z, t_level, max(SRC_NFE)), x_fwd)[0]
+    row["mmd_forward"], per = toy.mmd_multi(out_fwd, y)
+    for sigma, v in zip(toy.MMD_SIGMAS, per):
+        row[f"mmd{sigma:g}_forward"] = v
     return row
 
 
@@ -261,9 +267,9 @@ def run_arm(name, params, base_params, source_sampler, target_sampler, t_level, 
                                 target_sampler, t_level, head, centres, args))
             rows.append(row)
             print(f"  s{seed} {name:14s} step {index:5d}  "
+                  f"MMD(fwd)={row['mmd_forward']:.2e}  "
                   f"FD(fwd)={row['fd_forward']:.4f}  "
                   f"FD(src1)={row['fd_onpolicy_src1']:.4f}  "
-                  f"W2(fwd)={row['w2_forward']:.4f}  "
                   f"MI={row['mode_mi']:.3f}b  "
                   f"spread={row['out_spread']:.2f}/{row['target_spread']:.2f}", flush=True)
         if index == args.adapt_steps:
@@ -286,9 +292,9 @@ ARMS = {
 
 
 def summarise(rows, arms, seeds):
-    keys = ["fd_forward"] + [f"fd_onpolicy_src{n}" for n in SRC_NFE] + \
-           ["w2_forward", "w2_onpolicy_src4", "mode_mi", "out_spread", "input_shift"]
-    print("\nfinal eval per arm, mean +- sd over %d seeds (FD and W2^2, lower better):" %
+    keys = ["mmd_forward"] + [f"mmd_onpolicy_src{n}" for n in SRC_NFE] + ["fd_forward"] + \
+           ["mode_mi", "out_spread", "input_shift_mmd"]
+    print("\nfinal eval per arm, mean +- sd over %d seeds (multi-scale MMD^2 and FD, lower better):" %
           len(seeds))
     print(f"{'arm':12s}{'t':>5s}{'head':>10s}" + "".join(f"{k:>20s}" for k in keys))
     for arm in arms:
@@ -331,6 +337,7 @@ def main():
     parser.add_argument("--src-step", type=float, default=0.0,
                         help="if > 0, also eval (and dump) the on-policy input made with a "
                              "fixed source step size, i.e. round((1-t)/step) steps")
+    parser.add_argument("--dump-count", type=int, default=2048)
     parser.add_argument("--save-params", default="",
                         help="optional folder; each trained arm is pickled per seed")
     parser.add_argument("--out", required=True)
@@ -367,8 +374,8 @@ def main():
 
         if args.dump and seed == seeds[0]:
             rng, key_src, key_tgt = jax.random.split(rng, 3)
-            bundle["real_source"] = np.asarray(source_sampler(key_src, 2048)[0])
-            bundle["real_target"] = np.asarray(target_sampler(key_tgt, 2048)[0])
+            bundle["real_source"] = np.asarray(source_sampler(key_src, args.dump_count)[0])
+            bundle["real_target"] = np.asarray(target_sampler(key_tgt, args.dump_count)[0])
 
         for arm in arms:
             t_level, head, init = ARMS[arm]
@@ -387,8 +394,8 @@ def main():
                                  "source": jax.device_get(source_params)}, f)
             if args.dump and seed == seeds[0]:
                 rng, key_in, key_z = jax.random.split(rng, 3)
-                x_fwd, _ = forward_noised(key_in, source_sampler, 2048, t_level)
-                z = jax.random.normal(key_z, (2048, 2), jnp.float32)
+                x_fwd, _ = forward_noised(key_in, source_sampler, args.dump_count, t_level)
+                z = jax.random.normal(key_z, (args.dump_count, 2), jnp.float32)
                 nfe = (grid_nfe(t_level, args.src_step) if args.src_step > 0
                        else args.dump_src_nfe)
                 state = source_state(source_params, z, t_level, nfe)

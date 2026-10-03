@@ -242,6 +242,44 @@ def frechet(x, y):
                  + np.trace(cov_x + cov_y - 2.0 * np.real(sqrtm(cov_x @ cov_y))))
 
 
+MMD_SIGMAS = (0.25, 1.0, 4.0)   # blob std, ~ the mode gap / 4, ~ the ring scale
+
+
+def mmd_multi(x, y, sigmas=MMD_SIGMAS, chunk=2500):
+    """Unbiased MMD^2 with a sum of RBF kernels, one per sigma; returns (average, per-sigma).
+
+    No shape assumption and no point matching, so a perfect generator averages exactly 0
+    (it can come out slightly negative) and chance per-mode counts do not dominate it.
+    Small sigmas see blob shape, large ones see mass in the wrong place. Runs on the
+    accelerator in float32, chunked so 10k x 10k fits comfortably.
+    """
+    # centre on a shared point and take differences directly: the |a|^2 + |b|^2 - 2ab
+    # shortcut loses the small distances to float32 cancellation and biases the estimate
+    centre = np.concatenate([np.asarray(x), np.asarray(y)]).mean(0)
+    x = jnp.asarray(np.asarray(x, np.float64) - centre, jnp.float32)
+    y = jnp.asarray(np.asarray(y, np.float64) - centre, jnp.float32)
+    scales = jnp.asarray([2.0 * s * s for s in sigmas], jnp.float32)
+
+    @jax.jit
+    def block(a, b):
+        d = ((a[:, None, :] - b[None, :, :]) ** 2).sum(-1)
+        return jnp.exp(-d[None] / scales[:, None, None]).sum((1, 2))
+
+    def kernel_sum(a, b):
+        total = jnp.zeros(len(sigmas), jnp.float32)
+        for i in range(0, a.shape[0], chunk):
+            for j in range(0, b.shape[0], chunk):
+                total = total + block(a[i:i + chunk], b[j:j + chunk])
+        return np.asarray(total, np.float64)
+
+    n, m = x.shape[0], y.shape[0]
+    xx = (kernel_sum(x, x) - n) / (n * (n - 1))   # k(a, a) = 1 on the diagonal
+    yy = (kernel_sum(y, y) - m) / (m * (m - 1))
+    xy = kernel_sum(x, y) / (n * m)
+    per = xx + yy - 2.0 * xy
+    return float(per.mean()), [float(v) for v in per]
+
+
 def correction_alignment(x_source, x_adapted, y):
     """How close is the learned correction to the exact OT displacement?
 
@@ -266,18 +304,22 @@ def correction_alignment(x_source, x_adapted, y):
         float(actual_norm.mean())
 
 
-def evaluate(params, base_params, rng, target_sampler, count, nfe_list):
+def evaluate(params, base_params, rng, target_sampler, count, nfe_list, align_count=0):
     rng_z, rng_y = jax.random.split(rng)
     z = jax.random.normal(rng_z, (count, 2), jnp.float32)
     y = target_sampler(rng_y, count)
     out = {}
     for nfe in nfe_list:
         sample = generate(params, z, nfe)
-        value, _ = exact_w2(sample, y)
-        out[f"w2_nfe{nfe}"] = value
         out[f"fd_nfe{nfe}"] = frechet(sample, y)
-    x_source = generate(base_params, z, 1)
-    cosine, ratio, magnitude = correction_alignment(x_source, generate(params, z, 1), y)
+        out[f"mmd_nfe{nfe}"], per = mmd_multi(sample, y)
+        for sigma, v in zip(MMD_SIGMAS, per):
+            out[f"mmd{sigma:g}_nfe{nfe}"] = v
+    # the alignment diagnostic needs an exact assignment, O(n^3): run it on a subset
+    k = align_count or count
+    x_source = generate(base_params, z[:k], 1)
+    cosine, ratio, magnitude = correction_alignment(x_source, generate(params, z[:k], 1),
+                                                    y[:k])
     out["ot_alignment_cosine"] = cosine
     out["correction_over_ideal"] = ratio
     out["correction_norm"] = magnitude
@@ -316,10 +358,10 @@ def train(name, params, base_params, sampler, target_sampler, steps, lr, args,
             row = {"arm": name, "seed": seed, "step": index,
                    "seconds": time.time() - started}
             row.update(evaluate(params, base_params, key_eval, target_sampler,
-                                args.eval_count, [1, 4]))
+                                args.eval_count, [1, 4], getattr(args, "align_count", 1024)))
             rows.append(row)
             print(f"  s{seed} {name:16s} step {index:6d}  "
-                  f"W2(NFE1)={row['w2_nfe1']:.4f}  W2(NFE4)={row['w2_nfe4']:.4f}  "
+                  f"MMD(NFE1)={row['mmd_nfe1']:.2e}  MMD(NFE4)={row['mmd_nfe4']:.2e}  "
                   f"cos={row['ot_alignment_cosine']:+.3f}  "
                   f"|d|/ideal={row['correction_over_ideal']:.2f}", flush=True)
         if index == steps:
@@ -332,7 +374,7 @@ def train(name, params, base_params, sampler, target_sampler, steps, lr, args,
 def summarise(rows, arms, seeds, pick, title):
     """Print one arm-by-arm table, `pick` choosing which eval row represents each seed."""
     print(f"\n{title}:")
-    print(f"{'arm':18s}{'W2 NFE1':>18s}{'W2 NFE4':>18s}{'OT cos':>18s}"
+    print(f"{'arm':18s}{'MMD NFE1':>18s}{'MMD NFE4':>18s}{'OT cos':>18s}"
           f"{'|d|/ideal':>18s}{'step':>10s}")
     for arm in ["source_pretrain"] + arms:
         chosen = []
@@ -352,7 +394,7 @@ def summarise(rows, arms, seeds, pick, title):
 
         steps = sorted({int(row["step"]) for row in chosen})
         step_text = str(steps[0]) if len(steps) == 1 else f"{steps[0]}-{steps[-1]}"
-        print(f"{arm:18s}{spread('w2_nfe1')}{spread('w2_nfe4')}"
+        print(f"{arm:18s}{spread('mmd_nfe1')}{spread('mmd_nfe4')}"
               f"{spread('ot_alignment_cosine')}{spread('correction_over_ideal')}"
               f"{step_text:>10s}")
 
@@ -383,6 +425,13 @@ def main():
                         help="one seed is not a result; each seed repeats the whole "
                              "pretrain + all arms, so the prior differs per seed too")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--align-count", type=int, default=1024,
+                        help="eval points for the exact-assignment alignment diagnostic, "
+                             "which is O(n^3) (0 = all of them)")
+    parser.add_argument("--dump", default="",
+                        help="optional .npz of the first seed's clouds, from the SAME "
+                             "trained models the metrics come from")
+    parser.add_argument("--dump-count", type=int, default=10000)
     parser.add_argument("--arms", default="pretrained,regress_scratch,regress_ft,"
                                           "ot_final,ot_traj,ot_traj_scratch")
     args = parser.parse_args()
@@ -390,7 +439,7 @@ def main():
     source_sampler, target_sampler = make_samplers(args)
     arms = [a for a in args.arms.split(",") if a]
     seeds = [int(v) for v in args.seeds.split(",") if v]
-    rows = []
+    rows, bundle = [], {}
 
     for seed in seeds:
         rng = jax.random.PRNGKey(seed)
@@ -421,8 +470,19 @@ def main():
                 raise ValueError(f"unknown arm {arm}")
             init, kind, steps = plans[arm]
             rng, key_arm = jax.random.split(rng)
-            train(arm, init, source_params, target_sampler, target_sampler, steps,
-                  args.adapt_lr, args, kind, key_arm, rows, args.eval_every, seed)
+            trained = train(arm, init, source_params, target_sampler, target_sampler, steps,
+                            args.adapt_lr, args, kind, key_arm, rows, args.eval_every, seed)
+            if args.dump and seed == seeds[0]:
+                # fixed keys outside the training chain, so dumping cannot change training
+                key_z, key_src, key_tgt = jax.random.split(jax.random.PRNGKey(10_000 + seed), 3)
+                z = jax.random.normal(key_z, (args.dump_count, 2), jnp.float32)
+                bundle.setdefault("real_source", np.asarray(source_sampler(key_src,
+                                                                           args.dump_count)))
+                bundle.setdefault("real_target", np.asarray(target_sampler(key_tgt,
+                                                                           args.dump_count)))
+                bundle.setdefault("noise", np.asarray(z))
+                for nfe in (1, 4):
+                    bundle[f"{arm}_nfe{nfe}"] = np.asarray(generate(trained, z, nfe))
 
     fields = sorted({key for row in rows for key in row})
     lead = ["arm", "seed", "step"]
@@ -432,6 +492,9 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nwrote {args.out} ({len(rows)} rows)")
+    if args.dump:
+        np.savez_compressed(args.dump, **bundle)
+        print(f"wrote {args.dump} ({len(bundle)} arrays)")
 
     # Two tables, because W2 is not monotone in step here and the last eval is not
     # necessarily the arm at its best. The selected table applies model selection *on the
@@ -441,10 +504,10 @@ def main():
     # unstable and that is the finding, not the number.
     summarise(rows, arms, seeds, lambda hits: max(hits, key=lambda r: r["step"]),
               f"final eval per arm, mean +- sd over {len(seeds)} seeds "
-              f"(W2 is exact, lower is better)")
+              f"(multi-scale MMD^2, lower is better)")
     summarise(rows, arms, seeds,
-              lambda hits: min(hits, key=lambda r: r["w2_nfe1"]),
-              "best-W2(NFE1) eval per arm (model selection on the metric, as in Stage 1's "
+              lambda hits: min(hits, key=lambda r: r["mmd_nfe1"]),
+              "best-MMD(NFE1) eval per arm (model selection on the metric, as in Stage 1's "
               "best-FID checkpoint)")
 
 
