@@ -1199,10 +1199,11 @@ def fig_single_vs_separate(sep_fwd, sep_onp, tcond_folder):
     axes[0].set_ylim(bottom=0)
     axes[1].legend(loc="upper left", fontsize=7.5)
     fig.suptitle("Five fixed-t models (solid) vs ONE t-conditioned model (dashed).  "
-                 "eps_rel 0.005, 5 seeds (mean ± sd), MMD on 10k points; "
-                 "both at 20k total training steps.",
+                 "eps_rel 0.005, 5 seeds (mean ± sd), MMD on 10k points.\n"
+                 "Fixed-t: 4k steps each (20k total). Single model: 20k steps. "
+                 "Neither is fully converged at every t (see EXP-135 caveats).",
                  fontsize=10, x=0.012, ha="left", color=INK)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig.savefig(os.path.join(FIGS, "fig18_single_vs_separate_mmd.png"))
     plt.close(fig)
 
