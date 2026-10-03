@@ -519,6 +519,105 @@ def fig_source_t_clouds(clouds):
     plt.close(fig)
 
 
+def fig_boomerang(clouds):
+    """Why a round blob comes out as an arc: squash + stretch (linear), then bend (quadratic).
+
+    The input and output arrays are paired point-for-point, so the map's local geometry can be
+    fitted directly instead of inferred from the output's shape. The ideal map here is a
+    rotation plus a uniform x1.2 scale, so its Jacobian is 1.200 / 1.200 everywhere and a round
+    blob must stay round. Every departure below is a defect, not a property of the problem.
+    """
+    num_modes, spread, scale, rot = 6, 0.25, 1.2, 0.5236
+    angles = 2.0 * np.pi * np.arange(num_modes) / num_modes
+    src_c = np.stack([3.0 * np.cos(angles), 3.0 * np.sin(angles)], 1)
+    x, y = clouds["src_t0_in_forward"], clouds["src_t0_out_forward"]
+    mode = np.argmin(((x[:, None] - src_c[None]) ** 2).sum(-1), 1)
+    ideal = scale * np.array([[np.cos(-rot), -np.sin(-rot)], [np.sin(-rot), np.cos(-rot)]])
+
+    fit = []
+    for m in range(num_modes):
+        xc = x[mode == m] - x[mode == m].mean(0)
+        yc = y[mode == m] - y[mode == m].mean(0)
+        a, *_ = np.linalg.lstsq(xc, yc, rcond=None)
+        sv = np.linalg.svd(a.T)[1]
+        fit.append((sv[0], sv[1], float((yc - xc @ a).std(0).mean()), xc, yc, a))
+
+    fig, axes = plt.subplots(1, 3, figsize=(13.2, 4.6))
+    # explicit margins, not tight_layout: it mis-sizes a row that holds an aspect-equal
+    # axes and leaves a band of dead space under every panel
+    fig.subplots_adjust(left=0.055, right=0.99, top=0.83, bottom=0.26, wspace=0.26)
+
+    # --- panel 1: the worst mode, in data units, drawn square so the shape is readable -------
+    ax = axes[0]
+    worst = int(np.argmax([f[0] / f[1] for f in fit]))
+    sv0, sv1, _, xc, yc, a = fit[worst]
+    circle = np.stack([np.cos(np.linspace(0, 2 * np.pi, 200)),
+                       np.sin(np.linspace(0, 2 * np.pi, 200))], 1) * 2 * spread
+    ax.scatter(xc[:, 0], xc[:, 1], s=5, c=AXIS, linewidths=0, zorder=1,
+               label="the input blob (std 0.25)")
+    ax.plot(*(circle @ ideal).T, color=INK2, linewidth=1.4, linestyle=(0, (5, 3)), zorder=4,
+            label="where the ideal map puts it: still round")
+    ax.scatter(*(xc @ a).T, s=5, c=CAT[1], linewidths=0, zorder=2,
+               label="the fitted LINEAR part: a line")
+    ax.scatter(yc[:, 0], yc[:, 1], s=5, c=CAT[0], linewidths=0, alpha=0.8, zorder=3,
+               label="what the model emits: a bent line")
+    style(ax, grid=False)
+    lim = 1.1 * np.abs(yc).max()
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect("equal")
+    ax.axhline(0, color=GRID, linewidth=0.8, zorder=0)
+    ax.axvline(0, color=GRID, linewidth=0.8, zorder=0)
+    ax.set_title(f"source mode {worst}, the worst one.\nIts Jacobian is {sv0:.2f} by {sv1:.2f}.",
+                 fontsize=9.5, loc="left")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.46), fontsize=7.5, labelcolor=INK2,
+              frameon=False)
+
+    # --- panel 2: the squash, in the same units as the ideal gain ----------------------------
+    index = np.arange(num_modes, dtype=float)
+    ax = axes[1]
+    ax.bar(index - 0.21, [f[0] for f in fit], 0.4, color=CAT[1], zorder=2,
+           label="gain along the stretched axis")
+    ax.bar(index + 0.21, [f[1] for f in fit], 0.4, color=CAT[0], zorder=2,
+           label="gain along the squashed axis")
+    ax.axhline(scale, color=MUTED, linewidth=1.0, linestyle=(0, (4, 3)), zorder=3)
+    ax.text(num_modes - 0.4, scale + 0.08, f"both should be {scale:.2f}", fontsize=8,
+            color=INK2, ha="right", va="bottom")
+    style(ax)
+    ax.set_xticks(index)
+    ax.set_xticklabels([f"{m}" for m in range(num_modes)], fontsize=8, color=INK2)
+    ax.set_xlabel("source mode", fontsize=8.5)
+    ax.set_ylabel("local gain of the fitted map", fontsize=8.5)
+    ax.set_ylim(0, 3.3)
+    ax.legend(loc="upper left", fontsize=8, labelcolor=INK2, frameon=False)
+    ax.set_title("The squash. One axis is stretched 2-3x,\nthe other is crushed to nearly zero.",
+                 fontsize=9.5, loc="left")
+
+    # --- panel 3: the bend, in data units against the blob it is supposed to preserve --------
+    ax = axes[2]
+    ax.bar(index, [f[2] for f in fit], 0.56, color=CAT[0], zorder=2)
+    ax.axhline(spread, color=MUTED, linewidth=1.0, linestyle=(0, (4, 3)), zorder=3)
+    ax.text(num_modes - 0.4, spread + 0.006, f"the blob's own std, {spread:.2f}", fontsize=8,
+            color=INK2, ha="right", va="bottom")
+    for xi, f in zip(index, fit):
+        ax.text(xi, f[2] + 0.004, f"{f[2]:.2f}", ha="center", va="bottom", fontsize=7.5,
+                color=INK2)
+    style(ax)
+    ax.set_xticks(index)
+    ax.set_xticklabels([f"{m}" for m in range(num_modes)], fontsize=8, color=INK2)
+    ax.set_xlabel("source mode", fontsize=8.5)
+    ax.set_ylabel("curvature left over the linear fit", fontsize=8.5)
+    ax.set_ylim(0, 0.30)
+    ax.set_title("The bend. What no linear map explains, and it is\nas big as the blob itself.",
+                 fontsize=9.5, loc="left")
+
+    fig.suptitle("Why the t=0 outputs are boomerangs and not Gaussians: the map crushes the blob "
+                 "onto a line, then bends the line. The ideal map would do neither.",
+                 fontsize=10, x=0.008, y=0.965, ha="left", color=INK)
+    fig.savefig(os.path.join(FIGS, "fig10_boomerang.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -562,7 +661,9 @@ def main():
 
     src = rows("toy_source_t.csv")
     final, seeds = fig_source_t_arms(src)
-    fig_source_t_clouds(np.load(os.path.join(DATA, "toy_source_t_clouds.npz")))
+    src_clouds = np.load(os.path.join(DATA, "toy_source_t_clouds.npz"))
+    fig_source_t_clouds(src_clouds)
+    fig_boomerang(src_clouds)
     report_paired(final, seeds)
 
     print("CAMF cub200 best:", best)

@@ -103,6 +103,32 @@ def section_decompose(label, src_mode, points):
           f"-> rms {np.sqrt(max(shape - ideal, 0)):.3f}")
 
 
+def section_jacobian(label, src_mode, points, inputs):
+    """fit the map's LOCAL geometry per mode, instead of guessing it from the output's shape.
+
+    Inputs and outputs are paired point-for-point, so `yc ~ xc @ A` is a direct least-squares
+    read of the Jacobian. The ideal map is a rotation by -30 deg plus a x1.2 scale, so its
+    Jacobian is 1.200 / 1.200 EVERYWHERE: zero squash, zero bend, a round blob stays round.
+    Anything else below is a defect of the learned map, not a property of the problem.
+    """
+    print(f"\n[{label}] local geometry of the map. ideal is {TGT_SCALE:.3f} / {TGT_SCALE:.3f}, "
+          "residual 0.")
+    print("  src    n   fitted Jacobian   cond   linear R2   residual std   of which quadratic")
+    for s in range(NUM_MODES):
+        xc = inputs[src_mode == s] - inputs[src_mode == s].mean(0)
+        yc = points[src_mode == s] - points[src_mode == s].mean(0)
+        fitted, *_ = np.linalg.lstsq(xc, yc, rcond=None)
+        sv = np.linalg.svd(fitted.T)[1]
+        residual = yc - xc @ fitted
+        r2 = 1.0 - (residual ** 2).sum() / (yc ** 2).sum()
+        # how much of what the linear fit missed is a plain quadratic in the input
+        quad = np.concatenate([xc, xc ** 2, (xc[:, :1] * xc[:, 1:])], 1)
+        coef, *_ = np.linalg.lstsq(quad, residual, rcond=None)
+        quad_share = 1.0 - ((residual - quad @ coef) ** 2).sum() / (residual ** 2).sum()
+        print(f"  {s}  {xc.shape[0]:4d}   {sv[0]:.2f} / {sv[1]:.2f}      {sv[0] / sv[1]:5.1f}   "
+              f"{r2:9.3f}   {residual.std(0).mean():12.3f}   {quad_share:17.1%}")
+
+
 def main():
     d = np.load("data/toy_source_t_clouds.npz")
     real_target = d["real_target"]
@@ -133,6 +159,7 @@ def main():
         section_mass(arm, src_mode, assign(out, TGT_C))
         section_shape(arm, src_mode, out)
         section_decompose(arm, src_mode, out)
+        section_jacobian(arm, src_mode, out, d[f"{arm}_in_forward"])
 
     print("\n" + "=" * 88)
     print("is the stretching specific to t=0?  per-TARGET-mode output spread, every arm.")
