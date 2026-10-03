@@ -185,6 +185,17 @@ def mode_mutual_info(source_labels, outputs, centres):
     return float(np.sum(joint[live] * np.log2(joint[live] / (px @ py)[live])))
 
 
+def frechet(x, y):
+    """FID-style W2^2 between Gaussians fitted to the two sets. No point matching, so unlike
+    `exact_w2` it is not dominated by chance per-mode counts at small n."""
+    from scipy.linalg import sqrtm
+
+    x_np, y_np = np.asarray(x, np.float64), np.asarray(y, np.float64)
+    cov_x, cov_y = np.cov(x_np.T), np.cov(y_np.T)
+    return float(((x_np.mean(0) - y_np.mean(0)) ** 2).sum()
+                 + np.trace(cov_x + cov_y - 2.0 * np.real(sqrtm(cov_x @ cov_y))))
+
+
 def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, head,
              centres, args):
     key_in, key_z, key_y = jax.random.split(rng, 3)
@@ -194,6 +205,7 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
     x_fwd, labels = forward_noised(key_in, source_sampler, args.eval_count, t_level)
     out_fwd = one_step(params, x_fwd, t_level, head)
     row = {"w2_forward": toy.exact_w2(out_fwd, y)[0],
+           "fd_forward": frechet(out_fwd, y),
            "mode_mi": mode_mutual_info(labels, out_fwd, centres),
            "out_spread": float(np.asarray(out_fwd, np.float64).std(0).mean()),
            "target_spread": float(y_np.std(0).mean())}
@@ -201,8 +213,9 @@ def evaluate(params, base_params, rng, source_sampler, target_sampler, t_level, 
     z = jax.random.normal(key_z, (args.eval_count, 2), jnp.float32)
     for nfe in SRC_NFE:
         state = source_state(base_params, z, t_level, nfe)
-        row[f"w2_onpolicy_src{nfe}"] = toy.exact_w2(one_step(params, state, t_level, head),
-                                                   y)[0]
+        out_on = one_step(params, state, t_level, head)
+        row[f"w2_onpolicy_src{nfe}"] = toy.exact_w2(out_on, y)[0]
+        row[f"fd_onpolicy_src{nfe}"] = frechet(out_on, y)
     # how far the test-time input is from the one training showed the model
     row["input_shift"] = toy.exact_w2(source_state(base_params, z, t_level, max(SRC_NFE)),
                                       x_fwd)[0]
@@ -235,8 +248,9 @@ def run_arm(name, params, base_params, source_sampler, target_sampler, t_level, 
                                 target_sampler, t_level, head, centres, args))
             rows.append(row)
             print(f"  s{seed} {name:14s} step {index:5d}  "
+                  f"FD(fwd)={row['fd_forward']:.4f}  "
+                  f"FD(src1)={row['fd_onpolicy_src1']:.4f}  "
                   f"W2(fwd)={row['w2_forward']:.4f}  "
-                  f"W2(src4)={row['w2_onpolicy_src4']:.4f}  "
                   f"MI={row['mode_mi']:.3f}b  "
                   f"spread={row['out_spread']:.2f}/{row['target_spread']:.2f}", flush=True)
         if index == args.adapt_steps:
@@ -259,9 +273,9 @@ ARMS = {
 
 
 def summarise(rows, arms, seeds):
-    keys = ["w2_forward"] + [f"w2_onpolicy_src{n}" for n in SRC_NFE] + \
-           ["mode_mi", "out_spread", "input_shift"]
-    print("\nfinal eval per arm, mean +- sd over %d seeds (W2 exact, lower better):" %
+    keys = ["fd_forward"] + [f"fd_onpolicy_src{n}" for n in SRC_NFE] + \
+           ["w2_forward", "w2_onpolicy_src4", "mode_mi", "out_spread", "input_shift"]
+    print("\nfinal eval per arm, mean +- sd over %d seeds (FD and W2^2, lower better):" %
           len(seeds))
     print(f"{'arm':12s}{'t':>5s}{'head':>10s}" + "".join(f"{k:>20s}" for k in keys))
     for arm in arms:
@@ -297,6 +311,10 @@ def main():
                         help="each seed repeats the source pretrain too, so the prior "
                              "differs per seed; 3 seeds could not rank EXP-086's arms")
     parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--t-levels", default="",
+                        help="extra source-init unit-head arms src_t<t>, e.g. 0,0.25,0.5")
+    parser.add_argument("--dump-src-nfe", type=int, default=max(SRC_NFE),
+                        help="source-model steps for the dumped on-policy input")
     parser.add_argument("--out", required=True)
     parser.add_argument("--dump", default="", help="optional .npz of seed-0 point clouds")
     args = parser.parse_args()
@@ -304,6 +322,8 @@ def main():
     source_sampler, target_sampler = labelled_samplers(args)
     plain_source, _ = toy.make_samplers(args)   # unlabelled, for the MeanFlow pretrain
     centres = target_centres(args)
+    for level in [float(v) for v in args.t_levels.split(",") if v]:
+        ARMS.setdefault(f"src_t{level:g}", (level, "unit", "source"))
     arms = [a for a in args.arms.split(",") if a]
     seeds = [int(v) for v in args.seeds.split(",") if v]
     for arm in arms:
@@ -346,7 +366,7 @@ def main():
                 rng, key_in, key_z = jax.random.split(rng, 3)
                 x_fwd, _ = forward_noised(key_in, source_sampler, 2048, t_level)
                 z = jax.random.normal(key_z, (2048, 2), jnp.float32)
-                state = source_state(source_params, z, t_level, max(SRC_NFE))
+                state = source_state(source_params, z, t_level, args.dump_src_nfe)
                 bundle[f"{arm}_in_forward"] = np.asarray(x_fwd)
                 bundle[f"{arm}_in_onpolicy"] = np.asarray(state)
                 bundle[f"{arm}_out_forward"] = np.asarray(
