@@ -1208,6 +1208,139 @@ def fig_single_vs_separate(sep_fwd, sep_onp, tcond_folder):
     plt.close(fig)
 
 
+# =========================================================================================
+# Figures 19-21 -- EXP-136: the distribution zoo, one t-conditioned model per cell
+# =========================================================================================
+ZOO_TEST = {"forward": ("mmd_forward", "mode_err_forward", "out_forward",
+                        "forward-noised (off-policy) input"),
+            "onpolicy": ("mmd_onpolicy_grid", "mode_err_onpolicy_grid", "out_onpolicy",
+                         "on-policy input (MeanFlow at step 0.25)")}
+
+
+def zoo_rows(root, cell, variant):
+    rows_all = []
+    folder = os.path.join(root, cell)
+    for name in sorted(os.listdir(folder)):
+        if name.startswith(f"tcond_{variant}_s") and name.endswith(".csv"):
+            rows_all += [r for r in csv.DictReader(open(os.path.join(folder, name)))
+                         if r["arm"] == "tcond"]
+    last = max(int(r["step"]) for r in rows_all)
+    return {t: [r for r in rows_all if int(r["step"]) == last
+                and abs(float(r["t_level"]) - float(t)) < 1e-9] for t in T_SWEEP}
+
+
+def zoo_floor(cell_obj, target, draws=5):
+    """MMD x 1e3 of fresh target draws (same n) against the dumped target set."""
+    import jax
+
+    vals = [mmd_e3(np.asarray(cell_obj.target(jax.random.PRNGKey(900 + i),
+                                               target.shape[0])[0]), target)
+            for i in range(draws)]
+    return float(np.mean(vals)), float(np.std(vals))
+
+
+def fig_zoo_gallery(root, variant, test):
+    """Rows = cells, cols = the cell's source/target, then the output at each t (seed 0)."""
+    import ot_toy_zoo as zoo
+
+    metric, _, suffix, test_label = ZOO_TEST[test]
+    cells = [c for c in zoo.CELLS if os.path.isdir(os.path.join(root, c))]
+    fig, axes = plt.subplots(len(cells), 1 + len(T_SWEEP),
+                             figsize=(2.05 * (1 + len(T_SWEEP)), 2.05 * len(cells)))
+    for row, cell in enumerate(cells):
+        bundle = np.load(os.path.join(root, cell, f"tcond_{variant}_clouds.npz"))
+        target, source = bundle["real_target"], bundle["real_source"]
+        table = zoo_rows(root, cell, variant)
+        floor, floor_sd = zoo_floor(zoo.CELLS[cell], target)
+        for col in range(1 + len(T_SWEEP)):
+            ax = axes[row, col]
+            if col == 0:
+                ax.scatter(*source[:SHOW].T, s=2, c=AXIS, linewidths=0, zorder=1)
+                ax.scatter(*target[:SHOW].T, s=2, c=CAT[2], alpha=0.5, linewidths=0, zorder=2)
+                ax.set_ylabel(f"{cell}\n{zoo.CELLS[cell].shift}", fontsize=7.5, color=INK)
+                ax.text(0.03, 0.03, "floor %.2f ± %.2f" % (floor, floor_sd),
+                        transform=ax.transAxes, fontsize=6.5, color=MUTED, va="bottom")
+            else:
+                t = T_SWEEP[col - 1]
+                pts = bundle[f"tcond_t{float(t):g}_{suffix}"]
+                ax.scatter(*target[:SHOW].T, s=2, c=AXIS, linewidths=0, zorder=1)
+                ax.scatter(*pts[:SHOW].T, s=2, c=CAT[0], alpha=0.55, linewidths=0, zorder=2)
+                vals = np.array([1e3 * float(r[metric]) for r in table[t]])
+                ax.text(0.03, 0.03, "%.2f ± %.2f" % (vals.mean(), vals.std()),
+                        transform=ax.transAxes, fontsize=7, color=INK, va="bottom")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect("equal", adjustable="datalim")
+            for side in ax.spines.values():
+                side.set_color(AXIS)
+            if row == 0:
+                ax.set_title("source (gray)\ntarget (green)" if col == 0
+                             else f"t = {T_SWEEP[col - 1]}", fontsize=8.5, color=INK)
+    fig.suptitle("ONE t-conditioned OT model per cell, trained on the %s input, tested on the "
+                 "%s.\nBlue = output (seed 0), gray = target. Number = MMD² × 10³, 5-seed "
+                 "mean ± sd on 10k points; col 1 shows a perfect generator's score."
+                 % ("ON-POLICY" if variant == "onpolicy" else "forward-noised", test_label),
+                 fontsize=9.5, x=0.01, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.965))
+    fig.savefig(os.path.join(FIGS, f"fig19_zoo_trained_{variant}_tested_{test}.png"))
+    plt.close(fig)
+
+
+def fig_zoo_summary(root, which):
+    """Small multiples, one per cell: a fig-16 panel pair folded into one axis.
+
+    Colour = train input, line style = test input. y-scales differ between cells (each
+    panel is its own chart; read within a panel, not across).
+    """
+    import ot_toy_zoo as zoo
+
+    cells = [c for c in zoo.CELLS if os.path.isdir(os.path.join(root, c))]
+    if which == "mode_err":
+        cells = [c for c in cells if zoo.CELLS[c].target_centres is not None]
+    x = np.arange(len(T_SWEEP), dtype=float)
+    ncol = 5
+    nrow = int(np.ceil(len(cells) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 2.9 * nrow), squeeze=False)
+    for ax, cell in zip(axes.ravel(), cells):
+        for v, (variant, color, marker) in enumerate((("forward", CAT[0], "o"),
+                                                      ("onpolicy", CAT[1], "s"))):
+            table = zoo_rows(root, cell, variant)
+            for test, ls in (("onpolicy", "-"), ("forward", "--")):
+                mmd_key, err_key = ZOO_TEST[test][:2]
+                key = mmd_key if which == "mmd" else err_key
+                scale = 1e3 if which == "mmd" else 1.0
+                vals = np.array([[scale * float(r[key]) for r in table[t]] for t in T_SWEEP])
+                mean, sd = vals.mean(1), vals.std(1)
+                dx = (2 * v + (test == "forward") - 1.5) * 0.05
+                ax.errorbar(x + dx, mean, yerr=sd, fmt="none", ecolor=color, elinewidth=0.9,
+                            capsize=2, alpha=0.55, zorder=2)
+                ax.plot(x + dx, mean, color=color, linestyle=ls, linewidth=1.8, marker=marker,
+                        markersize=5.5, markerfacecolor=color if ls == "-" else SURFACE,
+                        markeredgecolor=color, zorder=3,
+                        label=f"trained {'on-policy' if variant == 'onpolicy' else 'forward'}"
+                              f", tested {'on-policy' if test == 'onpolicy' else 'forward'}")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{t}" for t in T_SWEEP], fontsize=7.5)
+        ax.set_xlabel("t", fontsize=8)
+        ax.set_ylim(bottom=0)
+        ax.set_title(f"{cell}\n{zoo.CELLS[cell].shift}", fontsize=8.5, color=INK)
+        ax.tick_params(labelsize=7.5)
+        style(ax)
+    for ax in axes.ravel()[len(cells):]:
+        ax.set_visible(False)
+    axes[0, 0].legend(loc="upper left", fontsize=6.5)
+    what = ("MMD² × 10³ to the target" if which == "mmd"
+            else "mode-weight error (TV of per-mode share; 0 = perfect)")
+    fig.suptitle(f"{what}, vs t.  One t-conditioned OT model per cell; colour = train input, "
+                 "solid = tested on-policy, dashed = tested forward-noised.\n5 seeds, mean ± sd, "
+                 "10k points.  y-scales differ between panels.",
+                 fontsize=9.5, x=0.01, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig20_zoo_summary_mmd.png" if which == "mmd"
+                             else "fig21_zoo_summary_mode_err.png"))
+    plt.close(fig)
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -1236,6 +1369,7 @@ def main():
     parser.add_argument("--t-sweep", default="", help="EXP-128 folder; only fig 14 is drawn")
     parser.add_argument("--fig2b", default="", help="EXP-130 folder; only fig 2b is drawn")
     parser.add_argument("--fig12", default="", help="EXP-132 folder; only fig 12 is drawn")
+    parser.add_argument("--zoo", default="", help="EXP-136 root; figs 19-21 are drawn")
     parser.add_argument("--fig16", nargs=2, default=None, metavar=("FWD", "ONPOLICY"),
                         help="EXP-131 and EXP-134 folders; only fig 16 is drawn")
     parser.add_argument("--fig17-18", nargs=3, default=None,
@@ -1245,6 +1379,13 @@ def main():
     DATA, FIGS = parsed.data, parsed.out
 
     os.makedirs(FIGS, exist_ok=True)
+    if parsed.zoo:
+        for variant in ("forward", "onpolicy"):
+            for test in ("forward", "onpolicy"):
+                fig_zoo_gallery(parsed.zoo, variant, test)
+        fig_zoo_summary(parsed.zoo, "mmd")
+        fig_zoo_summary(parsed.zoo, "mode_err")
+        return
     if parsed.fig16:
         fig_train_test_inputs(*parsed.fig16)
         return
