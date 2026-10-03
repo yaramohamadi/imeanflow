@@ -618,6 +618,123 @@ def fig_boomerang(clouds):
     plt.close(fig)
 
 
+# =========================================================================================
+# Figure 11 -- EXP-127: the entropic blur was the ceiling, and it was set 20x too coarse
+# =========================================================================================
+EPS_LEVELS = ["0.05", "0.02", "0.005", "0.0025", "0.001"]
+EPS_ARMS = [("src_t1", "t=1", CAT[0]), ("src_t0", "t=0", CAT[1])]
+
+
+def fig_eps_sweep():
+    """One knob, three panels: train-matched W2 moves a lot, on-policy W2 does not, shape heals.
+
+    x is `eps_rel`, the knob we actually set. The blur it buys is `sqrt(eps_rel * mean cost)`,
+    printed per point in the third panel because it is the quantity that matters and it is not
+    linear in the knob.
+    """
+    spread, scale, rot, num_modes = 0.25, 1.2, 0.5236, 6
+    angles = 2.0 * np.pi * np.arange(num_modes) / num_modes
+    src_c = np.stack([3.0 * np.cos(angles), 3.0 * np.sin(angles)], 1)
+    ta = angles + rot
+    tgt_c = np.stack([3.0 * scale * np.cos(ta) + 1.0, 3.0 * scale * np.sin(ta)], 1)
+
+    def near(points, centres):
+        return np.argmin(((points[:, None] - centres[None]) ** 2).sum(-1), 1)
+
+    w2 = {}
+    geom = {}
+    for level in EPS_LEVELS:
+        table = rows(os.path.join("eps_sweep", f"eps_{level}.csv"))
+        last = max(int(r["step"]) for r in table)
+        for arm, _, _ in EPS_ARMS:
+            sel = [r for r in table if r["arm"] == arm and int(r["step"]) == last]
+            for metric in ("w2_forward", "w2_onpolicy_src4"):
+                vals = [num(r[metric]) for r in sel if num(r[metric]) is not None]
+                w2[(arm, level, metric)] = float(np.mean(vals))
+        cloud = np.load(os.path.join(DATA, "eps_sweep", f"eps_{level}_clouds.npz"))
+        x, y, real = (cloud["src_t0_in_forward"], cloud["src_t0_out_forward"],
+                      cloud["real_target"])
+        blur = float(np.sqrt(float(level) * ((y[:, None] - real[None]) ** 2).sum(-1).mean()))
+        mode, cond = near(x, src_c), []
+        for m in range(num_modes):
+            xc = x[mode == m] - x[mode == m].mean(0)
+            yc = y[mode == m] - y[mode == m].mean(0)
+            a, *_ = np.linalg.lstsq(xc, yc, rcond=None)
+            sv = np.linalg.svd(a.T)[1]
+            cond.append(sv[0] / sv[1])
+        out_mode, rad, tan = near(y, tgt_c), [], []
+        for t in range(num_modes):
+            pts = y[out_mode == t]
+            if pts.shape[0] < 20:
+                continue
+            centred = pts - pts.mean(0)
+            v = tgt_c[t] - np.array([1.0, 0.0])
+            r = v / np.linalg.norm(v)
+            rad.append((centred @ r).std())
+            tan.append((centred @ np.array([-r[1], r[0]])).std())
+        geom[level] = (blur, float(np.mean(cond)), float(np.mean(rad)), float(np.mean(tan)))
+
+    xs = np.array([float(e) for e in EPS_LEVELS])
+    fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2))
+
+    for ax, metric, caption in [
+            (axes[0], "w2_forward", "Train-matched: tightening is worth 1.6x at t=1,\nuntil it collapses t=0."),
+            (axes[1], "w2_onpolicy_src4",
+             "On-policy, the real test condition:\nthe knob buys nothing at all.")]:
+        for arm, label, colour in EPS_ARMS:
+            ys = [w2[(arm, e, metric)] for e in EPS_LEVELS]
+            ax.plot(xs, ys, color=colour, linewidth=2.0, marker="o", markersize=6,
+                    markeredgecolor=SURFACE, markeredgewidth=2, label=label, zorder=3)
+        style(ax)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        # coarse on the left, fine on the right: left to right is "turn the blur down"
+        ax.invert_xaxis()
+        ax.set_xticks(xs)
+        ax.set_xticklabels(EPS_LEVELS, fontsize=8, color=INK2)
+        ax.minorticks_off()
+        ax.set_xlabel("eps_rel  (the blur gets finer to the right)", fontsize=8.5)
+        ax.set_ylabel("W2 to the target", fontsize=8.5)
+        ax.set_yticks([0.2, 0.3, 0.5, 1, 2, 4])
+        ax.set_yticklabels(["0.2", "0.3", "0.5", "1", "2", "4"])
+        ax.set_title(caption, fontsize=9.5, loc="left")
+        ax.legend(loc="lower left", labelcolor=INK2, frameon=False, fontsize=8)
+
+    # the shape panel: everything in data units, against the blob the loss has to resolve
+    ax = axes[2]
+    rad = [geom[e][2] for e in EPS_LEVELS]
+    tan = [geom[e][3] for e in EPS_LEVELS]
+    ax.plot(xs, tan, color=CAT[1], linewidth=2.0, marker="o", markersize=6,
+            markeredgecolor=SURFACE, markeredgewidth=2, label="output std, long axis", zorder=3)
+    ax.plot(xs, rad, color=CAT[0], linewidth=2.0, marker="o", markersize=6,
+            markeredgecolor=SURFACE, markeredgewidth=2, label="output std, short axis", zorder=3)
+    ax.axhline(spread, color=MUTED, linewidth=1.0, linestyle=(0, (4, 3)), zorder=1)
+    ax.text(xs.max(), spread * 0.90, f"the target's own blob, {spread:.2f}", fontsize=8,
+            color=INK2, ha="left", va="top")
+    style(ax)
+    ax.set_xscale("log")
+    ax.invert_xaxis()
+    ax.set_xticks(xs)
+    # the knob, the blur it buys, and the squash it leaves -- all three belong on this axis
+    ax.set_xticklabels([f"{e}\nblur {geom[e][0]:.2f}\ncond {geom[e][1]:.1f}"
+                        for e in EPS_LEVELS], fontsize=7.5, color=INK2)
+    ax.minorticks_off()
+    ax.set_xlabel("eps_rel  (the blur gets finer to the right)", fontsize=8.5)
+    ax.set_ylabel("t=0 output blob std, data units", fontsize=8.5)
+    ax.set_ylim(0, 0.88)
+    ax.legend(loc="lower right", labelcolor=INK2, frameon=False, fontsize=8)
+    ax.set_title("The boomerang heals at eps_rel 0.005:\nround blobs, the right size.",
+                 fontsize=9.5, loc="left")
+
+    fig.suptitle("EXP-127. The crescents were the objective's resolution limit, not the model's. "
+                 "Fixing them does not change which arm wins.",
+                 fontsize=10, x=0.008, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(os.path.join(FIGS, "fig11_eps_sweep.png"))
+    plt.close(fig)
+    return geom
+
+
 def report_paired(final, seeds):
     """Paired per-seed contrasts. Seeds share a pretrain, so pairing is the powerful test."""
     def col(arm, key):
@@ -664,8 +781,11 @@ def main():
     src_clouds = np.load(os.path.join(DATA, "toy_source_t_clouds.npz"))
     fig_source_t_clouds(src_clouds)
     fig_boomerang(src_clouds)
+    geom = fig_eps_sweep()
     report_paired(final, seeds)
 
+    for level, (blur, cond, rad, tan) in geom.items():
+        print("eps %-7s blur %.2f  cond %.1f  std %.3f / %.3f" % (level, blur, cond, rad, tan))
     print("CAMF cub200 best:", best)
     for key in sorted(finals):
         print("final W2", key, "mean=%.4f std=%.4f @step %d" % finals[key])
