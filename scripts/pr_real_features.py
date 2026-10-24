@@ -9,6 +9,8 @@ Usage: python scripts/pr_real_features.py <image_root_with_class_dirs> <out_pref
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 from PIL import Image
 from torchvision import datasets
