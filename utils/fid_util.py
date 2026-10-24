@@ -137,10 +137,13 @@ def _gather_feature_matrix(features, local_device_count=LDC):
     return jax.device_get(all_features)
 
 
+_DUMP_COUNTS = {}
+
+
 def _maybe_dump_features(features, kind):
     """Save raw eval features when FID_DUMP_FEATURES_PREFIX is set (for precision/recall).
 
-    Writes <prefix>_<kind>.npy (float32, [N, D]). No-op when the variable is unset.
+    Writes <prefix>_<kind>_pass<N>.npy (float32, [N, D]), N counting calls per kind. No-op when the variable is unset.
     """
     prefix = os.environ.get("FID_DUMP_FEATURES_PREFIX", "")
     if not prefix or jax.process_index() != 0:
@@ -148,7 +151,10 @@ def _maybe_dump_features(features, kind):
     out_dir = os.path.dirname(prefix)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    path = f"{prefix}_{kind}.npy"
+    # One file per call: an eval may score several weight sets (e.g. EMA then online).
+    n = _DUMP_COUNTS.get(kind, 0)
+    _DUMP_COUNTS[kind] = n + 1
+    path = f"{prefix}_{kind}_pass{n}.npy"
     np.save(path, np.asarray(features, dtype=np.float32))
     log_for_0(f"Saved {kind} features {np.shape(features)} to {path}")
 
