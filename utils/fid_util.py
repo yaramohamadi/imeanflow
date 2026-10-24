@@ -137,6 +137,22 @@ def _gather_feature_matrix(features, local_device_count=LDC):
     return jax.device_get(all_features)
 
 
+def _maybe_dump_features(features, kind):
+    """Save raw eval features when FID_DUMP_FEATURES_PREFIX is set (for precision/recall).
+
+    Writes <prefix>_<kind>.npy (float32, [N, D]). No-op when the variable is unset.
+    """
+    prefix = os.environ.get("FID_DUMP_FEATURES_PREFIX", "")
+    if not prefix or jax.process_index() != 0:
+        return
+    out_dir = os.path.dirname(prefix)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    path = f"{prefix}_{kind}.npy"
+    np.save(path, np.asarray(features, dtype=np.float32))
+    log_for_0(f"Saved {kind} features {np.shape(features)} to {path}")
+
+
 def _compute_gaussian_stats(features):
     features_64 = features.astype(np.float64)
     mu = np.mean(features_64, axis=0)
@@ -194,6 +210,7 @@ def compute_stats(
         f"FID final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
     )
     all_feats = all_feats[:fid_samples]
+    _maybe_dump_features(all_feats, "inception")
     result = _compute_gaussian_stats(all_feats)
 
     np_logits = jnp.concatenate(l_logits)
@@ -246,6 +263,7 @@ def compute_dinov2_stats(
         f"FD-DINO final samples: {all_feats.shape[0]} samples -> {fid_samples} samples"
     )
     all_feats = all_feats[:fid_samples]
+    _maybe_dump_features(all_feats, "dinov2")
     return _compute_gaussian_stats(all_feats)
 
 
