@@ -68,7 +68,7 @@ def get_config():
     training.ema_val = 0.9999
 
     training.lr_schedule = "warmup_const"
-    training.warmup_epochs = 0
+    training.warmup_epochs = 0.0  # float so configs may use fractional epochs
 
     # ------------------------------------------------------------
     # MeanFlow

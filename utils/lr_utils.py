@@ -60,7 +60,7 @@ def lr_schedules(config, steps_per_epoch):
       optax.Schedule (callable step -> lr)
     """
     base_lr = float(config.training.learning_rate)
-    warmup_epochs = int(config.training.get("warmup_epochs", 0))
+    warmup_epochs = float(config.training.get("warmup_epochs", 0))
     schedule_kind = config.training.get("lr_schedule", "warmup_const")
 
     if schedule_kind == "warmup_const":
