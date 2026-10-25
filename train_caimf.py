@@ -243,6 +243,8 @@ def discriminator_train_step(
     interval_eps,
     freeze_backbone,
     distributed,
+    score_mode="full",
+    interval_cap=1.0,
 ):
     rng_step = random.fold_in(rng_init, state.step)
     if distributed:
@@ -256,6 +258,7 @@ def discriminator_train_step(
         labels=labels,
         current_step=state.step,
         interval_eps=interval_eps,
+        interval_cap=interval_cap,
         rngs={"gen": rng_gen},
         method=model.forward_caimf_discriminator_samples,
     )
@@ -263,7 +266,7 @@ def discriminator_train_step(
 
     def loss_fn(dis_params):
         real_logit, fake_logit, potentials = finite_interval_logits(
-            discriminator, dis_params, samples
+            discriminator, dis_params, samples, score_mode=score_mode
         )
         return discriminator_loss(
             real_logit, fake_logit, potentials, lambda_cp=lambda_cp, cp_mode=cp_mode
@@ -306,6 +309,8 @@ def generator_train_step(
     use_ema,
     ema_decay,
     distributed,
+    score_mode="full",
+    interval_cap=1.0,
 ):
     rng_step = random.fold_in(rng_init, state.step)
     if distributed:
@@ -322,12 +327,13 @@ def generator_train_step(
             teacher_params=state.ema_params,
             current_step=state.step,
             interval_eps=interval_eps,
+            interval_cap=interval_cap,
             rngs={"gen": rng_gen},
             method=model.forward_caimf_generator_terms,
         )
         if lambda_adv > 0.0:
             fake_logit = finite_fake_logit(
-                discriminator, state.dis_params, terms
+                discriminator, state.dis_params, terms, score_mode=score_mode
             )
         else:
             fake_logit = jnp.zeros((images.shape[0],), dtype=images.dtype)
@@ -537,6 +543,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         interval_eps=float(ca_cfg.interval_eps),
         freeze_backbone=bool(ca_cfg.freeze_discriminator_backbone),
         distributed=distributed,
+        score_mode=str(ca_cfg.get("score_mode", "full")),
+        interval_cap=float(ca_cfg.get("interval_cap", 1.0)),
     )
     common_g = dict(
         rng_init=rng,
@@ -550,6 +558,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         use_ema=bool(config.training.use_ema),
         ema_decay=float(config.training.ema_val),
         distributed=distributed,
+        score_mode=str(ca_cfg.get("score_mode", "full")),
+        interval_cap=float(ca_cfg.get("interval_cap", 1.0)),
     )
     if distributed:
         p_dis_step = jax.pmap(

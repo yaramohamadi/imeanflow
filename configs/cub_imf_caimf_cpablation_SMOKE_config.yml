@@ -27,6 +27,8 @@ caimf:
     lambda_ot: 0.0
     lambda_cp: 0.001
     cp_mode: full            # overridden per-variant on the CLI (--config.caimf.cp_mode=...)
+    score_mode: full
+    interval_cap: 1.0
     interval_eps: 0.001
     gen_learning_rate: 0.00001
     dis_learning_rate: 0.00001

@@ -947,7 +947,7 @@ class iMeanFlow(nn.Module):
         fm_mask = jnp.zeros((bz, 1, 1, 1), dtype=bool)
         return t, r, fm_mask
 
-    def sample_caimf_tr(self, bz, interval_eps=1e-3):
+    def sample_caimf_tr(self, bz, interval_eps=1e-3, interval_cap=1.0):
         """Sample a non-degenerate interval for adversarial finite differences."""
         if self._uses_sit_dmf_time_convention():
             raise ValueError(
@@ -959,6 +959,8 @@ class iMeanFlow(nn.Module):
         t = jnp.maximum(t, eps)
         r = jnp.minimum(r, t - eps)
         r = jnp.maximum(r, 0.0)
+        # Interval-width ablation: cap t - r. The default 1.0 is a no-op (t - r <= 1).
+        r = jnp.maximum(r, t - jnp.asarray(interval_cap, dtype=self.dtype))
         fm_mask = jnp.zeros((bz, 1, 1, 1), dtype=bool)
         return t, r, fm_mask
 
@@ -1740,6 +1742,7 @@ class iMeanFlow(nn.Module):
         teacher_params=None,
         current_step=None,
         interval_eps=1e-3,
+        interval_cap=1.0,
     ):
         """Compute iMF loss and finite-interval samples in one generator pass."""
         if not self._uses_plain_imf_dit_backbone():
@@ -1749,7 +1752,9 @@ class iMeanFlow(nn.Module):
 
         x = images.astype(self.dtype)
         bz = images.shape[0]
-        t, r, fm_mask = self.sample_caimf_tr(bz, interval_eps=interval_eps)
+        t, r, fm_mask = self.sample_caimf_tr(
+            bz, interval_eps=interval_eps, interval_cap=interval_cap
+        )
 
         e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
         z_t = (1.0 - t) * x + t * e
@@ -1836,6 +1841,7 @@ class iMeanFlow(nn.Module):
         labels,
         current_step=None,
         interval_eps=1e-3,
+        interval_cap=1.0,
     ):
         """Generate real and reconstructed interval endpoints for a D update."""
         if not self._uses_plain_imf_dit_backbone():
@@ -1845,7 +1851,9 @@ class iMeanFlow(nn.Module):
 
         x = images.astype(self.dtype)
         bz = images.shape[0]
-        t, r, fm_mask = self.sample_caimf_tr(bz, interval_eps=interval_eps)
+        t, r, fm_mask = self.sample_caimf_tr(
+            bz, interval_eps=interval_eps, interval_cap=interval_cap
+        )
         e = jax.random.normal(self.make_rng("gen"), x.shape, dtype=self.dtype)
         z_t = (1.0 - t) * x + t * e
         z_r = (1.0 - r) * x + r * e

@@ -17,10 +17,31 @@ def is_discriminator_step(batch_step, warmup_batches=10_000, discriminator_steps
     return jnp.logical_or(batch_step < warmup_batches, in_discriminator_part)
 
 
+# Score-form ablation. d_t = D(z_t, t) is the anchor, d_end = D(z_r, r) or D(zhat_r, r).
+#   full      : (d_t - d_end) / (t - r)    (CAMF, Eq. 8; default)
+#   no_anchor : -d_end / (t - r)
+#   no_norm   : d_t - d_end
+#   endpoint  : -d_end                      (neither: a plain endpoint score)
+SCORE_MODES = ("full", "no_anchor", "no_norm", "endpoint")
+
+
+def interval_score(d_t, d_end, interval, score_mode="full"):
+    if score_mode == "full":
+        return (d_t - d_end) / interval
+    if score_mode == "no_anchor":
+        return -d_end / interval
+    if score_mode == "no_norm":
+        return d_t - d_end
+    if score_mode == "endpoint":
+        return -d_end
+    raise ValueError(f"Unknown score_mode: {score_mode!r}; expected one of {SCORE_MODES}")
+
+
 def finite_interval_logits(
     discriminator,
     discriminator_params,
     samples,
+    score_mode="full",
 ):
     """Evaluate real/fake finite differences of the discriminator potential."""
     x_t = samples["x_t"]
@@ -40,12 +61,12 @@ def finite_interval_logits(
     d_fake = discriminator.apply(
         {"params": discriminator_params}, xhat_r, r, r, t, labels
     )
-    real_logit = (d_t - d_r) / interval
-    fake_logit = (d_t - d_fake) / interval
+    real_logit = interval_score(d_t, d_r, interval, score_mode)
+    fake_logit = interval_score(d_t, d_fake, interval, score_mode)
     return real_logit, fake_logit, (d_t, d_r, d_fake)
 
 
-def finite_fake_logit(discriminator, discriminator_params, samples):
+def finite_fake_logit(discriminator, discriminator_params, samples, score_mode="full"):
     """Evaluate only the fake finite difference needed by a generator update."""
     t = samples["t"]
     r = samples["r"]
@@ -56,7 +77,7 @@ def finite_fake_logit(discriminator, discriminator_params, samples):
     d_fake = discriminator.apply(
         {"params": discriminator_params}, samples["xhat_r"], r, r, t, labels
     )
-    return (d_t - d_fake) / (t - r)
+    return interval_score(d_t, d_fake, t - r, score_mode)
 
 
 # Centering-penalty (CP) variants for the discriminator ablation. Each maps the
