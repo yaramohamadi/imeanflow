@@ -4,7 +4,7 @@
 # One job per free GPU in POOL (free = <3 GB for 3 polls); never grabs a busy GPU. EXP-372..376.
 set -uo pipefail
 M=/opt/dlami/nvme/meanflow/imeanflow; D=/opt/dlami/nvme/meanflow/datasets; F=$M/files/logs/finetuning; PY=$M/.venv/bin/python
-cd $M; LOG=$M/files/logs/sit_mft_nfe8_queue.log; POOL="${POOL:-0 1 2 3 4 5 6 7}"
+cd $M; LOG=$M/files/logs/sit_mft_nfe8_queue.log; POOL="${POOL:-0 4 6}"  # disjoint from sit_final_queue (1 2 3 5 7)
 declare -A NC=( [caltech101]=101 [artbench10]=10 [cub200]=200 [food101]=101 [stanfordcars]=196 )
 declare -A LAT=( [caltech101]=caltech-101_processed_latents [artbench10]=artbench-10_processed_latents [cub200]=cub-200-2011_processed_latents [food101]=food-101_processed_latents [stanfordcars]=stanford-cars_processed_latents )
 declare -A FID=( [caltech101]=caltech-101-fid_stats.npz [artbench10]=artbench-10_processed-fid_stats.npz [cub200]=cub-200-2011_processed-fid_stats.npz [food101]=food-101_processed-fid_stats.npz [stanfordcars]=stanford_cars_processed-fid_stats.npz )
