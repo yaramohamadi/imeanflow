@@ -22,7 +22,8 @@ wd=$F/${run}_resume_final; mkdir -p $wd
 log=$wd/resume.log
 awk '/FLAGS.config:/{f=1;next} f&&/^[IWE][0-9]{4} /{exit} f&&/^wandb:/{next} f' $src/output.log > $wd/orig_config.yml
 [ -s $wd/orig_config.yml ] || { echo "ERROR empty config dump" | tee -a $log; exit 1; }
-export CUDA_VISIBLE_DEVICES=$gpu XLA_PYTHON_CLIENT_PREALLOCATE=false TF_CPP_MIN_LOG_LEVEL=3 PYTHONWARNINGS=ignore
+# Default XLA preallocation, as the original runs: with PREALLOCATE=false the first train step OOMs (32.8 GB alloc).
+export CUDA_VISIBLE_DEVICES=$gpu TF_CPP_MIN_LOG_LEVEL=3 PYTHONWARNINGS=ignore
 echo "RESUME $best -> 40000 in $wd" | tee -a $log
 $PY main.py --workdir=$wd --config=configs/load_dump.py:$wd/orig_config.yml \
   --config.load_from=$best --config.partial_load=False \
