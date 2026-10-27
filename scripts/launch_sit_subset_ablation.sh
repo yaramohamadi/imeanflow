@@ -90,7 +90,7 @@ EOF
         ck=\$(ls -d \$ftdir/best_fid/checkpoint_* | sort -V | tail -1)
         [ -n \"\$ck\" ] || { echo 'ERROR no FT best_fid checkpoint' | tee -a $REPO/files/logs/subabl_ft_${tag}_${ds}.log; exit 1; }
         echo \"CONVERT \$ck -> $init\" | tee -a $REPO/files/logs/subabl_ft_${tag}_${ds}.log
-        CUDA_VISIBLE_DEVICES= $PY scripts/ft_sit_to_torch.py \$ck $init --check 2>&1 | tee -a $REPO/files/logs/subabl_ft_${tag}_${ds}.log
+        JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES= $PY scripts/ft_sit_to_torch.py \$ck $init --check 2>&1 | tee -a $REPO/files/logs/subabl_ft_${tag}_${ds}.log
         [ \${PIPESTATUS[0]} -eq 0 ] || { echo 'ERROR conversion failed' | tee -a $REPO/files/logs/subabl_ft_${tag}_${ds}.log; exit 1; }
         export LOAD_FROM=$init
         export USE_WANDB=True FINAL_EVAL_USE_WANDB=False RUN_FINAL_BEST_FID_EVAL=True FINAL_EVAL_STEPS='1 2 4 8'
