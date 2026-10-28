@@ -7,7 +7,7 @@
 set -uo pipefail
 M=/opt/dlami/nvme/meanflow/imeanflow; cd $M
 OUT=$M/files/debug/fig4a_redo10k; mkdir -p $OUT; LOG=$OUT/watcher.log
-FDD=/files/fdd_stats/imagenet256_adm_ref10k-fd_dino-vitb14_stats.npz
+FDD=/opt/dlami/nvme/meanflow/imeanflow/files/fdd_stats/imagenet256_adm_ref10k-fd_dino-vitb14_stats.npz
 [ -f "$FDD" ] || { echo "missing FDD stats $FDD" | tee -a $LOG; exit 1; }
 JOBS=(); for n in 250 64 32 16 8 4 2 1; do for m in p_sample native_velocity_data transport_velocity_diff2flow; do JOBS+=("$m:$n"); done; done
 declare -A STABLE=() CLAIMED=()
