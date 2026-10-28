@@ -8,6 +8,7 @@ PYTHON="${PYTHON:-python}"
 CONFIG_MODE="${CONFIG_MODE:-plain_dit_finetune}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-$REPO_ROOT/files/weights/DiT-XL-2-256x256.pt}"
 FID_CACHE_REF="${FID_CACHE_REF:-$REPO_ROOT/files/fid_stats/imagenet_256_fid_stats.npz}"
+FD_DINO_CACHE_REF="${FD_DINO_CACHE_REF:-}"   # empty = no FDD (old behaviour)
 WORKDIR_ROOT="${WORKDIR_ROOT:-$REPO_ROOT/files/debug/fid5k_plain_dit_modes_imagenet}"
 NUM_SAMPLES="${NUM_SAMPLES:-5000}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-16}"
@@ -39,7 +40,7 @@ fi
 mkdir -p "$WORKDIR_ROOT"
 SUMMARY_CSV="$WORKDIR_ROOT/summary.csv"
 if [[ ! -f "$SUMMARY_CSV" ]]; then
-  echo "mode,num_steps,fid,is,eval_metrics_csv,workdir,checkpoint_path,fid_cache_ref" > "$SUMMARY_CSV"
+  echo "mode,num_steps,fid,is,fd_dino,eval_metrics_csv,workdir,checkpoint_path,fid_cache_ref" > "$SUMMARY_CSV"
 fi
 
 run_eval() {
@@ -132,7 +133,7 @@ run_eval() {
       --config.model.num_classes=1000 \
       --config.sampling.num_classes=1000 \
       --config.fid.cache_ref="$FID_CACHE_REF" \
-      --config.fd_dino.cache_ref='' \
+      --config.fd_dino.cache_ref="${FD_DINO_CACHE_REF}" \
       --config.fid.num_samples="${NUM_SAMPLES}" \
       --config.fid.num_images_to_log=16 \
       --config.fid.device_batch_size="${DEVICE_BATCH_SIZE}" \
@@ -152,7 +153,8 @@ run_eval() {
   local is_score
   fid="$(echo "$metrics_line" | cut -d, -f8)"
   is_score="$(echo "$metrics_line" | cut -d, -f9)"
-  echo "${mode},${num_steps},${fid},${is_score},${eval_csv},${workdir},${CHECKPOINT_PATH},${FID_CACHE_REF}" >> "$SUMMARY_CSV"
+  local fdd; fdd="$(echo "$metrics_line" | cut -d, -f10)"
+  echo "${mode},${num_steps},${fid},${is_score},${fdd},${eval_csv},${workdir},${CHECKPOINT_PATH},${FID_CACHE_REF}" >> "$SUMMARY_CSV"
 }
 
 for mode in "${MODES[@]}"; do
