@@ -68,8 +68,9 @@ class SiTMeFTAdversarialFlow(iMeanFlow):
         }
 
     def forward_caimf_discriminator_samples(
-        self, images, labels, current_step=None, interval_eps=1e-3
+        self, images, labels, current_step=None, interval_eps=1e-3, interval_cap=1.0
     ):
+        _check_no_interval_cap(interval_cap)
         return self._sit_adversarial_samples(
             images, labels, current_step, interval_eps
         )
@@ -82,7 +83,9 @@ class SiTMeFTAdversarialFlow(iMeanFlow):
         teacher_params=None,
         current_step=None,
         interval_eps=1e-3,
+        interval_cap=1.0,
     ):
+        _check_no_interval_cap(interval_cap)
         terms = self._sit_adversarial_samples(
             images, labels, current_step, interval_eps
         )
@@ -102,6 +105,13 @@ class SiTMeFTAdversarialFlow(iMeanFlow):
             {"loss_imf": loss_imf, "loss_u": loss_u, "loss_v": loss_v}
         )
         return terms
+
+
+def _check_no_interval_cap(interval_cap):
+    # The interval-cap ablation (imf.sample_caimf_tr) is iMF-only; the SiT path samples its own
+    # (t, r) pairs, so only the uncapped default is supported here.
+    if float(interval_cap) != 1.0:
+        raise NotImplementedError("interval_cap < 1 is not implemented for SiT-MeFT CAMF.")
 
 
 def create_models(config, *, retention_weight=0.0):
