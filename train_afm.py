@@ -844,6 +844,23 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
         }
         best_fid = {step: float("inf") for step in metric_steps}
         best_fdd = {step: float("inf") for step in metric_steps}
+        # On resume, seed the running bests from this workdir's eval_metrics.csv, so the first post-resume eval
+        # cannot overwrite best_fid/ with a worse checkpoint. Fresh runs (no resume_from) are unchanged.
+        if str(config.afm.get("resume_from", "") or "").strip():
+            import csv as _csv
+            _prev = os.path.join(workdir, "eval_metrics.csv")
+            if os.path.exists(_prev):
+                with open(_prev) as _f:
+                    for _row in _csv.DictReader(_f):
+                        try:
+                            _n = int(_row["sampling_num_steps"])
+                        except (KeyError, ValueError):
+                            continue
+                        if _n in best_fid and _row.get("fid"):
+                            best_fid[_n] = min(best_fid[_n], float(_row["fid"]))
+                        if _n in best_fdd and _row.get("fd_dino"):
+                            best_fdd[_n] = min(best_fdd[_n], float(_row["fd_dino"]))
+                log_for_0("Resume: best FID seeded from %s: %s", _prev, best_fid)
         controllable = has_controllable_sampling_guidance(config.model)
         sample_kwargs = jax_utils.replicate(
             {
