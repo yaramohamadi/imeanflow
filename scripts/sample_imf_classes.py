@@ -13,7 +13,8 @@ import dataclasses
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# REPO selects whose imf.py / ckpt utils to use (JiT evals run from the main imeanflow clone).
+sys.path.insert(0, os.environ.get("REPO") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +33,7 @@ flags.DEFINE_integer("n_per_class", 4, "Samples per class.")
 flags.DEFINE_integer("num_steps", 4, "Sampling steps (NFE).")
 flags.DEFINE_integer("seed", 0, "Noise seed.")
 flags.DEFINE_string("out", None, "Output .npz path.")
+flags.DEFINE_bool("pixel", False, "Pixel-space model (JiT): no VAE decode.")
 
 
 def main(argv):
@@ -42,9 +44,13 @@ def main(argv):
     model_config = config.model.to_dict()
     valid = {f.name for f in dataclasses.fields(iMeanFlow)}
     model = iMeanFlow(**{k: v for k, v in model_config.items() if k in valid}, eval=True)
-    state = restore_eval_checkpoint(config.load_from, use_ema=True)
-    variable = {"params": state.ema_params}
-    print("restored step", int(state.step), "from", config.load_from)
+    # Same EMA/online choice as train.just_evaluate.
+    use_ema = bool(config.training.get("use_ema", True))
+    if config.training.get("fid_use_online_only", False):
+        use_ema = False
+    state = restore_eval_checkpoint(config.load_from, use_ema=use_ema)
+    variable = {"params": state.ema_params if use_ema else state.params}
+    print("restored step", int(state.step), "from", config.load_from, "ema" if use_ema else "online")
 
     img_size = config.dataset.image_size
     img_channels = config.dataset.image_channels
@@ -55,7 +61,9 @@ def main(argv):
         and model.target_output_prediction_space == "noise"
         and model.target_velocity_map_mode == "transport"
     ):
-        raise NotImplementedError("noise-space DMF students not supported here")
+        default_eps = max(float(model.target_wrapper_eps), 1e-3)
+        eps = float(config.sampling.get("target_transport_velocity_eps",
+                                        config.sampling.get("transport_velocity_eps", default_eps)))
     if model._uses_auxiliary_v_head() or bool(config.sampling.get("meanflow_reverse_time", False)):
         t_steps = jnp.linspace(1.0, eps, FLAGS.num_steps + 1)
     else:
@@ -70,14 +78,17 @@ def main(argv):
                                method=model.sample_one_step)
         return jax.lax.fori_loop(0, FLAGS.num_steps, step_fn, z)
 
-    lm = LatentManager(config.dataset.vae, n, img_size, decode_num_local_devices=1)
+    lm = None if FLAGS.pixel else LatentManager(config.dataset.vae, n, img_size, decode_num_local_devices=1)
     images = []
     for c in classes:
         z = jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(FLAGS.seed), c),
                               (n, img_size, img_size, img_channels), dtype=model.dtype)
         y = jnp.full((n,), c, dtype=jnp.int32)
-        lat = sample(variable, z, y).transpose(0, 3, 1, 2)
-        x = lm.decode(lat).transpose(0, 2, 3, 1)
+        out = sample(variable, z, y)
+        if FLAGS.pixel:
+            x = jnp.clip(out, -1.0, 1.0)  # PixelImageManager.decode
+        else:
+            x = lm.decode(out.transpose(0, 3, 1, 2)).transpose(0, 2, 3, 1)
         x = np.asarray(jnp.clip(127.5 * x + 128.0, 0, 255).astype(jnp.uint8))
         images.append(x)
         print("class", c, "done", x.shape)
